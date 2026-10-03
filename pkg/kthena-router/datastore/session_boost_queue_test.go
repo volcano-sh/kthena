@@ -19,6 +19,7 @@ package datastore
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -399,6 +400,105 @@ func TestSessionBoostQueue_BackpressureMode(t *testing.T) {
 	case <-req3.NotifyChan:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Timeout: req-3 should be dequeued after Release()")
+	}
+}
+
+// TestSessionBoostQueue_RecheckAdmitsHeldRequests covers a held request whose
+// backends free up without a further release or arrival: for example, the release
+// read a stale "busy" metrics snapshot, or a new backend pod became Ready. Only a
+// recheck can admit it, and the recheck must not wait out the grace period.
+func TestSessionBoostQueue_RecheckAdmitsHeldRequests(t *testing.T) {
+	tests := []struct {
+		name        string
+		gracePeriod time.Duration
+	}{
+		{name: "no grace period", gracePeriod: 0},
+		{name: "grace period does not delay recheck", gracePeriod: 10 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var hasCapacity atomic.Bool
+			checker := func() bool { return hasCapacity.Load() }
+
+			cfg := sessionBoostConfig()
+			cfg.SessionBoostGracePeriod = tt.gracePeriod
+			cfg.InflightPerPod = 4
+			q := newSessionBoostQueue(cfg, checker)
+			defer q.Close()
+
+			req := &Request{UserID: "u1", ModelName: "m", RequestTime: time.Now(), NotifyChan: make(chan struct{})}
+			if err := q.PushRequest(req); err != nil {
+				t.Fatalf("PushRequest failed: %v", err)
+			}
+
+			// Handle the arrival while backends report busy, as the dequeue loop
+			// would: the request is held.
+			<-q.notifyCh
+			q.tryBackpressureDequeue(context.Background())
+			select {
+			case <-req.NotifyChan:
+				t.Fatal("request should be held while backends are busy")
+			default:
+			}
+
+			// Backends free up, but no release or arrival follows.
+			hasCapacity.Store(true)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go q.Run(ctx, 0)
+
+			select {
+			case <-req.NotifyChan:
+				t.Fatal("request should stay held until something re-checks capacity")
+			case <-time.After(100 * time.Millisecond):
+			}
+
+			q.RecheckBackpressure()
+			select {
+			case <-req.NotifyChan:
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("Timeout: held request should be admitted after RecheckBackpressure()")
+			}
+		})
+	}
+}
+
+func TestSessionBoostQueue_RecheckBackpressureSignal(t *testing.T) {
+	tests := []struct {
+		name         string
+		sessionBoost bool
+		queued       int
+		calls        int
+		wantSignals  int
+	}{
+		{name: "empty queue is not signalled", sessionBoost: true, queued: 0, calls: 1, wantSignals: 0},
+		{name: "held requests are signalled", sessionBoost: true, queued: 1, calls: 1, wantSignals: 1},
+		{name: "redundant signals coalesce", sessionBoost: true, queued: 2, calls: 3, wantSignals: 1},
+		{name: "fairness queue is ignored", sessionBoost: false, queued: 1, calls: 1, wantSignals: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultFairnessQueueConfig()
+			cfg.SessionBoostEnabled = tt.sessionBoost
+			q := NewRequestPriorityQueueWithConfig(nil, cfg, nil, func() bool { return false })
+			defer q.Close()
+
+			for i := 0; i < tt.queued; i++ {
+				req := &Request{UserID: "u", ModelName: "m", RequestTime: time.Now(), NotifyChan: make(chan struct{})}
+				if err := q.PushRequest(req); err != nil {
+					t.Fatalf("PushRequest failed: %v", err)
+				}
+			}
+			for i := 0; i < tt.calls; i++ {
+				q.RecheckBackpressure()
+			}
+
+			if got := len(q.recheckCh); got != tt.wantSignals {
+				t.Errorf("Expected %d pending recheck signals, got %d", tt.wantSignals, got)
+			}
+		})
 	}
 }
 

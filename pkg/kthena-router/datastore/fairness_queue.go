@@ -234,6 +234,7 @@ type RequestPriorityQueue struct {
 	podCounter     PodCounter            // Optional; counts backend pods for inflight scaling
 	inflightCount  atomic.Int64          // In-flight requests in session-boost mode
 	releaseCh      chan struct{}         // Signals a permit release in session-boost mode
+	recheckCh      chan struct{}         // Signals refreshed backend state in session-boost mode
 }
 
 var _ heap.Interface = &RequestPriorityQueue{}
@@ -269,6 +270,7 @@ func NewRequestPriorityQueueWithConfig(metricsInstance *metrics.Metrics, cfg Fai
 		}
 		pq.sessionTracker = NewSessionTracker(maxSessions)
 		pq.releaseCh = make(chan struct{}, 1)
+		pq.recheckCh = make(chan struct{}, 1)
 		pq.backendChecker = checker
 	} else if cfg.MaxConcurrent > 0 {
 		pq.sem = make(chan struct{}, cfg.MaxConcurrent)

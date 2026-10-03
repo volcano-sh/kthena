@@ -192,11 +192,14 @@ func (pq *RequestPriorityQueue) admitSessionBoost(req *Request) bool {
 //  1. Inflight limit: at most InflightPerPod requests in flight per backend pod.
 //  2. Backend metrics check: at least one pod reports capacity available.
 //
-// The loop is fully event-driven: it reacts to releases and new arrivals. There
-// is no metrics-refresh signal or independent timer: in single-router operation
-// every moment backend capacity frees up coincides with one of our own requests
-// completing (a release), so releases and arrivals alone cover every dequeue
-// opportunity.
+// The loop is event-driven: it reacts to releases, new arrivals and backend
+// metrics refreshes. Releases and arrivals alone are not enough, because the
+// backend check reads scraped metrics rather than live backend state: when the
+// last request completes, the release can still observe a stale "busy" snapshot
+// and hold, and then no further release or arrival may ever come. Capacity can
+// also grow without a release, e.g. when a new backend pod becomes Ready. A
+// refresh signal (see RecheckBackpressure) re-evaluates held requests once fresh
+// metrics are in the store.
 //
 // Session Grace Period: when SessionBoostGracePeriod > 0, a release briefly holds
 // the freed slot (via waitGraceAndDequeue) so a same-session follow-up has time to
@@ -234,7 +237,32 @@ func (pq *RequestPriorityQueue) runSessionBoostMode(ctx context.Context) {
 			} else {
 				pq.tryBackpressureDequeue(ctx)
 			}
+		// Backend metrics were refreshed while requests were held. Re-check
+		// admission directly: this is not a freed slot, so there is nothing for
+		// the grace period to hold.
+		case <-pq.recheckCh:
+			pq.tryBackpressureDequeue(ctx)
 		}
+	}
+}
+
+// RecheckBackpressure asks the session-boost dequeue loop to re-evaluate held
+// requests after backend state may have changed, such as a completed metrics
+// scrape. It is non-blocking, coalesces redundant signals, and is a no-op when
+// the queue is empty or not in session-boost mode.
+func (pq *RequestPriorityQueue) RecheckBackpressure() {
+	if !pq.sessionBoost {
+		return
+	}
+	pq.mu.RLock()
+	held := len(pq.heap) > 0
+	pq.mu.RUnlock()
+	if !held {
+		return
+	}
+	select {
+	case pq.recheckCh <- struct{}{}:
+	default:
 	}
 }
 

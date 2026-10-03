@@ -637,6 +637,7 @@ func (s *store) Run(ctx context.Context) {
 			})
 			wg.Wait()
 			s.initialSynced.Store(true)
+			s.recheckSessionBoostQueues()
 			select {
 			case <-ctx.Done():
 				return
@@ -819,6 +820,22 @@ func (s *store) GetSessionIDHeader() string {
 		return ""
 	}
 	return s.fairnessQueueConfig.SessionIDHeader
+}
+
+// recheckSessionBoostQueues asks every session-boost queue that still holds
+// requests to re-evaluate admission against the metrics just scraped. All queues
+// are visited because queues are keyed by the requested model name, which need
+// not match the model name the backend pods serve.
+func (s *store) recheckSessionBoostQueues() {
+	if !s.fairnessQueueConfig.SessionBoostEnabled {
+		return
+	}
+	s.requestWaitingQueue.Range(func(_, value any) bool {
+		if queue, ok := value.(*RequestPriorityQueue); ok && queue != nil {
+			queue.RecheckBackpressure()
+		}
+		return true
+	})
 }
 
 func (s *store) GetRequestWaitingQueueStats() []QueueStat {

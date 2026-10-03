@@ -897,6 +897,45 @@ func TestStoreDeleteModelRoute(t *testing.T) {
 }
 
 // TestStoreDeleteModelRoute_RequestQueueCleanup specifically tests the cleanup of request queues
+func TestStoreRecheckSessionBoostQueues(t *testing.T) {
+	tests := []struct {
+		name         string
+		sessionBoost bool
+		wantHeld     int
+		wantEmpty    int
+	}{
+		{name: "session boost wakes only queues holding requests", sessionBoost: true, wantHeld: 1, wantEmpty: 0},
+		{name: "session boost disabled", sessionBoost: false, wantHeld: 0, wantEmpty: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultFairnessQueueConfig()
+			cfg.SessionBoostEnabled = true
+			busy := func() bool { return false }
+			// Queues are keyed by the requested model name, which here differs from
+			// any backend model name, so the recheck must not rely on that mapping.
+			held := NewRequestPriorityQueueWithConfig(nil, cfg, nil, busy)
+			empty := NewRequestPriorityQueueWithConfig(nil, cfg, nil, busy)
+			defer held.Close()
+			defer empty.Close()
+			err := held.PushRequest(&Request{UserID: "u", ModelName: "route-alias", RequestTime: time.Now(), NotifyChan: make(chan struct{})})
+			assert.NoError(t, err)
+
+			storeCfg := DefaultFairnessQueueConfig()
+			storeCfg.SessionBoostEnabled = tt.sessionBoost
+			s := &store{fairnessQueueConfig: storeCfg}
+			s.requestWaitingQueue.Store("route-alias", held)
+			s.requestWaitingQueue.Store("idle-model", empty)
+
+			s.recheckSessionBoostQueues()
+
+			assert.Equal(t, tt.wantHeld, len(held.recheckCh))
+			assert.Equal(t, tt.wantEmpty, len(empty.recheckCh))
+		})
+	}
+}
+
 func TestStoreDeleteModelRoute_RequestQueueCleanup(t *testing.T) {
 	s := &store{
 		routeInfo:           make(map[string]*modelRouteInfo),
