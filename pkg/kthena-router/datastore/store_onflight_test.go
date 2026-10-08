@@ -20,10 +20,12 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 )
@@ -166,4 +168,94 @@ func TestOnFlightPodNotInStore(t *testing.T) {
 	counted := s.IncrPodOnFlightRequests(types.NamespacedName{Namespace: "default", Name: "missing"})
 	assert.Nil(t, counted)
 	assert.NotPanics(t, func() { s.DecrPodOnFlightRequests(counted) })
+}
+
+// recreatingOnFlightCounter runs recreate in another goroutine during the first
+// Incr, to recreate the pod between IncrPodOnFlightRequests loading the
+// PodInfo and the Redis increment.
+type recreatingOnFlightCounter struct {
+	*fakeOnFlightCounter
+	once     sync.Once
+	recreate func()
+	done     chan struct{}
+}
+
+func (r *recreatingOnFlightCounter) Incr(ctx context.Context, podName types.NamespacedName) (int64, error) {
+	r.once.Do(func() {
+		go func() {
+			r.recreate()
+			close(r.done)
+		}()
+		// Without onFlightMu the recreate finishes here, before the increment.
+		// With it, DeletePod waits for Incr to return, so this always times out.
+		select {
+		case <-r.done:
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
+	return r.fakeOnFlightCounter.Incr(ctx, podName)
+}
+
+func TestOnFlightPodRecreatedDuringIncr(t *testing.T) {
+	s := newStore(&fakePodRuntimeInspector{})
+	ms := newTestModelServerWithPDGroup("test-model", "default")
+	servers := []*aiv1alpha1.ModelServer{ms}
+	pod := newTestPod("pod-0", "default", map[string]string{"app": ms.Name})
+	podName := types.NamespacedName{Namespace: "default", Name: "pod-0"}
+	require.NoError(t, s.AddOrUpdatePod(pod, servers))
+
+	counter := &recreatingOnFlightCounter{
+		fakeOnFlightCounter: newFakeOnFlightCounter(),
+		done:                make(chan struct{}),
+	}
+	counter.recreate = func() {
+		assert.NoError(t, s.DeletePod(podName))
+		assert.NoError(t, s.AddOrUpdatePod(pod, servers))
+	}
+	s.onFlightCounter = counter
+
+	counted := s.IncrPodOnFlightRequests(podName)
+	require.NotNil(t, counted)
+	<-counter.done
+	current := s.GetPodInfo(podName)
+	require.NotNil(t, current)
+	require.NotSame(t, counted, current, "the pod should have a new PodInfo")
+
+	// The request finishes. Nothing was sent to the new PodInfo.
+	s.DecrPodOnFlightRequests(counted)
+
+	v, _ := counter.get(podName)
+	assert.Equal(t, int64(0), v, "the request must not be left on the new pod's Redis key")
+	s.SyncOnFlightCounts()
+	assert.Equal(t, int64(0), current.GetOnFlightRequestNum())
+}
+
+func TestOnFlightDecrAfterModelServerDeleted(t *testing.T) {
+	s := newStore(&fakePodRuntimeInspector{})
+	counter := newFakeOnFlightCounter()
+	s.onFlightCounter = counter
+	ms := newTestModelServerWithPDGroup("test-model", "default")
+	servers := []*aiv1alpha1.ModelServer{ms}
+	msName := types.NamespacedName{Namespace: ms.Namespace, Name: ms.Name}
+	pod := newTestPod("pod-0", "default", map[string]string{"app": ms.Name})
+	podName := types.NamespacedName{Namespace: "default", Name: "pod-0"}
+	require.NoError(t, s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]()))
+	require.NoError(t, s.AddOrUpdatePod(pod, servers))
+
+	old := s.IncrPodOnFlightRequests(podName)
+	require.NotNil(t, old)
+
+	// The pod's only ModelServer is deleted, which removes the pod from the
+	// store, and then both come back while the request is still running.
+	require.NoError(t, s.DeleteModelServer(msName))
+	require.Nil(t, s.GetPodInfo(podName))
+	require.NoError(t, s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]()))
+	require.NoError(t, s.AddOrUpdatePod(pod, servers))
+	require.NotSame(t, old, s.GetPodInfo(podName), "the pod should have a new PodInfo")
+
+	// The old request finishes and must leave the shared Redis key alone.
+	before, _ := counter.get(podName)
+	s.DecrPodOnFlightRequests(old)
+	after, _ := counter.get(podName)
+	assert.Equal(t, before, after, "the old PodInfo must not change the Redis counter")
 }

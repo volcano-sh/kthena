@@ -352,6 +352,11 @@ type PodInfo struct {
 	// When a Redis-backed OnFlightCounter is configured on the store this field is also
 	// kept in sync with the global Redis counter so it reflects cross-router traffic.
 	onFlightRequestNum atomic.Int64
+	// onFlightMu orders on-flight Redis updates against the pod's deletion.
+	// Incr/Decr hold it for reading; DeletePod and DeleteModelServer hold it
+	// for writing when they remove the pod from the store.
+	onFlightMu sync.RWMutex
+	deleted    bool // set under onFlightMu when the pod is removed from the store
 
 	mutex sync.RWMutex // Protects concurrent access to Pod, engine, metrics, models and modelServer fields
 	// Protected fields - use accessor methods for thread-safe access
@@ -879,24 +884,40 @@ func (s *store) GetPodInfo(podName types.NamespacedName) *PodInfo {
 // Redis and the returned global value is stored locally; otherwise the local
 // atomic counter is incremented directly.
 func (s *store) IncrPodOnFlightRequests(podName types.NamespacedName) *PodInfo {
-	value, ok := s.pods.Load(podName)
-	if !ok {
-		klog.V(4).Infof("IncrPodOnFlightRequests: pod %s not found in store", podName)
-		return nil
+	for {
+		value, ok := s.pods.Load(podName)
+		if !ok {
+			klog.V(4).Infof("IncrPodOnFlightRequests: pod %s not found in store", podName)
+			return nil
+		}
+		podInfo := value.(*PodInfo)
+		if s.incrOnFlight(podName, podInfo) {
+			return podInfo
+		}
 	}
-	podInfo := value.(*PodInfo)
+}
+
+// incrOnFlight increments the in-flight counter of podInfo unless the pod has
+// been removed from the store. It holds onFlightMu for reading so the Redis
+// increment cannot interleave with the pod's removal and its Redis key deletion.
+func (s *store) incrOnFlight(podName types.NamespacedName, podInfo *PodInfo) bool {
+	podInfo.onFlightMu.RLock()
+	defer podInfo.onFlightMu.RUnlock()
+	if podInfo.deleted {
+		return false
+	}
 	if s.onFlightCounter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		if count, err := s.onFlightCounter.Incr(ctx, podName); err == nil {
 			podInfo.SetOnFlightRequestNum(count)
-			return podInfo
+			return true
 		} else {
 			klog.V(4).Infof("Redis on-flight incr failed for pod %s: %v, falling back to local counter", podName, err)
 		}
 	}
 	podInfo.IncrOnFlightRequests()
-	return podInfo
+	return true
 }
 
 // DecrPodOnFlightRequests decrements the in-flight counter of the PodInfo that
@@ -907,16 +928,19 @@ func (s *store) DecrPodOnFlightRequests(podInfo *PodInfo) {
 	}
 	podName := podInfo.GetPodNamespacedName()
 
-	// The pod may have been deleted and re-added since the request was sent.
-	// Then podInfo is the old object: only decrement its own counter. The
-	// Redis key is shared by name and was already deleted with the old pod,
-	// so it must not be touched.
-	if current, ok := s.pods.Load(podName); !ok || current.(*PodInfo) != podInfo {
+	podInfo.onFlightMu.RLock()
+	defer podInfo.onFlightMu.RUnlock()
+
+	// DeletePod sets deleted under onFlightMu, so this check and the Redis
+	// update below cannot interleave with the pod's deletion. A deleted
+	// podInfo is an old object: its Redis key was removed with it and may
+	// already belong to a re-added pod, so only decrement its own counter.
+	if podInfo.deleted {
 		podInfo.DecrOnFlightRequests()
 		return
 	}
 
-	// podInfo is still the current object: same as before.
+	// podInfo has not been deleted: same as before.
 	if s.onFlightCounter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
@@ -994,7 +1018,10 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 			podInfo := value.(*PodInfo)
 			podInfo.RemoveModelServer(ms)
 			if podInfo.GetModelServerCount() == 0 {
+				podInfo.onFlightMu.Lock()
+				podInfo.deleted = true
 				s.pods.Delete(podName)
+				podInfo.onFlightMu.Unlock()
 				podRemoved = true
 				// Dispatched after the removal, as DeletePod does.
 				s.triggerCallbacks("Pod", EventData{
@@ -1266,10 +1293,9 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 				klog.V(4).Infof("model server %s not found for pod %s, maybe already deleted", modelServerName, podName)
 			}
 		}
+		pod.onFlightMu.Lock()
+		pod.deleted = true
 		s.pods.Delete(podName)
-		// Removing the last pod serving a model changes the checker's answer
-		// (no pods -> allow), and no later scrape will signal it.
-		s.recheckSessionBoostQueues()
 		// Remove the pod's Redis counter so stale keys do not accumulate.
 		if s.onFlightCounter != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -1278,6 +1304,11 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 				klog.V(4).Infof("failed to delete Redis on-flight counter for pod %s: %v", podName, err)
 			}
 		}
+		pod.onFlightMu.Unlock()
+		// Removing the last pod serving a model changes the checker's answer
+		// (no pods -> allow), and no later scrape will signal it. Called
+		// after releasing onFlightMu so the checker never runs under it.
+		s.recheckSessionBoostQueues()
 	}
 
 	s.triggerCallbacks("Pod", EventData{
