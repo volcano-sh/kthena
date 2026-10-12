@@ -105,8 +105,10 @@ func (collector *MetricCollector) UpdateMetrics(
 	ctx context.Context,
 	podLister listerv1.PodLister,
 	targetMetricSources map[string]v1alpha1.MetricSource,
-) (unreadyInstancesCount int32, readyInstancesMetric algorithm.Metrics, externalMetrics algorithm.Metrics, err error) {
+) (unreadyInstancesCount int32, metricUnreadyCounts map[string]int32, readyInstancesMetric algorithm.Metrics, metricReporterCounts algorithm.ReporterCounts, externalMetrics algorithm.Metrics, err error) {
+	metricUnreadyCounts = make(map[string]int32)
 	readyInstancesMetric = make(algorithm.Metrics)
+	metricReporterCounts = make(algorithm.ReporterCounts)
 
 	pastHistograms, ok := collector.PastHistograms.GetLastUnfreshSnapshot()
 	if !ok {
@@ -122,7 +124,7 @@ func (collector *MetricCollector) UpdateMetrics(
 	podGroups, externalMetrics := collector.planMetricSources(ctx, targetMetricSources)
 
 	for _, g := range podGroups {
-		values, groupUnreadyPods, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
+		values, reporterCounts, groupUnreadyPods, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
 		if collectErr != nil {
 			klog.Warningf("collect pod metrics for target %s failed: %v", collector.Target.TargetRef.Name, collectErr)
 			continue
@@ -134,8 +136,14 @@ func (collector *MetricCollector) UpdateMetrics(
 		for podKey := range groupUnreadyPods {
 			unreadyPods.Insert(podKey)
 		}
+		for _, spec := range g.specs {
+			metricUnreadyCounts[spec.policyKey] = int32(groupUnreadyPods.Len())
+		}
 		for policyKey, v := range values {
 			readyInstancesMetric[policyKey] = v
+		}
+		for policyKey, count := range reporterCounts {
+			metricReporterCounts[policyKey] += count
 		}
 	}
 
@@ -237,14 +245,15 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	specs []podMetricSpec,
 	pastHistograms map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
-) (values map[string]float64, unreadyPods sets.Set[string], failed bool, err error) {
+) (values map[string]float64, reporterCounts algorithm.ReporterCounts, unreadyPods sets.Set[string], failed bool, err error) {
 	values = make(map[string]float64, len(specs))
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
+	reporterCounts = make(algorithm.ReporterCounts, len(specs))
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, nil, false, err
 	}
 	if len(pods) == 0 {
-		return nil, nil, false, fmt.Errorf("pod list is empty")
+		return nil, nil, nil, false, fmt.Errorf("pod list is empty")
 	}
 
 	unreadyPods, failed = evaluatePodsReadiness(pods)
@@ -259,8 +268,8 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 		if !inferControllerUtils.IsPodRunningAndReady(pod) {
 			continue
 		}
-		if err = collector.collectPodMetrics(ctx, pod, podSource, wanted, values, pastHistograms, currentHistograms); err != nil {
-			return nil, nil, false, err
+		if err = collector.collectPodMetrics(ctx, pod, podSource, wanted, values, pastHistograms, currentHistograms, reporterCounts); err != nil {
+			return nil, nil, nil, false, err
 		}
 	}
 	return
@@ -307,6 +316,7 @@ func (collector *MetricCollector) collectPodMetrics(
 	values map[string]float64,
 	pastHistograms map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
+	reporterCounts algorithm.ReporterCounts,
 ) error {
 	pastHistogramMap := pastHistogramMapForPod(pod, pastHistograms)
 
@@ -337,6 +347,7 @@ func (collector *MetricCollector) collectPodMetrics(
 			}
 			if gotValue {
 				values[policyKey] += v
+				reporterCounts[policyKey]++
 			}
 			if snapshot != nil {
 				currentHistogramMap[policyKey] = snapshot
