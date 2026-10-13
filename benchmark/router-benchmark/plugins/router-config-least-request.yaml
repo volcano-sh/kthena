@@ -1,0 +1,23 @@
+# Router scheduler config — Least Request
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kthena-router-config
+  namespace: kthena-system
+data:
+  routerConfiguration: |
+    scheduler:
+      pluginConfig:
+        - name: least-request
+          args:
+            maxWaitingRequests: 10
+      plugins:
+        Filter:
+          enabled:
+            - least-request
+          disabled:
+            - lora-affinity
+        Score:
+          enabled:
+            - name: least-request
+              weight: 1
