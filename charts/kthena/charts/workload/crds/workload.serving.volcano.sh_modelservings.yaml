@@ -168,6 +168,15 @@ spec:
                     required:
                     - protectionLevel
                     type: object
+                  progressDeadlineSeconds:
+                    description: |-
+                      ProgressDeadlineSeconds is the maximum time, after its images are patched,
+                      for an in-place updated unit to run and become ready on the target image
+                      before the update is reported as failed. It is only valid when
+                      updateMethod is InPlace. Defaults to 1800 seconds.
+                    format: int32
+                    minimum: 60
+                    type: integer
                   rollingUpdateConfiguration:
                     description: |-
                       RollingUpdateConfiguration configures ServingGroupRollingUpdate.
@@ -228,6 +237,22 @@ spec:
                     enum:
                     - ServingGroupRollingUpdate
                     - RoleRollingUpdate
+                    type: string
+                  updateMethod:
+                    description: |-
+                      UpdateMethod selects how outdated ServingGroups or Roles are moved to the
+                      desired revision. Supported values are Recreate and InPlace. An empty
+                      value means Recreate.
+
+                      InPlace patches container images on existing Pods. While it is in effect,
+                      only regular-container images and the documented scaling and rollout
+                      fields may change: spec.replicas, Role replicas, rolloutStrategy, Role
+                      rolling update settings, recoveryPolicy, revisionHistoryLimit, and
+                      template.restartGracePeriodSeconds. InPlace is not supported yet and is
+                      rejected by admission.
+                    enum:
+                    - Recreate
+                    - InPlace
                     type: string
                 required:
                 - type

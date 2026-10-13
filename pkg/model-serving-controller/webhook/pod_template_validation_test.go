@@ -48,7 +48,7 @@ func TestModelBoosterGeneratedPodTemplates(t *testing.T) {
 					assert.Nil(t, role.WorkerTemplate, "role %s must omit its unused worker template", role.Name)
 				}
 			}
-			allowed, reason := NewModelServingValidator().validateModelServing(ms)
+			allowed, reason := NewModelServingValidator().validateModelServing(nil, ms)
 			assert.True(t, allowed, reason)
 		})
 	}
@@ -236,7 +236,7 @@ func TestValidatePodTemplates(t *testing.T) {
 				before := ms.DeepCopy()
 				errs := validatePodTemplates(ms)
 				assert.Equal(t, before, ms, "validation must not mutate the submitted object")
-				allowed, reason := NewModelServingValidator().validateModelServing(ms)
+				allowed, reason := NewModelServingValidator().validateModelServing(nil, ms)
 				if tt.wantField == "" {
 					assert.Empty(t, errs)
 					assert.True(t, allowed, reason)

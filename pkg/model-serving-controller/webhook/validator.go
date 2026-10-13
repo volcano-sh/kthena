@@ -17,6 +17,7 @@ limitations under the License.
 package webhook
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -52,8 +53,18 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var oldModelServing *workloadv1alpha1.ModelServing
+	if admissionReview.Request.Operation == admissionv1.Update && len(admissionReview.Request.OldObject.Raw) > 0 {
+		oldModelServing = &workloadv1alpha1.ModelServing{}
+		if err := json.Unmarshal(admissionReview.Request.OldObject.Raw, oldModelServing); err != nil {
+			klog.Errorf("Failed to decode old modelServing: %v", err)
+			http.Error(w, fmt.Sprintf("failed to decode old modelServing: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Validate the ModelServing
-	allowed, reason := v.validateModelServing(modelServing)
+	allowed, reason := v.validateModelServing(oldModelServing, modelServing)
 
 	// Create the admission response
 	admissionResponse := admissionv1.AdmissionResponse{
@@ -78,8 +89,9 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// validateModelServing validates the ModelServing resource
-func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alpha1.ModelServing) (bool, string) {
+// validateModelServing validates the ModelServing resource.
+// oldModelServing is nil on create.
+func (v *ModelServingValidator) validateModelServing(oldModelServing, modelServing *workloadv1alpha1.ModelServing) (bool, string) {
 	var allErrs field.ErrorList
 
 	allErrs = append(allErrs, validGeneratedNameLength(modelServing)...)
@@ -93,6 +105,10 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
 	allErrs = append(allErrs, validateEvictionStrategy(modelServing)...)
+	allErrs = append(allErrs, validateUpdateMethod(modelServing)...)
+	if oldModelServing != nil {
+		allErrs = append(allErrs, validateInPlaceUpdate(oldModelServing, modelServing)...)
+	}
 
 	if len(allErrs) > 0 {
 		var messages []string

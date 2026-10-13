@@ -1029,6 +1029,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type selects the granularity of rolling updates. Supported values are<br />ServingGroupRollingUpdate and RoleRollingUpdate. It defaults to<br />ServingGroupRollingUpdate.<br />ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;<br />rolling update settings on individual Roles do not take effect.<br />RoleRollingUpdate uses the rolling update configuration on each Role;<br />rolloutStrategy.rollingUpdateConfiguration must not be set.<br />Kthena performs RoleRollingUpdate across all ServingGroups at the same time.<br />Therefore, we recommend using it only in scenarios with a single ServingGroup. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
+| `updateMethod` _[UpdateMethod](#updatemethod)_ | UpdateMethod selects how outdated ServingGroups or Roles are moved to the<br />desired revision. Supported values are Recreate and InPlace. An empty<br />value means Recreate.<br />InPlace patches container images on existing Pods. While it is in effect,<br />only regular-container images and the documented scaling and rollout<br />fields may change: spec.replicas, Role replicas, rolloutStrategy, Role<br />rolling update settings, recoveryPolicy, revisionHistoryLimit, and<br />template.restartGracePeriodSeconds. InPlace is not supported yet and is<br />rejected by admission. |  | Enum: [Recreate InPlace] <br /> |
+| `progressDeadlineSeconds` _integer_ | ProgressDeadlineSeconds is the maximum time, after its images are patched,<br />for an in-place updated unit to run and become ready on the target image<br />before the update is reported as failed. It is only valid when<br />updateMethod is InPlace. Defaults to 1800 seconds. |  | Minimum: 60 <br /> |
 | `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration configures ServingGroupRollingUpdate.<br />It must not be set when type is RoleRollingUpdate; configure maxUnavailable<br />maxSurge, and partition on each Role instead. |  |  |
 | `evictionStrategy` _[EvictionStrategySpec](#evictionstrategyspec)_ | EvictionStrategy defines the protection policy during node eviction. |  |  |
 
@@ -1139,5 +1141,22 @@ _Appears in:_
 | `currentReplicas` _integer_ | CurrentReplicas is the number of replicas currently observed. |  |  |
 | `desiredReplicas` _integer_ | DesiredReplicas is the number of replicas the controller computed from<br />metrics, before ratio enforcement. |  |  |
 | `mode` _string_ | Mode reports whether the unit is currently in "Stable" or "Panic" mode. |  |  |
+
+
+#### UpdateMethod
+
+_Underlying type:_ _string_
+
+UpdateMethod defines how outdated Pods are moved to the desired revision.
+
+
+
+_Appears in:_
+- [RolloutStrategy](#rolloutstrategy)
+
+| Field | Description |
+| --- | --- |
+| `Recreate` | RecreateUpdateMethod deletes outdated Pods and creates new ones.<br /> |
+| `InPlace` | InPlaceUpdateMethod patches container images on existing Pods.<br /> |
 
 
