@@ -2364,7 +2364,7 @@ func TestScaleUpServingGroups(t *testing.T) {
 			}
 
 			// Call scaleUpServingGroups directly (not through syncModelServing)
-			err = controller.scaleUpServingGroups(context.Background(), ms, existingGroups, tt.expectedCount, "new-revision")
+			err = controller.scaleUpServingGroups(context.Background(), ms, existingGroups, tt.expectedCount, "new-revision", nil)
 			assert.NoError(t, err)
 
 			// Verify the results
@@ -2438,7 +2438,7 @@ func TestScaleUpServingGroupsStopsWhenControllerRevisionCreationFails(t *testing
 		},
 	}
 
-	err = controller.scaleUpServingGroups(context.Background(), ms, nil, 1, "new-revision")
+	err = controller.scaleUpServingGroups(context.Background(), ms, nil, 1, "new-revision", nil)
 	require.ErrorContains(t, err, "failed to create ControllerRevision for new revision new-revision")
 
 	// The ControllerRevision must be created before Pods or datastore state. This
@@ -2601,7 +2601,7 @@ func TestScaleUpRoles(t *testing.T) {
 			targetRole := ms.Spec.Template.Roles[0]
 
 			// Call scaleUpRoles directly
-			controller.scaleUpRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount, 0, "new-revision")
+			controller.scaleUpRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount, 0, "new-revision", nil)
 
 			// Verify the results
 			roles, err := controller.store.GetRoleList(nsn, groupName, "prefill")
@@ -2716,7 +2716,7 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 	controller.store.AddServingGroup(utils.GetNamespaceName(ms), groupOrdinal, oldRevision)
 	controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, 0), oldRevision, "roleTemplateHash")
 
-	err = controller.syncRoleReplicas(context.Background(), ms, newRevision)
+	err = controller.syncRoleReplicas(context.Background(), ms, newRevision, nil)
 	assert.NoError(t, err)
 
 	roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
@@ -2866,7 +2866,7 @@ func TestManageRoleReplicas(t *testing.T) {
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
 			}
 
-			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision, nil)
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
@@ -2937,7 +2937,7 @@ func TestManageRoleReplicasUsesMaxSurgeDuringRoleRollingUpdate(t *testing.T) {
 		controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", ordinal), "old-revision", "old-hash")
 	}
 
-	controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision")
+	controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision", nil)
 
 	roles, err := controller.store.GetRoleList(key, groupName, "decode")
 	require.NoError(t, err)
@@ -3844,7 +3844,7 @@ func TestModelServingVersionControl(t *testing.T) {
 
 			// Call scaleUpServingGroups directly to test its behavior
 			newRevision := "revision-v2"
-			err = controller.scaleUpServingGroups(context.Background(), ms, existingGroupsList, int(tt.scaleUpTo), newRevision)
+			err = controller.scaleUpServingGroups(context.Background(), ms, existingGroupsList, int(tt.scaleUpTo), newRevision, nil)
 			assert.NoError(t, err)
 
 			// Verify created/recreated groups have correct revisions
@@ -4020,7 +4020,7 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 			}
 
 			newRevision := "revision-v2"
-			err = controller.scaleUpServingGroups(ctx, ms, existingGroups, int(tt.partition), newRevision)
+			err = controller.scaleUpServingGroups(ctx, ms, existingGroups, int(tt.partition), newRevision, nil)
 			if tt.wantError {
 				assert.ErrorContains(t, err, "was not found")
 				return
@@ -7614,7 +7614,7 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
 	require.Len(t, groups, 2, "rolling update waits for replica sync to create surge capacity")
 
-	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision", nil))
 
 	groups, err = controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
@@ -7639,7 +7639,7 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, groups, 2)
 	assert.Equal(t, surgeName, groups[1].Name)
-	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision", nil))
 	require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 1), datastore.ServingGroupRunning))
 
 	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
@@ -7647,7 +7647,7 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 	// Once all remaining groups use the new revision, replica synchronization
 	// derives the normal desired count. The high ordinal remains a normal replica
 	// rather than being identified and removed as a surge group.
-	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision", nil))
 	groups, err = controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
 	require.Len(t, groups, 2)
@@ -7891,7 +7891,7 @@ func TestSyncServingGroupReplicasPreservesSparseOrdinals(t *testing.T) {
 	}
 	// Binpack scale-down can leave sparse ordinals. Replica synchronization is
 	// count based and must not delete or replace the high ordinal.
-	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new"))
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new", nil))
 	groups, err := controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
 	require.Len(t, groups, 2)
@@ -7924,7 +7924,7 @@ func TestServingGroupUpdateCreatesSurgeWithoutStoredPhase(t *testing.T) {
 		controller.store.AddServingGroup(key, ordinal, "old")
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
 	}
-	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new"))
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new", nil))
 	groups, err := controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
 	require.Len(t, groups, 3)
@@ -8009,7 +8009,7 @@ func TestSyncServingGroupReplicasHonorsReducedMaxSurge(t *testing.T) {
 		}
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), status))
 	}
-	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new"))
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new", nil))
 	groups, err := controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
 	require.Len(t, groups, 2)

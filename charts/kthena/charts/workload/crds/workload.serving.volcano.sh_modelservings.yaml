@@ -56,6 +56,85 @@ spec:
             description: ModelServingSpec defines the specification of the ModelServing
               resource.
             properties:
+              bootstrapAccelerateStrategy:
+                description: |-
+                  BootstrapAccelerateStrategy creates role replicas in source-aware batches
+                  for peer-to-peer model weight loading. If unset, creation is unchanged.
+                properties:
+                  modelExpress:
+                    description: |-
+                      ModelExpress configures environment injection for inference engines.
+                      If unset, users configure the engine environment themselves.
+                    properties:
+                      engineContainers:
+                        description: |-
+                          EngineContainers names regular inference-engine containers in entry and
+                          worker Pods of in-scope roles. Sidecars and init containers are not selected.
+                        items:
+                          minLength: 1
+                          type: string
+                        minItems: 1
+                        type: array
+                        x-kubernetes-list-type: set
+                      readyURL:
+                        description: |-
+                          ReadyURL is the engine endpoint that ModelExpress polls before a source
+                          publishes its metadata; it may differ from the Pod readiness probe.
+                          It is injected as MX_ARTIFACT_READY_URL only if that variable is not already
+                          set in the selected container. If empty, ModelExpress uses the engine default.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: readyURL must be an absolute http or https URL
+                          rule: self == '' || (isURL(self) && url(self).getScheme()
+                            in ['http', 'https'])
+                      serverAddress:
+                        description: |-
+                          ServerAddress is the ModelExpress server's gRPC address (host:port).
+                          It is injected as MX_SERVER_ADDRESS only if that variable is not already
+                          set in the selected container. If empty, users supply the endpoint themselves.
+                        type: string
+                    required:
+                    - engineContainers
+                    type: object
+                  provider:
+                    default: ModelExpress
+                    description: Provider is the weight transfer system used by the
+                      inference engines.
+                    enum:
+                    - ModelExpress
+                    type: string
+                  roles:
+                    description: Roles limits acceleration to the named roles. Empty
+                      means all roles.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  seedReplicas:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 1
+                    description: |-
+                      SeedReplicas limits role replicas created per pool while no ready source
+                      exists. It is a positive integer or a percentage from 1% to 100% of
+                      spec.replicas * role.replicas, rounded up (10% of 3 is 1).
+                      The effective budget is at least the role's gang minimum in one ServingGroup.
+                      A desired count of zero creates nothing.
+                    x-kubernetes-int-or-string: true
+                    x-kubernetes-validations:
+                    - message: seedReplicas must be a positive integer or a percentage
+                        from 1% to 100%
+                      rule: 'type(self) == int ? self >= 1 : self.matches(''^([1-9]|[1-9][0-9]|100)%$'')'
+                  sourceFanOut:
+                    default: 1
+                    description: |-
+                      SourceFanOut limits starting role replicas per ready replica in the same
+                      pool. The effective budget is at least the role's gang minimum.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
               plugins:
                 description: Plugins defines optional plugin chain to customize serving
                   pods.

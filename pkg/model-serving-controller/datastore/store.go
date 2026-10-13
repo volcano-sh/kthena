@@ -47,6 +47,10 @@ type Store interface {
 	AddRunningPodToServingGroup(modelServingName types.NamespacedName, groupName, pod, revision, roleTemplateHash, roleName, roleID string)
 	// AddServingGroupAndRole adds servingGroup and role if not exist
 	AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleTemplateHash, roleName, roleID string)
+	// ObserveRoleBootstrapConfigHash records the bootstrap-configuration hash of one Pod of an existing role.
+	ObserveRoleBootstrapConfigHash(modelServingName types.NamespacedName, groupName, roleName, roleID, podName, hash string)
+	// ForgetRoleBootstrapConfigHash drops the bootstrap-configuration hash of a deleted Pod of a role.
+	ForgetRoleBootstrapConfigHash(modelServingName types.NamespacedName, groupName, roleName, roleID, podName string)
 	DeleteRunningPodFromServingGroup(modelServingName types.NamespacedName, groupName string, pod string)
 	UpdateServingGroupStatus(modelServingName types.NamespacedName, groupName string, Status ServingGroupStatus) error
 	UpdateServingGroupRevision(modelServingName types.NamespacedName, groupName string, revision string) error
@@ -75,6 +79,11 @@ type Role struct {
 	Revision         string // Revision of the ServingGroup
 	RoleTemplateHash string // Revision of the Role, used for RoleRollingUpdate strategy
 	Status           RoleStatus
+	// BootstrapConfigHash is the bootstrap-configuration hash shared by all observed Pods of the role.
+	// It is empty when any Pod lacks the hash or the Pods disagree.
+	BootstrapConfigHash string
+	// podBootstrapConfigHashes maps the name of each observed Pod of the role to its hash.
+	podBootstrapConfigHashes map[string]string
 }
 
 type ServingGroupStatus string
@@ -458,6 +467,57 @@ func (s *store) AddServingGroupAndRole(modelServingName types.NamespacedName, se
 		}
 		group.roles[roleName][roleID] = role
 	}
+}
+
+// ObserveRoleBootstrapConfigHash records the bootstrap-configuration hash of one Pod
+// of an existing role and recomputes the role hash from the current Pod set.
+func (s *store) ObserveRoleBootstrapConfigHash(modelServingName types.NamespacedName, groupName, roleName, roleID, podName, hash string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	role := s.getRoleLocked(modelServingName, groupName, roleName, roleID)
+	if role == nil {
+		return
+	}
+	if role.podBootstrapConfigHashes == nil {
+		role.podBootstrapConfigHashes = make(map[string]string)
+	}
+	role.podBootstrapConfigHashes[podName] = hash
+	role.recomputeBootstrapConfigHash()
+}
+
+// ForgetRoleBootstrapConfigHash drops the hash of a deleted Pod and recomputes the role hash.
+func (s *store) ForgetRoleBootstrapConfigHash(modelServingName types.NamespacedName, groupName, roleName, roleID, podName string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	role := s.getRoleLocked(modelServingName, groupName, roleName, roleID)
+	if role == nil {
+		return
+	}
+	delete(role.podBootstrapConfigHashes, podName)
+	role.recomputeBootstrapConfigHash()
+}
+
+func (s *store) getRoleLocked(modelServingName types.NamespacedName, groupName, roleName, roleID string) *Role {
+	group, ok := s.servingGroup[modelServingName][groupName]
+	if !ok {
+		return nil
+	}
+	return group.roles[roleName][roleID]
+}
+
+// recomputeBootstrapConfigHash sets the role hash only when all observed Pods share one non-empty hash.
+func (r *Role) recomputeBootstrapConfigHash() {
+	common := ""
+	for _, hash := range r.podBootstrapConfigHashes {
+		if hash == "" || (common != "" && hash != common) {
+			r.BootstrapConfigHash = ""
+			return
+		}
+		common = hash
+	}
+	r.BootstrapConfigHash = common
 }
 
 // DeleteRunningPodFromServingGroup delete runningPod in map

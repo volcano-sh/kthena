@@ -1,0 +1,45 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: bootstrap-acceleration
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 8  # servingGroup replicas
+  bootstrapAccelerateStrategy:
+    # Batches grow as 1 -> 3 -> 8 role replicas: one cold load from storage,
+    # then up to 2 new replicas per ready replica, loading weights P2P.
+    seedReplicas: 1
+    sourceFanOut: 2
+    modelExpress:
+      engineContainers: ["engine"]
+      # gRPC address of a ModelExpress server deployed separately.
+      serverAddress: modelexpress-server.modelexpress:8001
+      readyURL: http://127.0.0.1:8000/health
+  template:
+    roles:
+      - name: engine
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: engine
+                # Use a vLLM >= 0.23 image with ModelExpress installed.
+                image: vllm/vllm-openai:latest
+                args:
+                  - --model
+                  - Qwen/Qwen3-8B
+                  - --load-format
+                  - modelexpress
+                ports:
+                  - containerPort: 8000
+                # Readiness must imply that the weights are loaded.
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  periodSeconds: 10
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+        workerReplicas: 0

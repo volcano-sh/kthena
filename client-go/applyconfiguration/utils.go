@@ -104,6 +104,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyStablePolicyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyStatus"):
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyStatusApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("BootstrapAccelerateStrategy"):
+		return &applyconfigurationworkloadv1alpha1.BootstrapAccelerateStrategyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("DisaggregatedScalingStatus"):
 		return &applyconfigurationworkloadv1alpha1.DisaggregatedScalingStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("DisaggregatedTarget"):
@@ -126,6 +128,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.ModelBoosterApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelBoosterSpec"):
 		return &applyconfigurationworkloadv1alpha1.ModelBoosterSpecApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelExpressConfig"):
+		return &applyconfigurationworkloadv1alpha1.ModelExpressConfigApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"):
 		return &applyconfigurationworkloadv1alpha1.ModelServingApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServingSpec"):

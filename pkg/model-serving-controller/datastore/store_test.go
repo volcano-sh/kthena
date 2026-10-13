@@ -315,6 +315,72 @@ func TestAddRole(t *testing.T) {
 	assert.Equal(t, "revision1", role4.Revision, "existing role should not be overwritten")
 }
 
+func TestObserveRoleBootstrapConfigHash(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+	type podHash struct {
+		pod    string
+		hash   string
+		delete bool
+	}
+	tests := []struct {
+		name   string
+		events []podHash
+		want   string
+	}{
+		{name: "no pods observed", want: ""},
+		{name: "all pods match", events: []podHash{{pod: "p0", hash: "h1"}, {pod: "p1", hash: "h1"}, {pod: "p2", hash: "h1"}}, want: "h1"},
+		{name: "pod without hash", events: []podHash{{pod: "p0", hash: "h1"}, {pod: "p1"}}, want: ""},
+		{name: "first pod without hash", events: []podHash{{pod: "p0"}, {pod: "p1", hash: "h1"}}, want: ""},
+		{name: "pods disagree", events: []podHash{{pod: "p0", hash: "h1"}, {pod: "p1", hash: "h2"}}, want: ""},
+		{name: "pod update converges", events: []podHash{{pod: "p0", hash: "h1"}, {pod: "p1", hash: "h2"}, {pod: "p1", hash: "h1"}}, want: "h1"},
+		{name: "pod update diverges", events: []podHash{{pod: "p0", hash: "h1"}, {pod: "p1", hash: "h1"}, {pod: "p1", hash: "h2"}}, want: ""},
+		{name: "deleting mismatched pod restores hash", events: []podHash{{pod: "p0", hash: "h1"}, {pod: "p1"}, {pod: "p1", delete: true}}, want: "h1"},
+		{name: "replacement pod restores hash", events: []podHash{{pod: "p0", hash: "h1"}, {pod: "p1", hash: "h2"}, {pod: "p1", delete: true}, {pod: "p1", hash: "h1"}}, want: "h1"},
+		{name: "deleting all pods clears hash", events: []podHash{{pod: "p0", hash: "h1"}, {pod: "p0", delete: true}}, want: ""},
+		{name: "deleting unknown pod is ignored", events: []podHash{{pod: "p0", hash: "h1"}, {pod: "p9", delete: true}}, want: "h1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New()
+			s.AddRole(key, "group0", "prefill", "prefill-0", "revision1", "roleRevision1")
+			for _, e := range tt.events {
+				if e.delete {
+					s.ForgetRoleBootstrapConfigHash(key, "group0", "prefill", "prefill-0", e.pod)
+				} else {
+					s.ObserveRoleBootstrapConfigHash(key, "group0", "prefill", "prefill-0", e.pod, e.hash)
+				}
+			}
+			roles, err := s.GetRoleList(key, "group0", "prefill")
+			assert.NoError(t, err)
+			assert.Len(t, roles, 1)
+			assert.Equal(t, tt.want, roles[0].BootstrapConfigHash)
+		})
+	}
+
+	t.Run("missing role is ignored", func(t *testing.T) {
+		s := New()
+		s.ObserveRoleBootstrapConfigHash(key, "group0", "prefill", "prefill-0", "p0", "h1")
+		s.ForgetRoleBootstrapConfigHash(key, "group0", "prefill", "prefill-0", "p0")
+		s.AddRole(key, "group0", "prefill", "prefill-0", "revision1", "roleRevision1")
+		s.ObserveRoleBootstrapConfigHash(key, "group0", "decode", "decode-0", "d0", "h1")
+		roles, err := s.GetRoleList(key, "group0", "prefill")
+		assert.NoError(t, err)
+		assert.Equal(t, "", roles[0].BootstrapConfigHash)
+	})
+
+	t.Run("re-created role starts fresh", func(t *testing.T) {
+		s := New()
+		s.AddRole(key, "group0", "prefill", "prefill-0", "revision1", "roleRevision1")
+		s.ObserveRoleBootstrapConfigHash(key, "group0", "prefill", "prefill-0", "p0", "")
+		s.DeleteRole(key, "group0", "prefill", "prefill-0")
+		s.AddRole(key, "group0", "prefill", "prefill-0", "revision1", "roleRevision1")
+		s.ObserveRoleBootstrapConfigHash(key, "group0", "prefill", "prefill-0", "p1", "h1")
+		roles, err := s.GetRoleList(key, "group0", "prefill")
+		assert.NoError(t, err)
+		assert.Equal(t, "h1", roles[0].BootstrapConfigHash)
+	})
+}
+
 func TestGetServingGroupByModelServingSortingByIndex(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
 

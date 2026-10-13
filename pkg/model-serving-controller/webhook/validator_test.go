@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -1573,4 +1574,169 @@ func int32Ptr(i int32) *int32 {
 
 func int32PtrNil() *int32 {
 	return nil
+}
+
+func TestValidateBootstrapAccelerateStrategy(t *testing.T) {
+	newModelServing := func() *workloadv1alpha1.ModelServing {
+		engine := workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine"}}}}
+		return &workloadv1alpha1.ModelServing{
+			Spec: workloadv1alpha1.ModelServingSpec{
+				Replicas: ptr.To[int32](2),
+				BootstrapAccelerateStrategy: &workloadv1alpha1.BootstrapAccelerateStrategy{
+					Roles:        []string{"decode"},
+					SeedReplicas: ptr.To(intstr.FromString("50%")),
+					ModelExpress: &workloadv1alpha1.ModelExpressConfig{
+						EngineContainers: []string{"engine"},
+						ServerAddress:    "modelexpress-server.modelexpress:8001",
+						ReadyURL:         "http://127.0.0.1:8000/health",
+					},
+				},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+					{Name: "prefill", Replicas: ptr.To[int32](1)},
+					{Name: "decode", Replicas: ptr.To[int32](1), EntryTemplate: engine, WorkerReplicas: 1, WorkerTemplate: engine.DeepCopy()},
+				}},
+			},
+		}
+	}
+	tests := []struct {
+		name       string
+		mutate     func(ms *workloadv1alpha1.ModelServing)
+		wantFields []string
+	}{
+		{name: "valid", mutate: func(ms *workloadv1alpha1.ModelServing) {}},
+		{name: "strategy unset", mutate: func(ms *workloadv1alpha1.ModelServing) {
+			ms.Spec.BootstrapAccelerateStrategy = nil
+		}},
+		{name: "modelExpress unset skips engine containers", mutate: func(ms *workloadv1alpha1.ModelServing) {
+			ms.Spec.BootstrapAccelerateStrategy.ModelExpress = nil
+			ms.Spec.BootstrapAccelerateStrategy.Roles = nil
+		}},
+		{name: "integer seed", mutate: func(ms *workloadv1alpha1.ModelServing) {
+			ms.Spec.BootstrapAccelerateStrategy.SeedReplicas = ptr.To(intstr.FromInt32(3))
+		}},
+		{name: "IPv6 server address", mutate: func(ms *workloadv1alpha1.ModelServing) {
+			ms.Spec.BootstrapAccelerateStrategy.ModelExpress.ServerAddress = "[::1]:8001"
+		}},
+		{
+			name: "unknown role",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.Roles = []string{"decode", "missing"}
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.roles[1]"},
+		},
+		{
+			name: "zero seed",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.SeedReplicas = ptr.To(intstr.FromInt32(0))
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.seedReplicas"},
+		},
+		{
+			name: "zero percent seed",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.SeedReplicas = ptr.To(intstr.FromString("0%"))
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.seedReplicas"},
+		},
+		{
+			name: "seed above 100 percent",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.SeedReplicas = ptr.To(intstr.FromString("101%"))
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.seedReplicas"},
+		},
+		{
+			name: "seed is not a percentage",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.SeedReplicas = ptr.To(intstr.FromString("abc"))
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.seedReplicas"},
+		},
+		{
+			name: "server address without port",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.ModelExpress.ServerAddress = "modelexpress"
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.modelExpress.serverAddress"},
+		},
+		{
+			name: "server address without host",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.ModelExpress.ServerAddress = ":8001"
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.modelExpress.serverAddress"},
+		},
+		{
+			name: "server address with invalid port",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.ModelExpress.ServerAddress = "mx:70000"
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.modelExpress.serverAddress"},
+		},
+		{
+			name: "relative ready URL",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.ModelExpress.ReadyURL = "/health"
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.modelExpress.readyURL"},
+		},
+		{
+			name: "ready URL with unsupported scheme",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.ModelExpress.ReadyURL = "grpc://127.0.0.1:8000"
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.modelExpress.readyURL"},
+		},
+		{
+			name: "empty engine containers",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.ModelExpress.EngineContainers = nil
+			},
+			wantFields: []string{"spec.bootstrapAccelerateStrategy.modelExpress.engineContainers"},
+		},
+		{
+			name: "empty and duplicate engine container names",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.ModelExpress.EngineContainers = []string{"engine", "", "engine"}
+			},
+			wantFields: []string{
+				"spec.bootstrapAccelerateStrategy.modelExpress.engineContainers[1]",
+				"spec.bootstrapAccelerateStrategy.modelExpress.engineContainers[2]",
+			},
+		},
+		{
+			name: "in-scope templates without engine container",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy.ModelExpress.EngineContainers = []string{"vllm"}
+			},
+			wantFields: []string{
+				"spec.template.roles[1].entryTemplate.spec.containers",
+				"spec.template.roles[1].workerTemplate.spec.containers",
+			},
+		},
+		{
+			name:       "all roles in scope",
+			mutate:     func(ms *workloadv1alpha1.ModelServing) { ms.Spec.BootstrapAccelerateStrategy.Roles = nil },
+			wantFields: []string{"spec.template.roles[0].entryTemplate.spec.containers"},
+		},
+		{
+			name: "explicit modelexpress plugin",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.BootstrapAccelerateStrategy = nil
+				ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "other"}, {Name: "modelexpress"}}
+			},
+			wantFields: []string{"spec.plugins[1].name"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := newModelServing()
+			tt.mutate(ms)
+			var gotFields []string
+			for _, err := range validateBootstrapAccelerateStrategy(ms) {
+				gotFields = append(gotFields, err.Field)
+			}
+			assert.Equal(t, tt.wantFields, gotFields)
+		})
+	}
 }

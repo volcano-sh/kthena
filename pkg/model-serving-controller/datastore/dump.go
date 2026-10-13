@@ -27,6 +27,8 @@ type ExportedRole struct {
 	Revision         string     `json:"revision"`
 	RoleTemplateHash string     `json:"roleTemplateHash"`
 	Status           RoleStatus `json:"status"`
+	// BootstrapConfigHash is empty unless all observed Pods of the role carry the same hash.
+	BootstrapConfigHash string `json:"bootstrapConfigHash,omitempty"`
 }
 
 // ExportedServingGroup is a DTO used exclusively for JSON serialization of the cache state.
@@ -63,10 +65,11 @@ func (s *store) DumpCache() ([]byte, error) {
 				expGroup.Roles[roleName] = make(map[string]ExportedRole)
 				for roleID, role := range roleMap {
 					expGroup.Roles[roleName][roleID] = ExportedRole{
-						Name:             role.Name,
-						Revision:         role.Revision,
-						RoleTemplateHash: role.RoleTemplateHash,
-						Status:           role.Status,
+						Name:                role.Name,
+						Revision:            role.Revision,
+						RoleTemplateHash:    role.RoleTemplateHash,
+						Status:              role.Status,
+						BootstrapConfigHash: role.BootstrapConfigHash,
 					}
 				}
 			}

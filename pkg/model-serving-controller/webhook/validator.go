@@ -18,11 +18,14 @@ package webhook
 
 import (
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -31,6 +34,8 @@ import (
 	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/bootstrap"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -92,6 +97,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
+	allErrs = append(allErrs, validateBootstrapAccelerateStrategy(modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -535,4 +541,122 @@ func validateRecoveryPolicyAndRolloutStrategy(ms *workloadv1alpha1.ModelServing)
 	}
 
 	return allErrs
+}
+
+// validateBootstrapAccelerateStrategy validates spec.bootstrapAccelerateStrategy and
+// rejects explicit registration of the managed modelexpress plugin.
+func validateBootstrapAccelerateStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	for i, plugin := range ms.Spec.Plugins {
+		if plugin.Name == plugins.ModelExpressPluginName {
+			allErrs = append(allErrs, field.Forbidden(field.NewPath("spec").Child("plugins").Index(i).Child("name"),
+				fmt.Sprintf("plugin %q is managed by bootstrapAccelerateStrategy and cannot be registered explicitly", plugins.ModelExpressPluginName)))
+		}
+	}
+
+	strategy := ms.Spec.BootstrapAccelerateStrategy
+	if strategy == nil {
+		return allErrs
+	}
+	strategyPath := field.NewPath("spec").Child("bootstrapAccelerateStrategy")
+
+	roleNames := make(map[string]struct{}, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		roleNames[role.Name] = struct{}{}
+	}
+	for i, roleName := range strategy.Roles {
+		if _, ok := roleNames[roleName]; !ok {
+			allErrs = append(allErrs, field.NotFound(strategyPath.Child("roles").Index(i), roleName))
+		}
+	}
+
+	if seed := strategy.SeedReplicas; seed != nil {
+		seedPath := strategyPath.Child("seedReplicas")
+		switch seed.Type {
+		case intstr.Int:
+			if seed.IntValue() < 1 {
+				allErrs = append(allErrs, field.Invalid(seedPath, seed, "must be a positive integer"))
+			}
+		case intstr.String:
+			percent, err := strconv.Atoi(strings.TrimSuffix(seed.StrVal, "%"))
+			if len(validation.IsValidPercent(seed.StrVal)) > 0 || err != nil || percent < 1 || percent > 100 {
+				allErrs = append(allErrs, field.Invalid(seedPath, seed, "must be a percentage from 1% to 100%"))
+			}
+		default:
+			allErrs = append(allErrs, field.Invalid(seedPath, seed, "must be an int or percent"))
+		}
+	}
+
+	mx := strategy.ModelExpress
+	if mx == nil {
+		return allErrs
+	}
+	mxPath := strategyPath.Child("modelExpress")
+
+	if mx.ServerAddress != "" {
+		if err := validateHostPort(mx.ServerAddress); err != nil {
+			allErrs = append(allErrs, field.Invalid(mxPath.Child("serverAddress"), mx.ServerAddress, err.Error()))
+		}
+	}
+	if mx.ReadyURL != "" {
+		if u, err := url.Parse(mx.ReadyURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			allErrs = append(allErrs, field.Invalid(mxPath.Child("readyURL"), mx.ReadyURL, "must be an absolute http or https URL"))
+		}
+	}
+
+	engineContainersPath := mxPath.Child("engineContainers")
+	if len(mx.EngineContainers) == 0 {
+		allErrs = append(allErrs, field.Required(engineContainersPath, "at least one engine container is required"))
+		return allErrs
+	}
+	engineContainers := make(map[string]struct{}, len(mx.EngineContainers))
+	for i, name := range mx.EngineContainers {
+		if name == "" {
+			allErrs = append(allErrs, field.Required(engineContainersPath.Index(i), "container name must not be empty"))
+			continue
+		}
+		if _, ok := engineContainers[name]; ok {
+			allErrs = append(allErrs, field.Duplicate(engineContainersPath.Index(i), name))
+			continue
+		}
+		engineContainers[name] = struct{}{}
+	}
+	hasEngineContainer := func(spec corev1.PodSpec) bool {
+		for _, container := range spec.Containers {
+			if _, ok := engineContainers[container.Name]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	for i, role := range ms.Spec.Template.Roles {
+		if !bootstrap.InScope(ms, role.Name) {
+			continue
+		}
+		rolePath := field.NewPath("spec").Child("template").Child("roles").Index(i)
+		if !hasEngineContainer(role.EntryTemplate.Spec) {
+			allErrs = append(allErrs, field.Invalid(rolePath.Child("entryTemplate").Child("spec").Child("containers"), role.Name,
+				"must contain at least one container listed in bootstrapAccelerateStrategy.modelExpress.engineContainers"))
+		}
+		if role.WorkerReplicas > 0 && role.WorkerTemplate != nil && !hasEngineContainer(role.WorkerTemplate.Spec) {
+			allErrs = append(allErrs, field.Invalid(rolePath.Child("workerTemplate").Child("spec").Child("containers"), role.Name,
+				"must contain at least one container listed in bootstrapAccelerateStrategy.modelExpress.engineContainers"))
+		}
+	}
+	return allErrs
+}
+
+// validateHostPort checks that address is host:port with a non-empty host and a port from 1 to 65535.
+func validateHostPort(address string) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("must be host:port: %v", err)
+	}
+	if host == "" {
+		return fmt.Errorf("host must not be empty")
+	}
+	if value, err := strconv.Atoi(port); err != nil || value < 1 || value > 65535 {
+		return fmt.Errorf("port must be a number from 1 to 65535")
+	}
+	return nil
 }

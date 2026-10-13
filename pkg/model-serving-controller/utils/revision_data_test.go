@@ -484,6 +484,49 @@ func TestGenerateControllerRevisionNameBoundsLongPrefix(t *testing.T) {
 	}
 }
 
+func TestRevisionNeutralToBootstrapAccelerateStrategy(t *testing.T) {
+	base := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"), revisionTestRole("decode", "decode:v1"))
+	base.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "injector"}}
+
+	added := base.DeepCopy()
+	added.Spec.BootstrapAccelerateStrategy = &workloadv1alpha1.BootstrapAccelerateStrategy{
+		Provider:     workloadv1alpha1.BootstrapAccelerateStrategyProviderModelExpress,
+		Roles:        []string{"prefill"},
+		SeedReplicas: ptr.To(intstr.FromInt32(1)),
+		SourceFanOut: ptr.To[int32](2),
+		ModelExpress: &workloadv1alpha1.ModelExpressConfig{
+			EngineContainers: []string{"prefill"},
+			ServerAddress:    "modelexpress-server.modelexpress:8001",
+		},
+	}
+	edited := added.DeepCopy()
+	edited.Spec.BootstrapAccelerateStrategy.Roles = nil
+	edited.Spec.BootstrapAccelerateStrategy.SeedReplicas = ptr.To(intstr.FromString("50%"))
+	edited.Spec.BootstrapAccelerateStrategy.ModelExpress.ServerAddress = "other:8001"
+
+	baseData, err := BuildRevisionData(base)
+	if err != nil {
+		t.Fatalf("BuildRevisionData(base) error = %v", err)
+	}
+	for name, ms := range map[string]*workloadv1alpha1.ModelServing{"added": added, "edited": edited} {
+		if got, want := ModelServingRevision(ms), ModelServingRevision(base); got != want {
+			t.Errorf("%s: ModelServingRevision() = %q, want %q", name, got, want)
+		}
+		for i, role := range ms.Spec.Template.Roles {
+			if got, want := CalRoleTemplateHash(role), CalRoleTemplateHash(base.Spec.Template.Roles[i]); got != want {
+				t.Errorf("%s: CalRoleTemplateHash(%s) = %q, want %q", name, role.Name, got, want)
+			}
+		}
+		data, err := BuildRevisionData(ms)
+		if err != nil {
+			t.Fatalf("%s: BuildRevisionData() error = %v", name, err)
+		}
+		if !bytes.Equal(data, baseData) {
+			t.Errorf("%s: BuildRevisionData() = %s, want %s", name, data, baseData)
+		}
+	}
+}
+
 func revisionTestModelServing(roles ...workloadv1alpha1.Role) *workloadv1alpha1.ModelServing {
 	return &workloadv1alpha1.ModelServing{
 		Spec: workloadv1alpha1.ModelServingSpec{

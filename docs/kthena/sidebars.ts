@@ -67,6 +67,7 @@ const sidebars: SidebarsConfig = {
           label: 'Workload',
           items: [
             'user-guide/binpack-scale-down',
+            'user-guide/bootstrap-acceleration',
             'user-guide/gang-scheduling',
             'user-guide/network-topology',
           ],
