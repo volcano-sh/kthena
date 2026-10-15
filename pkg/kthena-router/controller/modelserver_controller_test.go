@@ -319,7 +319,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 
 		sync := waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) > 0 && pods[0].Pod.Name == "test-pod-ready"
+			return len(pods) > 0 && pods[0].GetPod().Name == "test-pod-ready"
 		})
 		assert.True(t, sync, "Pod should be found in store after creation")
 	})
@@ -360,7 +360,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 		// The exact verification depends on your store implementation
 		sync = waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) == 1 && pods[0].Pod.Name == "test-pod-ready"
+			return len(pods) == 1 && pods[0].GetPod().Name == "test-pod-ready"
 		})
 		assert.True(t, sync, "Pod should be found in store after creation")
 	})
@@ -405,7 +405,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 		sync := waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
 			return len(pods) == 2 &&
-				(pods[0].Pod.Name == "test-pod-update-ready" || pods[1].Pod.Name == "test-pod-update-ready")
+				(pods[0].GetPod().Name == "test-pod-update-ready" || pods[1].GetPod().Name == "test-pod-update-ready")
 		})
 		assert.True(t, sync, "Pod should be found in store after update")
 	})
@@ -455,7 +455,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 		// Verify pod was removed from store since it's not ready
 		sync = waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) == 2 && (pods[0].Pod.Name != "test-pod-update-not-ready" && pods[1].Pod.Name != "test-pod-update-not-ready")
+			return len(pods) == 2 && (pods[0].GetPod().Name != "test-pod-update-not-ready" && pods[1].GetPod().Name != "test-pod-update-not-ready")
 		})
 		assert.True(t, sync, "Pod should not be found in store after creation")
 	})
@@ -714,7 +714,7 @@ func TestModelServerController_PodSelectionLogic(t *testing.T) {
 
 		sync := waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) > 0 && pods[0].Pod.Name == "test-pod-matching"
+			return len(pods) > 0 && pods[0].GetPod().Name == "test-pod-matching"
 		})
 		assert.True(t, sync, "Pod should be found in store after creation")
 	})
@@ -1187,5 +1187,162 @@ func waitForObjectInCache(t *testing.T, timeout time.Duration, checkFunc func() 
 				return true
 			}
 		}
+	}
+}
+
+type dynamicFakeInspector struct {
+	waitingByPod map[string]float64
+}
+
+func (d *dynamicFakeInspector) GetPodMetrics(_ string, pod *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+	waiting := 0.0
+	if d != nil && d.waitingByPod != nil {
+		if w, ok := d.waitingByPod[pod.Name]; ok {
+			waiting = w
+		}
+	}
+	return map[string]float64{
+		utils.RequestWaitingNum: waiting,
+	}, nil
+}
+
+func (dynamicFakeInspector) GetPodModels(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
+	return []string{"test-model"}, nil
+}
+
+// TestModelServerController_SessionBoostQueue_WakeWhenPodBecomesReady tests the full
+// end-to-end controller and datastore event flow for Issue #1850:
+// 1. ModelServerController manages pods and modelservers.
+// 2. Initial pod is busy (RequestWaitingNum > 0) -> Session Boost queue holds requests.
+// 3. A second pod transitions to Ready (RequestWaitingNum = 0).
+// 4. Controller reconciles the pod via syncPodHandler -> store.AddOrUpdatePod.
+// 5. Store notifies the queue, which wakes and admits the held requests.
+func TestModelServerController_SessionBoostQueue_WakeWhenPodBecomesReady(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+
+	inspector := &dynamicFakeInspector{
+		waitingByPod: map[string]float64{
+			"pod-busy":  10.0,
+			"pod-ready": 0.0,
+		},
+	}
+
+	t.Setenv("ENABLE_SESSION_BOOST", "true")
+	store := datastore.New(datastore.WithPodRuntimeInspector(inspector))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store.Run(ctx)
+
+	transportRegistry := common.NewTransportRegistry()
+	ctrl, err := NewModelServerController(
+		kthenaInformerFactory,
+		kubeInformerFactory,
+		store,
+		transportRegistry,
+	)
+	require.NoError(t, err)
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+
+	kubeInformerFactory.Start(stopCh)
+	kthenaInformerFactory.Start(stopCh)
+
+	go func() {
+		_ = ctrl.Run(stopCh)
+	}()
+
+	require.True(t, waitForCacheSync(t, 2*time.Second,
+		ctrl.modelServerSynced,
+		ctrl.podSynced,
+	))
+
+	// Create ModelServer selecting app=llm
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-modelserver",
+		},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           ptr("test-model"),
+			InferenceEngine: "vLLM",
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "llm"},
+			},
+		},
+	}
+	_, err = kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// Create initial busy pod
+	podBusy := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "pod-busy",
+			Labels:    map[string]string{"app": "llm"},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.1",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	_, err = kubeClient.CoreV1().Pods("default").Create(context.Background(), podBusy, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// Wait for pod to appear in store
+	require.True(t, waitForObjectInCache(t, 2*time.Second, func() bool {
+		p := store.GetPodInfo(types.NamespacedName{Namespace: "default", Name: "pod-busy"})
+		return p != nil
+	}))
+
+	// Enqueue request for test-model
+	req := &datastore.Request{
+		UserID:      "user-1",
+		ModelName:   "test-model",
+		RequestTime: time.Now(),
+		NotifyChan:  make(chan struct{}),
+	}
+	require.NoError(t, store.Enqueue(req))
+
+	// Verify request is initially blocked because pod-busy is busy
+	select {
+	case <-req.NotifyChan:
+		t.Fatal("request should be blocked while all pods are busy")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Create second pod that becomes Ready with capacity
+	podReady := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "pod-ready",
+			Labels:    map[string]string{"app": "llm"},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.2",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	_, err = kubeClient.CoreV1().Pods("default").Create(context.Background(), podReady, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// The controller processes the new Ready pod, updates the store,
+	// and the store must automatically wake the Session Boost queue!
+	select {
+	case <-req.NotifyChan:
+		// Success! Full event chain verified.
+	case <-time.After(3 * time.Second):
+		t.Fatal("Timeout: request should be dequeued automatically when new Ready pod is processed by controller")
 	}
 }

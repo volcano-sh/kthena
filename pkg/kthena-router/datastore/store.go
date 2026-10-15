@@ -67,28 +67,60 @@ var (
 	// map allocation. Concurrent reads of a never-written map are safe. Must stay unexported.
 	// The funcs write PodInfo fields and do not lock podinfo themselves; the caller
 	// must already hold podinfo.mutex (see updateGaugeMetricsInfo/updateHistogramMetrics).
-	gaugeUpdateFuncs = map[string]func(*PodInfo, float64){
-		utils.KVCacheUsage:      func(p *PodInfo, f float64) { p.GPUCacheUsage = f },
-		utils.RequestWaitingNum: func(p *PodInfo, f float64) { p.RequestWaitingNum = f },
-		utils.RequestRunningNum: func(p *PodInfo, f float64) { p.RequestRunningNum = f },
-		utils.TPOT: func(p *PodInfo, f float64) {
-			if f == 0.0 {
-				return
+	gaugeUpdateFuncs = map[string]func(*PodInfo, float64) bool{
+		utils.KVCacheUsage: func(p *PodInfo, f float64) bool {
+			if p.GPUCacheUsage == f {
+				return false
+			}
+			p.GPUCacheUsage = f
+			return true
+		},
+		utils.RequestWaitingNum: func(p *PodInfo, f float64) bool {
+			if p.RequestWaitingNum == f {
+				return false
+			}
+			p.RequestWaitingNum = f
+			return true
+		},
+		utils.RequestRunningNum: func(p *PodInfo, f float64) bool {
+			if p.RequestRunningNum == f {
+				return false
+			}
+			p.RequestRunningNum = f
+			return true
+		},
+		utils.TPOT: func(p *PodInfo, f float64) bool {
+			if f == 0.0 || p.TPOT == f {
+				return false
 			}
 			p.TPOT = f
+			return true
 		},
-		utils.TTFT: func(p *PodInfo, f float64) {
-			if f == 0.0 {
-				return
+		utils.TTFT: func(p *PodInfo, f float64) bool {
+			if f == 0.0 || p.TTFT == f {
+				return false
 			}
 			p.TTFT = f
+			return true
 		},
 	}
 
 	// histogramUpdateFuncs has the same caller-holds-podinfo.mutex precondition as above.
-	histogramUpdateFuncs = map[string]func(*PodInfo, *dto.Histogram){
-		utils.TPOT: func(p *PodInfo, h *dto.Histogram) { p.TimePerOutputToken = h },
-		utils.TTFT: func(p *PodInfo, h *dto.Histogram) { p.TimeToFirstToken = h },
+	histogramUpdateFuncs = map[string]func(*PodInfo, *dto.Histogram) bool{
+		utils.TPOT: func(p *PodInfo, h *dto.Histogram) bool {
+			if reflect.DeepEqual(p.TimePerOutputToken, h) {
+				return false
+			}
+			p.TimePerOutputToken = h
+			return true
+		},
+		utils.TTFT: func(p *PodInfo, h *dto.Histogram) bool {
+			if reflect.DeepEqual(p.TimeToFirstToken, h) {
+				return false
+			}
+			p.TimeToFirstToken = h
+			return true
+		},
 	}
 )
 
@@ -618,6 +650,10 @@ func (s *store) Run(ctx context.Context) {
 		for {
 			var wg sync.WaitGroup
 			sem := make(chan struct{}, maxConcurrentPodScrapes)
+			var mu sync.Mutex
+			changedModels := sets.New[string]()
+			hasUnknownModelChanges := false
+
 			s.pods.Range(func(key, value any) bool {
 				if p, ok := value.(*PodInfo); ok {
 					select {
@@ -629,14 +665,35 @@ func (s *store) Run(ctx context.Context) {
 					go func(pod *PodInfo) {
 						defer wg.Done()
 						defer func() { <-sem }()
-						s.updatePodMetrics(pod)
-						s.updatePodModels(pod)
+						metricsChanged := s.updatePodMetricsWithNotify(pod, false)
+						modelsChanged := s.updatePodModelsWithNotify(pod, false)
+						if metricsChanged || modelsChanged {
+							podModels := s.getPodModelsForQueue(pod)
+							mu.Lock()
+							if len(podModels) == 0 {
+								hasUnknownModelChanges = true
+							} else {
+								for _, m := range podModels {
+									changedModels.Insert(m)
+								}
+							}
+							mu.Unlock()
+						}
 					}(p)
 				}
 				return true
 			})
 			wg.Wait()
 			s.initialSynced.Store(true)
+
+			if hasUnknownModelChanges {
+				s.wakeAllQueues()
+			} else {
+				for m := range changedModels {
+					s.notifyModelQueue(m)
+				}
+			}
+
 			select {
 			case <-ctx.Done():
 				return
@@ -756,11 +813,11 @@ func (s *store) makeBackendWaitingChecker(modelName string) BackendWaitingChecke
 			if !ok || podInfo == nil {
 				return true
 			}
-			if !podInfo.Contains(modelName) {
+			matches, waitingNum := podInfo.MatchesModelAndGetWaitingNum(modelName)
+			if !matches {
 				return true
 			}
 			podCount++
-			waitingNum := podInfo.GetRequestWaitingNum()
 			totalWaiting += waitingNum
 			if waitingNum == 0 {
 				hasCapacity = true
@@ -773,7 +830,7 @@ func (s *store) makeBackendWaitingChecker(modelName string) BackendWaitingChecke
 			return true
 		}
 		if !hasCapacity {
-			klog.Infof("[BackendWaitingChecker] model %s: all %d pods busy, totalWaiting=%.0f", modelName, podCount, totalWaiting)
+			klog.V(4).Infof("[BackendWaitingChecker] model %s: all %d pods busy, totalWaiting=%.0f", modelName, podCount, totalWaiting)
 		}
 		return hasCapacity
 	}
@@ -819,6 +876,73 @@ func (s *store) GetSessionIDHeader() string {
 		return ""
 	}
 	return s.fairnessQueueConfig.SessionIDHeader
+}
+
+// getPodModelsForQueue returns the set of model names served by the given pod.
+func (s *store) getPodModelsForQueue(podInfo *PodInfo) []string {
+	if podInfo == nil {
+		return nil
+	}
+	models := sets.New[string]()
+	for m := range podInfo.GetModels() {
+		if m != "" {
+			models.Insert(m)
+		}
+	}
+
+	for msName := range podInfo.GetModelServers() {
+		if val, ok := s.modelServer.Load(msName); ok {
+			msObj := val.(*modelServer)
+			if ms := msObj.getModelServer(); ms != nil && ms.Spec.Model != nil && *ms.Spec.Model != "" {
+				models.Insert(*ms.Spec.Model)
+			}
+		}
+	}
+	return models.UnsortedList()
+}
+
+// wakeAllQueues wakes all active Session Boost waiting queues.
+func (s *store) wakeAllQueues() {
+	if !s.fairnessQueueConfig.SessionBoostEnabled {
+		return
+	}
+	s.requestWaitingQueue.Range(func(key, value any) bool {
+		if queue, ok := value.(*RequestPriorityQueue); ok && queue != nil {
+			queue.Wake()
+		}
+		return true
+	})
+}
+
+// notifyPodQueues notifies the Session Boost queues for all models served by the given pod.
+// If the pod's specific models cannot be determined, it wakes all active waiting queues
+// so that no waiting request is left un-evaluated.
+func (s *store) notifyPodQueues(podInfo *PodInfo) {
+	if !s.fairnessQueueConfig.SessionBoostEnabled || podInfo == nil {
+		return
+	}
+
+	podModels := s.getPodModelsForQueue(podInfo)
+	if len(podModels) == 0 {
+		s.wakeAllQueues()
+		return
+	}
+
+	for _, m := range podModels {
+		s.notifyModelQueue(m)
+	}
+}
+
+// notifyModelQueue notifies the Session Boost queue for a specific model if it exists.
+func (s *store) notifyModelQueue(modelName string) {
+	if !s.fairnessQueueConfig.SessionBoostEnabled || modelName == "" {
+		return
+	}
+	if val, ok := s.requestWaitingQueue.Load(modelName); ok {
+		if queue, ok := val.(*RequestPriorityQueue); ok && queue != nil {
+			queue.Wake()
+		}
+	}
 }
 
 func (s *store) GetRequestWaitingQueueStats() []QueueStat {
@@ -941,6 +1065,9 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
+	if ms.Spec.Model != nil && *ms.Spec.Model != "" {
+		s.notifyModelQueue(*ms.Spec.Model)
+	}
 	return nil
 }
 
@@ -1142,6 +1269,7 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		}
 
 		oldPodInfo.UpdatePod(pod, engine, newModelServers)
+		s.notifyPodQueues(oldPodInfo)
 		return nil
 	}
 
@@ -1153,8 +1281,9 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		models:      sets.New[string](),
 	}
 	s.pods.Store(podName, newPodInfo)
-	s.updatePodMetrics(newPodInfo)
-	s.updatePodModels(newPodInfo)
+	s.updatePodMetricsWithNotify(newPodInfo, false)
+	s.updatePodModelsWithNotify(newPodInfo, false)
+	s.notifyPodQueues(newPodInfo)
 
 	return nil
 }
@@ -1192,6 +1321,8 @@ func (s *store) AppendModelServerToPod(pod *corev1.Pod, modelServers []*aiv1alph
 			}
 		}
 	}
+
+	s.notifyPodQueues(podInfo)
 
 	return nil
 }
@@ -1772,54 +1903,75 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 }
 
 func (s *store) updatePodMetrics(pod *PodInfo) {
+	s.updatePodMetricsWithNotify(pod, true)
+}
+
+func (s *store) updatePodMetricsWithNotify(pod *PodInfo, notify bool) bool {
 	engine := pod.GetEngine()
 	if engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
-		return
+		return false
 	}
 	podObj := pod.GetPod()
 	if podObj == nil {
 		klog.V(2).Info("failed to find pod")
-		return
+		return false
 	}
 
 	if podObj.Status.PodIP == "" {
-		return
+		return false
 	}
 	port := s.getPodWorkloadPort(pod)
 	previousHistogram := getPreviousHistogram(pod)
 	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(engine, podObj, port, previousHistogram)
+	gaugeChanged := false
+	histogramChanged := false
 	if gaugeMetrics != nil {
-		updateGaugeMetricsInfo(pod, gaugeMetrics)
+		gaugeChanged = updateGaugeMetricsInfo(pod, gaugeMetrics)
 	}
 	if histogramMetrics != nil {
-		updateHistogramMetrics(pod, histogramMetrics)
+		histogramChanged = updateHistogramMetrics(pod, histogramMetrics)
 	}
+	changed := gaugeChanged || histogramChanged
+	if changed && notify {
+		s.notifyPodQueues(pod)
+	}
+	return changed
 }
 
 func (s *store) updatePodModels(podInfo *PodInfo) {
+	s.updatePodModelsWithNotify(podInfo, true)
+}
+
+func (s *store) updatePodModelsWithNotify(podInfo *PodInfo, notify bool) bool {
 	engine := podInfo.GetEngine()
 	if engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
-		return
+		return false
 	}
 	podObj := podInfo.GetPod()
 	if podObj == nil {
 		klog.V(2).Info("failed to find pod")
-		return
+		return false
 	}
 
 	if podObj.Status.PodIP == "" {
-		return
+		return false
 	}
 	port := s.getPodWorkloadPort(podInfo)
 	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, port)
 	if err != nil {
 		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podObj.GetNamespace(), podObj.GetName(), err)
-		return
+		return false
 	}
 
-	podInfo.UpdateModels(models)
+	if podInfo.UpdateModels(models) {
+		if notify {
+			s.notifyPodQueues(podInfo)
+		}
+		return true
+	}
+	return false
 }
 
 func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {
@@ -1855,30 +2007,42 @@ func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {
 	return previousHistogram
 }
 
-func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) {
+func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) bool {
 	podinfo.mutex.Lock()
 	defer podinfo.mutex.Unlock()
 
+	changed := false
 	for _, name := range metricsName {
-		if updateFunc, exist := gaugeUpdateFuncs[name]; exist {
-			updateFunc(podinfo, metricsInfo[name])
-		} else {
-			klog.V(4).Infof("Unknown metric: %s", name)
+		if val, ok := metricsInfo[name]; ok {
+			if updateFunc, exist := gaugeUpdateFuncs[name]; exist {
+				if updateFunc(podinfo, val) {
+					changed = true
+				}
+			} else {
+				klog.V(4).Infof("Unknown metric: %s", name)
+			}
 		}
 	}
+	return changed
 }
 
-func updateHistogramMetrics(podinfo *PodInfo, histogramMetrics map[string]*dto.Histogram) {
+func updateHistogramMetrics(podinfo *PodInfo, histogramMetrics map[string]*dto.Histogram) bool {
 	podinfo.mutex.Lock()
 	defer podinfo.mutex.Unlock()
 
+	changed := false
 	for _, name := range histogramMetricsName {
-		if updateFunc, exist := histogramUpdateFuncs[name]; exist {
-			updateFunc(podinfo, histogramMetrics[name])
-		} else {
-			klog.V(4).Infof("Unknown histogram metric: %s", name)
+		if hist, ok := histogramMetrics[name]; ok {
+			if updateFunc, exist := histogramUpdateFuncs[name]; exist {
+				if updateFunc(podinfo, hist) {
+					changed = true
+				}
+			} else {
+				klog.V(4).Infof("Unknown histogram metric: %s", name)
+			}
 		}
 	}
+	return changed
 }
 
 // RegisterCallback registers a callback function for a specific resource
@@ -1956,11 +2120,29 @@ func (p *PodInfo) Contains(model string) bool {
 	return p.models != nil && p.models.Has(model)
 }
 
-// UpdateModels updates the models set with a new list of models
-func (p *PodInfo) UpdateModels(models []string) {
+// MatchesModelAndGetWaitingNum returns whether the pod serves the model and its current waiting request count
+// in a single lock acquisition.
+func (p *PodInfo) MatchesModelAndGetWaitingNum(model string) (bool, float64) {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+
+	if p.models == nil || !p.models.Has(model) {
+		return false, 0
+	}
+	return true, p.RequestWaitingNum
+}
+
+// UpdateModels updates the models set with a new list of models and returns true if the set changed.
+func (p *PodInfo) UpdateModels(models []string) bool {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
-	p.models = sets.New[string](models...)
+
+	newModels := sets.New[string](models...)
+	if p.models.Equal(newModels) {
+		return false
+	}
+	p.models = newModels
+	return true
 }
 
 // RemoveModel removes a model from the models set
