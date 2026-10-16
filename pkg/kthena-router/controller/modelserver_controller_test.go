@@ -50,7 +50,7 @@ func (fakePodRuntimeInspector) GetPodMetrics(_ string, _ *corev1.Pod, _ uint32, 
 	}, nil
 }
 
-func (fakePodRuntimeInspector) GetPodModels(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
+func (fakePodRuntimeInspector) GetPodModels(_ string, _ *corev1.Pod, _ uint32, _ string) ([]string, error) {
 	return []string{"test-model"}, nil
 }
 
@@ -73,6 +73,7 @@ func TestModelServerController_ModelServerLifecycle(t *testing.T) {
 	// Create controller
 	controller, err := NewModelServerController(
 		kthenaInformerFactory,
+		kubeInformerFactory,
 		kubeInformerFactory,
 		store,
 		common.NewTransportRegistry(),
@@ -276,6 +277,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 	// Create controller
 	controller, err := NewModelServerController(
 		kthenaInformerFactory,
+		kubeInformerFactory,
 		kubeInformerFactory,
 		store,
 		common.NewTransportRegistry(),
@@ -495,6 +497,7 @@ func TestModelServerController_ErrorHandling(t *testing.T) {
 	controller, err := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
+		kubeInformerFactory,
 		store,
 		common.NewTransportRegistry(),
 	)
@@ -540,6 +543,7 @@ func TestModelServerController_WorkQueueProcessing(t *testing.T) {
 	// Create controller
 	controller, err := NewModelServerController(
 		kthenaInformerFactory,
+		kubeInformerFactory,
 		kubeInformerFactory,
 		store,
 		common.NewTransportRegistry(),
@@ -617,6 +621,7 @@ func TestModelServerController_PodSelectionLogic(t *testing.T) {
 	// Create controller
 	controller, err := NewModelServerController(
 		kthenaInformerFactory,
+		kubeInformerFactory,
 		kubeInformerFactory,
 		store,
 		common.NewTransportRegistry(),
@@ -808,6 +813,7 @@ func TestModelServerController_ComprehensiveLifecycleTest(t *testing.T) {
 	controller, err := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
+		kubeInformerFactory,
 		store,
 		common.NewTransportRegistry(),
 	)
@@ -986,6 +992,7 @@ func TestModelServerController_SharedPods(t *testing.T) {
 	controller, err := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
+		kubeInformerFactory,
 		store,
 		common.NewTransportRegistry(),
 	)
@@ -1093,6 +1100,7 @@ func TestModelServerController_TransportRegistry(t *testing.T) {
 	controller, err := NewModelServerController(
 		kthenaInformerFactory,
 		kubeInformerFactory,
+		kubeInformerFactory,
 		store,
 		registry,
 	)
@@ -1188,4 +1196,124 @@ func waitForObjectInCache(t *testing.T, timeout time.Duration, checkFunc func() 
 			}
 		}
 	}
+}
+
+func modelServerWithAPIKeySecretRef(namespace, name, secretName string) *aiv1alpha1.ModelServer {
+	return &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Spec: aiv1alpha1.ModelServerSpec{
+			APIKeySecretRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				Key:                  "api-key",
+			},
+		},
+	}
+}
+
+func newSecretSyncController(t *testing.T) (*ModelServerController, datastore.Store, informers.SharedInformerFactory) {
+	t.Helper()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	secretInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	store := datastore.New()
+
+	controller, err := NewModelServerController(
+		kthenaInformerFactory, kubeInformerFactory, secretInformerFactory, store, common.NewTransportRegistry(),
+	)
+	require.NoError(t, err)
+	return controller, store, secretInformerFactory
+}
+
+func TestModelServerController_SecretSyncCachesTheReferencedKey(t *testing.T) {
+	controller, store, secretInformerFactory := newSecretSyncController(t)
+
+	secretName := types.NamespacedName{Namespace: "default", Name: "vllm-key"}
+	ms := modelServerWithAPIKeySecretRef(secretName.Namespace, "ms1", secretName.Name)
+	require.NoError(t, controller.modelServerIndexer.Add(ms))
+	require.NoError(t, secretInformerFactory.Core().V1().Secrets().Informer().GetIndexer().Add(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: secretName.Namespace, Name: secretName.Name},
+		Data: map[string][]byte{
+			"api-key":      []byte("s3cret"),
+			"unreferenced": []byte("must-not-be-cached"),
+		},
+	}))
+
+	require.NoError(t, controller.syncSecretHandler(secretName.String()))
+
+	stored := store.GetModelServerSecret(secretName)
+	if assert.NotNil(t, stored) {
+		assert.Equal(t, map[string][]byte{"api-key": []byte("s3cret")}, stored.Data)
+	}
+}
+
+func TestModelServerController_SecretSyncDropsTheKeyWhenNoModelServerWantsIt(t *testing.T) {
+	controller, store, secretInformerFactory := newSecretSyncController(t)
+
+	secretName := types.NamespacedName{Namespace: "default", Name: "vllm-key"}
+	ms := modelServerWithAPIKeySecretRef(secretName.Namespace, "ms1", secretName.Name)
+	require.NoError(t, controller.modelServerIndexer.Add(ms))
+	require.NoError(t, secretInformerFactory.Core().V1().Secrets().Informer().GetIndexer().Add(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: secretName.Namespace, Name: secretName.Name},
+		Data:       map[string][]byte{"api-key": []byte("s3cret")},
+	}))
+	require.NoError(t, controller.syncSecretHandler(secretName.String()))
+
+	require.NoError(t, controller.modelServerIndexer.Delete(ms))
+	require.NoError(t, controller.syncSecretHandler(secretName.String()))
+
+	assert.Nil(t, store.GetModelServerSecret(secretName))
+}
+
+func TestModelServerController_SecretSyncLeavesProviderCredentialsAlone(t *testing.T) {
+	controller, store, secretInformerFactory := newSecretSyncController(t)
+
+	// The same Secret name in the provider cache must survive a ModelServer
+	// sync that decides nothing references it, since the two are unrelated.
+	secretName := types.NamespacedName{Namespace: "default", Name: "shared-name"}
+	require.NoError(t, store.AddOrUpdateSecret(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: secretName.Namespace, Name: secretName.Name},
+		Data:       map[string][]byte{"api-key": []byte("provider-key")},
+	}))
+	_ = secretInformerFactory
+
+	require.NoError(t, controller.syncSecretHandler(secretName.String()))
+
+	assert.NotNil(t, store.GetSecret(secretName), "the provider credential must not be touched")
+	assert.Nil(t, store.GetModelServerSecret(secretName))
+}
+
+func TestModelServerController_AddingAModelServerQueuesItsSecret(t *testing.T) {
+	controller, _, _ := newSecretSyncController(t)
+
+	// Without this the credential only syncs when the Secret itself changes,
+	// so a ModelServer that gains an apiKeySecretRef is never picked up.
+	controller.enqueueModelServerSecret(modelServerWithAPIKeySecretRef("default", "ms1", "vllm-key"))
+
+	require.Equal(t, 1, controller.workqueue.Len())
+	item, _ := controller.workqueue.Get()
+	assert.Equal(t, ResourceTypeSecret, item.ResourceType)
+	assert.Equal(t, "default/vllm-key", item.Key)
+}
+
+func TestModelServerController_AModelServerWithoutAKeyQueuesNothing(t *testing.T) {
+	controller, _, _ := newSecretSyncController(t)
+
+	controller.enqueueModelServerSecret(&aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms1"},
+	})
+
+	assert.Equal(t, 0, controller.workqueue.Len())
+}
+
+func TestModelServerController_ATombstonedModelServerStillQueuesItsSecret(t *testing.T) {
+	controller, _, _ := newSecretSyncController(t)
+
+	controller.enqueueModelServerSecret(cache.DeletedFinalStateUnknown{
+		Key: "default/ms1",
+		Obj: modelServerWithAPIKeySecretRef("default", "ms1", "vllm-key"),
+	})
+
+	assert.Equal(t, 1, controller.workqueue.Len())
 }

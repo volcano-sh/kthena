@@ -118,9 +118,9 @@ func (engine *sglangEngine) GetHistogramPodMetrics(allMetrics map[string]*dto.Me
 }
 
 // GetPodModels retrieves the list of models from a pod running the sglang engine.
-func (engine *sglangEngine) GetPodModels(pod *corev1.Pod, port uint32) ([]string, error) {
+func (engine *sglangEngine) GetPodModels(pod *corev1.Pod, port uint32, apiKey string) ([]string, error) {
 	if port == 0 {
 		port = 30000
 	}
-	return vllm.FetchPodModels(pod.Status.PodIP, port)
+	return vllm.FetchPodModels(pod.Status.PodIP, port, apiKey)
 }
