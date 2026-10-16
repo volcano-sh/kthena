@@ -258,6 +258,22 @@ func TestGetPreviousHistogram(t *testing.T) {
 	}
 }
 
+func TestHistogramSeriesKeptBetweenScrapes(t *testing.T) {
+	sum := float64(4)
+	count := uint64(2)
+	histogram := &dto.Histogram{SampleSum: &sum, SampleCount: &count}
+	seriesKey := utils.TPOT + `{engine="0"}`
+	podinfo := &PodInfo{}
+
+	updateHistogramMetrics(podinfo, map[string]*dto.Histogram{utils.TPOT: histogram, seriesKey: histogram})
+	previous := getPreviousHistogram(podinfo)
+	assert.Equal(t, histogram, previous[utils.TPOT])
+	assert.Equal(t, histogram, previous[seriesKey])
+
+	updateHistogramMetrics(podinfo, map[string]*dto.Histogram{utils.TPOT: histogram})
+	assert.NotContains(t, getPreviousHistogram(podinfo), seriesKey)
+}
+
 func Test_updateGaugeMetricsInfo(t *testing.T) {
 	// Non-zero values are written; TPOT/TTFT zero values are skipped (guard preserved).
 	podinfo := &PodInfo{
