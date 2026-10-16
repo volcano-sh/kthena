@@ -971,8 +971,9 @@ func (r *Router) proxy(
 		podObj := pod.GetPod()
 		podName := types.NamespacedName{Namespace: podObj.Namespace, Name: podObj.Name}
 
-		// Track this request as in-flight to the chosen pod.
-		r.store.IncrPodOnFlightRequests(podName)
+		// Track this request as in-flight to the chosen pod. Keep the PodInfo that was
+		// counted so the decrement hits the same object even if the pod is re-added.
+		counted := r.store.IncrPodOnFlightRequests(podName)
 
 		if ctx.MetricsRecorder != nil {
 			ctx.MetricsRecorder.IncActiveUpstreamRequests()
@@ -986,7 +987,7 @@ func (r *Router) proxy(
 		}
 
 		// Request is complete (success or failure) — decrement on-flight counter.
-		r.store.DecrPodOnFlightRequests(podName)
+		r.store.DecrPodOnFlightRequests(counted)
 
 		if err != nil {
 			klog.Errorf(" pod request error: %v", err)
@@ -1545,11 +1546,13 @@ func (r *Router) proxyToPDDisaggregated(
 		// at the precise point each phase starts and ends.
 		prefillPodName := types.NamespacedName{Namespace: prefillPod.Namespace, Name: prefillPod.Name}
 		decodePodName := types.NamespacedName{Namespace: decodePod.Namespace, Name: decodePod.Name}
+		// The Incr hooks keep the counted PodInfo for the matching Decr hook.
+		var prefillCounted, decodeCounted *datastore.PodInfo
 		hooks := &connectors.OnFlightHooks{
-			IncrPrefill: func() { r.store.IncrPodOnFlightRequests(prefillPodName) },
-			DecrPrefill: func() { r.store.DecrPodOnFlightRequests(prefillPodName) },
-			IncrDecode:  func() { r.store.IncrPodOnFlightRequests(decodePodName) },
-			DecrDecode:  func() { r.store.DecrPodOnFlightRequests(decodePodName) },
+			IncrPrefill: func() { prefillCounted = r.store.IncrPodOnFlightRequests(prefillPodName) },
+			DecrPrefill: func() { r.store.DecrPodOnFlightRequests(prefillCounted) },
+			IncrDecode:  func() { decodeCounted = r.store.IncrPodOnFlightRequests(decodePodName) },
+			DecrDecode:  func() { r.store.DecrPodOnFlightRequests(decodeCounted) },
 		}
 
 		// Execute the PD disaggregated proxy operation
