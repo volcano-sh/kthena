@@ -52,6 +52,7 @@ const sidebars: SidebarsConfig = {
             id: 'user-guide/model-deployment',
           },
           items: [
+            'user-guide/downloader',
             'user-guide/lws-integration',
             'user-guide/modelserving-plugin-framework',
           ],
