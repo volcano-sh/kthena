@@ -966,7 +966,7 @@ func TestRouter_HandlerFunc_InferencePoolAccessLogDestination(t *testing.T) {
 		metrics.DestinationLabelValueNone,
 		metrics.BackendTypeInferencePool,
 		"default/pool",
-		"pool-model",
+		metrics.UnknownModel,
 	}
 	activeBefore := externalGaugeValue(t, &router.metrics.ActiveUpstreamRequests, activeLabels...)
 	done := make(chan struct{})
@@ -2720,7 +2720,7 @@ func TestRouter_HandlerFunc_InferencePoolPodDiscovery(t *testing.T) {
 			}
 
 			requestsBefore := requestCounterValue(
-				t, router, metrics.UnknownModel, "/custom",
+				t, router, metrics.UnknownModel, "/",
 				strconv.Itoa(tt.expectedStatus), tt.expectedReason,
 			)
 			w := httptest.NewRecorder()
@@ -2737,7 +2737,7 @@ func TestRouter_HandlerFunc_InferencePoolPodDiscovery(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, w.Code)
 			assert.Contains(t, w.Body.String(), tt.expectedResponse)
 			assert.Equal(t, float64(1), requestCounterValue(
-				t, router, metrics.UnknownModel, "/custom",
+				t, router, metrics.UnknownModel, "/",
 				strconv.Itoa(tt.expectedStatus), tt.expectedReason,
 			)-requestsBefore)
 		})
@@ -2780,7 +2780,7 @@ func TestRouter_HandlerFunc_AllZeroHTTPRouteBackendWeights(t *testing.T) {
 	assert.NoError(t, store.AddOrUpdateHTTPRoute(httpRoute))
 
 	requestsBefore := requestCounterValue(
-		t, router, metrics.UnknownModel, "/custom", "503", "inference_pool_selection",
+		t, router, metrics.UnknownModel, "/", "503", "inference_pool_selection",
 	)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -2796,7 +2796,7 @@ func TestRouter_HandlerFunc_AllZeroHTTPRouteBackendWeights(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "matched HTTPRoute default/route-all-zero has no eligible InferencePool backend")
 	assert.NotContains(t, w.Body.String(), "route not found")
 	assert.Equal(t, float64(1), requestCounterValue(
-		t, router, metrics.UnknownModel, "/custom", "503", "inference_pool_selection",
+		t, router, metrics.UnknownModel, "/", "503", "inference_pool_selection",
 	)-requestsBefore)
 }
 

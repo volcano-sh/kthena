@@ -141,7 +141,11 @@ and after the request body and `model` field have been parsed. They therefore
 exclude authentication rejections, parse failures, and `GET /v1/models`; use
 access logs or HTTP-layer telemetry when those requests must be counted. The
 `model` label is the requested model when the router's store recognizes it and
-`unknown` otherwise. The `path` label is the URL path without the query string.
+`unknown` otherwise. The `path` label is the router route that served the
+request: an API endpoint served by the router itself, the `uri` match value of
+the ModelRoute rule that served the request, the HTTPRoute path template that
+matched the request, or `other` when no route matched or the matched ModelRoute
+rule has no `uri` match.
 
 Input token values come from the Router's pre-dispatch tokenizer and are also
 used for input rate limiting. Output token values use upstream-reported usage
@@ -155,8 +159,10 @@ Destination labels use values from resolved routing configuration:
   `unresolved`, or `none`.
 - `model_route` and `backend_name` use `namespace/name`; `none` means the label
   does not apply.
-- `upstream_model` is the model sent to the backend. Without a backend override,
-  it is the requested model. LoRA requests use the matched adapter name.
+- `upstream_model` is the model sent to the backend: `spec.model` when the
+  ModelServer overrides it, otherwise the requested model when the router
+  recognizes it and `unknown` when it does not. LoRA requests use the matched
+  adapter name.
 - `model_server` remains on `kthena_router_active_upstream_requests` for
   compatibility and is `none` for other backend types.
 
@@ -196,12 +202,13 @@ sum by (model, path, status_code, error_type) (
 
 Destination labels come from resolved routing configuration and fixed enums;
 metrics never include request IDs, Secret names, error text, or raw user IDs.
-The `path` label does come from the request URL path, however, so routes with
-unbounded dynamic path segments can create unbounded series. Cardinality also
-grows with the product of models, routes, backends, upstream models, status
-codes, and error types. Normalize dynamic paths before they reach the router or
-drop/relabel them at scrape time, and estimate the remaining combinations for
-clusters with many routes or long retention.
+The `path` label is bounded to router-owned values (its own API endpoints,
+ModelRoute `uri` match values, and HTTPRoute path templates) and never carries
+a client-chosen path, and `upstream_model` collapses to `unknown` when the
+request names no model the router recognizes. Cardinality therefore grows
+with the product of models, routes, backends, upstream models, status codes, and
+error types. Estimate the remaining combinations for clusters with many routes
+or long retention.
 
 ### Tokenizer and cache-aware scheduling
 

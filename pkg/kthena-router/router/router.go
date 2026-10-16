@@ -310,7 +310,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		c.Set("model", modelName)
 
 		// Create metrics recorder for this request
-		path := c.Request.URL.Path
+		path := requestPathLabel(c)
 		hasModel := r.store.HasModel(modelName)
 		metricsModel := metrics.UnknownModel
 		if hasModel {
@@ -439,6 +439,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	var modelServerName types.NamespacedName
 	var modelTarget datastore.ModelTarget
 	var modelRoute *v1alpha1.ModelRoute
+	var matchedRule *v1alpha1.Rule
 	var modelServer *v1alpha1.ModelServer
 	var inferencePoolFullName string
 
@@ -455,12 +456,17 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 
 	var isLora bool
 	var err error
-	modelTarget, isLora, modelRoute, err = r.store.MatchModelTarget(modelName, c.Request, gatewayKey)
+	modelTarget, isLora, modelRoute, matchedRule, err = r.store.MatchModelTarget(modelName, c.Request, gatewayKey)
 	if err != nil {
 		accesslog.SetError(c, "model_route_matching", fmt.Sprintf("failed to match model route target: %v", err))
 	}
 
 	if err == nil && strings.HasPrefix(c.Request.URL.Path, "/v1/") {
+		// The matched ModelRoute serves this request. Attribute it to the `uri`
+		// match value of the rule that matched, so /v1 paths other than the
+		// router-owned endpoints keep a bounded label instead of "other".
+		setRequestPathLabel(c, modelRouteURIMatchValue(matchedRule))
+
 		if modelTarget.Kind == datastore.ModelTargetKindExternalModelProvider {
 			provider := r.store.GetExternalModelProvider(modelTarget.Name)
 			if provider == nil {
@@ -694,11 +700,12 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		backendName = inferencePoolFullName
 	}
 	accesslog.SetBackendInfo(c, backendType, backendName, upstreamModel)
+	modelIsRegistered := r.store.HasModel(modelName)
 	destination := metrics.DestinationLabels{
 		ModelRoute:    modelRouteName,
 		BackendType:   backendType,
 		BackendName:   backendName,
-		UpstreamModel: upstreamModel,
+		UpstreamModel: upstreamModelLabelForMetrics(modelServer, modelName, isLora, modelIsRegistered),
 	}
 	if recorder, exists := c.Get("metricsRecorder"); exists {
 		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
@@ -860,6 +867,10 @@ func (r *Router) handleHTTPRoute(c *gin.Context, gatewayKey string) (bool, types
 	if !matched {
 		return false, types.NamespacedName{}, nil
 	}
+
+	// Attribute request metrics to the path template of the rule that matched:
+	// this is the HTTPRoute that serves the request.
+	setRequestPathLabel(c, matchResult.matchedPathTemplate)
 
 	// Record Gateway API match into access log (gatewayKey is already "namespace/name").
 	httpRouteKey := fmt.Sprintf("%s/%s", matchResult.route.Namespace, matchResult.route.Name)

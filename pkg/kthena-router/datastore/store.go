@@ -222,8 +222,10 @@ type Store interface {
 	DeletePod(podName types.NamespacedName) error
 
 	// New methods for routing functionality
-	// MatchModelTarget matches a ModelRoute and selects a destination by rule weights.
-	MatchModelTarget(modelName string, request *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, error)
+	// MatchModelTarget matches a ModelRoute and selects a destination by rule
+	// weights. The matched rule is returned alongside the route, or nil when no
+	// ModelRoute matched.
+	MatchModelTarget(modelName string, request *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, error)
 
 	// Model routing methods
 	AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error
@@ -1440,20 +1442,20 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 	return nil
 }
 
-func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, error) {
+func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, error) {
 	mr, rule, isLora, err := s.matchModelRoute(model, req, gatewayKey)
 	if err != nil {
-		return ModelTarget{}, false, nil, err
+		return ModelTarget{}, false, nil, nil, err
 	}
 	dst, err := s.selectDestination(rule.TargetModels)
 	if err != nil {
-		return ModelTarget{}, false, nil, err
+		return ModelTarget{}, false, nil, nil, err
 	}
 	target, err := modelTargetFromDestination(mr.Namespace, dst)
 	if err != nil {
-		return ModelTarget{}, false, nil, err
+		return ModelTarget{}, false, nil, nil, err
 	}
-	return target, isLora, mr, nil
+	return target, isLora, mr, rule, nil
 }
 
 func (s *store) matchModelRoute(model string, req *http.Request, gatewayKey string) (*aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, bool, error) {

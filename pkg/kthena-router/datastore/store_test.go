@@ -1139,13 +1139,14 @@ func createComplexModelRoute() *aiv1alpha1.ModelRoute {
 
 func TestStoreMatchModelTargetForModelServer(t *testing.T) {
 	tests := []struct {
-		name           string
-		setupStore     func() *store
-		modelName      string
-		request        *http.Request
-		expectedServer types.NamespacedName
-		expectedIsLora bool
-		expectedError  bool
+		name             string
+		setupStore       func() *store
+		modelName        string
+		request          *http.Request
+		expectedServer   types.NamespacedName
+		expectedRuleName string
+		expectedIsLora   bool
+		expectedError    bool
 	}{
 		{
 			name: "match base model route",
@@ -1398,11 +1399,12 @@ func TestStoreMatchModelTargetForModelServer(t *testing.T) {
 				s.AddOrUpdateModelRoute(mr)
 				return s
 			},
-			modelName:      "uri-test-model",
-			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
-			expectedServer: types.NamespacedName{Namespace: "default", Name: "v1-server"},
-			expectedIsLora: false,
-			expectedError:  false,
+			modelName:        "uri-test-model",
+			request:          &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer:   types.NamespacedName{Namespace: "default", Name: "v1-server"},
+			expectedRuleName: "v1-prefix-rule",
+			expectedIsLora:   false,
+			expectedError:    false,
 		},
 		{
 			name: "route with URI exact match",
@@ -1448,11 +1450,12 @@ func TestStoreMatchModelTargetForModelServer(t *testing.T) {
 				s.AddOrUpdateModelRoute(mr)
 				return s
 			},
-			modelName:      "exact-uri-model",
-			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
-			expectedServer: types.NamespacedName{Namespace: "default", Name: "chat-server"},
-			expectedIsLora: false,
-			expectedError:  false,
+			modelName:        "exact-uri-model",
+			request:          &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer:   types.NamespacedName{Namespace: "default", Name: "chat-server"},
+			expectedRuleName: "exact-chat-rule",
+			expectedIsLora:   false,
+			expectedError:    false,
 		},
 		{
 			name: "route falls back when URI doesn't match",
@@ -1703,7 +1706,7 @@ func TestStoreMatchModelTargetForModelServer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setupStore()
-			target, isLora, _, err := s.MatchModelTarget(tt.modelName, tt.request, "")
+			target, isLora, _, matchedRule, err := s.MatchModelTarget(tt.modelName, tt.request, "")
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -1714,6 +1717,10 @@ func TestStoreMatchModelTargetForModelServer(t *testing.T) {
 			assert.Equal(t, tt.expectedIsLora, isLora)
 			assert.Equal(t, ModelTargetKindModelServer, target.Kind)
 			assert.Equal(t, tt.expectedServer, target.Name)
+			assert.NotNil(t, matchedRule, "a successful match must return the matched rule")
+			if tt.expectedRuleName != "" {
+				assert.Equal(t, tt.expectedRuleName, matchedRule.Name)
+			}
 		})
 	}
 }
@@ -1791,7 +1798,7 @@ func TestStoreMatchModelTargetExternalProvider(t *testing.T) {
 	}
 	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
 
-	target, isLora, route, err := s.MatchModelTarget("gpt-router", req, "")
+	target, isLora, route, _, err := s.MatchModelTarget("gpt-router", req, "")
 	assert.NoError(t, err)
 	assert.False(t, isLora)
 	assert.Equal(t, mr, route)
@@ -1814,7 +1821,7 @@ func TestStoreMatchesModelBoosterSpecName(t *testing.T) {
 	store := New()
 	assert.NoError(t, store.AddOrUpdateModelRoute(route))
 
-	target, isLora, matchedRoute, err := store.MatchModelTarget(
+	target, isLora, matchedRoute, _, err := store.MatchModelTarget(
 		model.Spec.Name,
 		&http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
 		"",
@@ -1879,10 +1886,10 @@ func TestAddOrUpdateModelRoute_UpdatesLoraRoutes(t *testing.T) {
 	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
-	_, _, _, err := s.MatchModelTarget("math-lora", req, "")
+	_, _, _, _, err := s.MatchModelTarget("math-lora", req, "")
 	assert.Error(t, err)
 
-	target, isLora, _, err := s.MatchModelTarget("code-lora", req, "")
+	target, isLora, _, _, err := s.MatchModelTarget("code-lora", req, "")
 	assert.NoError(t, err)
 	assert.True(t, isLora)
 	assert.Equal(t, ModelTargetKindModelServer, target.Kind)
@@ -2330,7 +2337,7 @@ func TestMatchModelTarget_EmptyTargetModels_NoPanic(t *testing.T) {
 
 	// Before the fix this would panic. After the fix it returns an error.
 	assert.NotPanics(t, func() {
-		_, _, _, err := s.MatchModelTarget("my-model", req, "")
+		_, _, _, _, err := s.MatchModelTarget("my-model", req, "")
 		assert.Error(t, err)
 	})
 }
@@ -2373,7 +2380,7 @@ func TestMatchModelTarget_EmptyTargetModels_FallsThrough(t *testing.T) {
 	s.AddOrUpdateModelRoute(mr)
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
-	target, _, _, err := s.MatchModelTarget("my-model", req, "")
+	target, _, _, _, err := s.MatchModelTarget("my-model", req, "")
 	assert.NoError(t, err)
 	assert.Equal(t, ModelTargetKindModelServer, target.Kind)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, target.Name)
@@ -2692,7 +2699,7 @@ func TestMatchModelTarget_GatewayScoped(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setupStore()
-			target, isLora, _, err := s.MatchModelTarget(tt.modelName, tt.request, tt.gatewayKey)
+			target, isLora, _, _, err := s.MatchModelTarget(tt.modelName, tt.request, tt.gatewayKey)
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -2918,7 +2925,7 @@ func TestGCRegexCacheDropsUnreferencedPatterns(t *testing.T) {
 	assert.NoError(t, s.AddOrUpdateModelRoute(regexModelRoute("default", "r1", "m1", pattern)))
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/gc-me"}, Header: http.Header{}}
-	_, _, _, err := s.MatchModelTarget("m1", req, "")
+	_, _, _, _, err := s.MatchModelTarget("m1", req, "")
 	assert.NoError(t, err)
 	assert.Equal(t, []string{pattern}, cachedPatterns(s), "pattern should be cached after a matching request")
 
@@ -2933,7 +2940,7 @@ func TestGCRegexCacheKeepsPatternsStillInUse(t *testing.T) {
 	assert.NoError(t, s.AddOrUpdateModelRoute(regexModelRoute("default", "r2", "m2", shared)))
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/shared"}, Header: http.Header{}}
-	_, _, _, err := s.MatchModelTarget("m1", req, "")
+	_, _, _, _, err := s.MatchModelTarget("m1", req, "")
 	assert.NoError(t, err)
 	assert.Equal(t, []string{shared}, cachedPatterns(s))
 
@@ -2964,7 +2971,7 @@ func TestRegexCacheUnderRouteChurn(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_, _, _, _ = s.MatchModelTarget("stable-model", req, "")
+					_, _, _, _, _ = s.MatchModelTarget("stable-model", req, "")
 				}
 			}
 		}()
