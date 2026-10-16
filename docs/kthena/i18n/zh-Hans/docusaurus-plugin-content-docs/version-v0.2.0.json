@@ -1,0 +1,126 @@
+{
+  "sidebar.tutorialSidebar.category.Getting Started": {
+    "message": "快速入门",
+    "description": "The label for category 'Getting Started' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Architecture": {
+    "message": "架构",
+    "description": "The label for category 'Architecture' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.User Guide": {
+    "message": "用户指南",
+    "description": "The label for category 'User Guide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.User Guide.link.generated-index.title": {
+    "message": "用户指南概览",
+    "description": "The generated-index page title for category 'User Guide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.User Guide.link.generated-index.description": {
+    "message": "所有用户指南的综合概览。",
+    "description": "The generated-index page description for category 'User Guide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Router": {
+    "message": "路由器",
+    "description": "The label for category 'Router' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Prefill Decode Disaggregation": {
+    "message": "Prefill-Decode 分离",
+    "description": "The label for category 'Prefill Decode Disaggregation' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.General": {
+    "message": "通用指南",
+    "description": "The label for category 'General' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Developer Guide": {
+    "message": "开发者指南",
+    "description": "The label for category 'Developer Guide' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Timeline": {
+    "message": "项目进展",
+    "description": "The label for category 'Timeline' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Reference": {
+    "message": "参考",
+    "description": "The label for category 'Reference' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.CRD Reference": {
+    "message": "CRD 参考",
+    "description": "The label for category 'CRD Reference' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Kthena CLI": {
+    "message": "Kthena CLI",
+    "description": "The label for category 'Kthena CLI' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Create": {
+    "message": "创建",
+    "description": "The label for category 'Create' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Get": {
+    "message": "获取",
+    "description": "The label for category 'Get' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.category.Describe": {
+    "message": "查看详情",
+    "description": "The label for category 'Describe' in sidebar 'tutorialSidebar'"
+  },
+  "sidebar.tutorialSidebar.doc.Autoscaler": {
+    "message": "自动扩缩容",
+    "description": "The label for the doc item 'Autoscaler' in sidebar 'tutorialSidebar', linking to the doc user-guide/autoscaler"
+  },
+  "sidebar.tutorialSidebar.doc.Helm Chart Values": {
+    "message": "Helm Chart 参数",
+    "description": "The label for the doc item 'Helm Chart Values' in sidebar 'tutorialSidebar', linking to the doc reference/helm-chart-values"
+  },
+  "sidebar.tutorialSidebar.doc.Networking": {
+    "message": "网络",
+    "description": "The label for the doc item 'Networking' in sidebar 'tutorialSidebar', linking to the doc reference/crd/networking.serving.volcano.sh"
+  },
+  "sidebar.tutorialSidebar.doc.Workload": {
+    "message": "工作负载",
+    "description": "The label for the doc item 'Workload' in sidebar 'tutorialSidebar', linking to the doc reference/crd/workload.serving.volcano.sh"
+  },
+  "sidebar.tutorialSidebar.doc.Kthena": {
+    "message": "Kthena",
+    "description": "The label for the doc item 'Kthena' in sidebar 'tutorialSidebar', linking to the doc reference/kthena-cli/kthena"
+  },
+  "sidebar.tutorialSidebar.doc.Create manifest": {
+    "message": "创建资源清单",
+    "description": "The label for the doc item 'Create manifest' in sidebar 'tutorialSidebar', linking to the doc reference/kthena-cli/kthena_create_manifest"
+  },
+  "sidebar.tutorialSidebar.doc.Get autoscaling-policies": {
+    "message": "获取 autoscaling-policies",
+    "description": "The label for the doc item 'Get autoscaling-policies' in sidebar 'tutorialSidebar', linking to the doc reference/kthena-cli/kthena_get_autoscaling-policies"
+  },
+  "sidebar.tutorialSidebar.doc.Get autoscaling-policy-bindings": {
+    "message": "获取 autoscaling-policy-bindings",
+    "description": "The label for the doc item 'Get autoscaling-policy-bindings' in sidebar 'tutorialSidebar', linking to the doc reference/kthena-cli/kthena_get_autoscaling-policy-bindings"
+  },
+  "sidebar.tutorialSidebar.doc.Get model-servings": {
+    "message": "获取 model-servings",
+    "description": "The label for the doc item 'Get model-servings' in sidebar 'tutorialSidebar', linking to the doc reference/kthena-cli/kthena_get_model-servings"
+  },
+  "sidebar.tutorialSidebar.doc.Get template": {
+    "message": "获取 template",
+    "description": "The label for the doc item 'Get template' in sidebar 'tutorialSidebar', linking to the doc reference/kthena-cli/kthena_get_template"
+  },
+  "sidebar.tutorialSidebar.doc.Get templates": {
+    "message": "获取 templates",
+    "description": "The label for the doc item 'Get templates' in sidebar 'tutorialSidebar', linking to the doc reference/kthena-cli/kthena_get_templates"
+  },
+  "sidebar.tutorialSidebar.doc.Describe autoscaling-policy": {
+    "message": "查看 autoscaling-policy 详情",
+    "description": "The label for the doc item 'Describe autoscaling-policy' in sidebar 'tutorialSidebar', linking to the doc reference/kthena-cli/kthena_describe_autoscaling-policy"
+  },
+  "sidebar.tutorialSidebar.doc.Describe model-serving": {
+    "message": "查看 model-serving 详情",
+    "description": "The label for the doc item 'Describe model-serving' in sidebar 'tutorialSidebar', linking to the doc reference/kthena-cli/kthena_describe_model-serving"
+  },
+  "sidebar.tutorialSidebar.doc.Describe template": {
+    "message": "查看 template 详情",
+    "description": "The label for the doc item 'Describe template' in sidebar 'tutorialSidebar', linking to the doc reference/kthena-cli/kthena_describe_template"
+  },
+  "sidebar.tutorialSidebar.doc.Router Access Log Fields": {
+    "message": "路由器访问日志字段",
+    "description": "The label for the doc item 'Router Access Log Fields' in sidebar 'tutorialSidebar', linking to the doc reference/router-access-log-fields"
+  }
+}
