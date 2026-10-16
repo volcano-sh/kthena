@@ -37,6 +37,7 @@ import (
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/discovery"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -56,6 +57,45 @@ func (fakePodRuntimeInspector) GetPodModels(_ string, _ *corev1.Pod, _ uint32) (
 
 func newStoreWithMockBackend() datastore.Store {
 	return datastore.New(datastore.WithPodRuntimeInspector(fakePodRuntimeInspector{}))
+}
+
+type discoveredSource struct{}
+
+func (discoveredSource) Snapshot(context.Context) ([]aiv1alpha1.Endpoint, error) {
+	return []aiv1alpha1.Endpoint{{Name: "discovered", Address: "10.0.0.9"}}, nil
+}
+func (discoveredSource) Close() {}
+
+func TestExternalDiscoveryOwnsMembership(t *testing.T) {
+	store := newStoreWithMockBackend()
+	d, err := discovery.NewController(discovery.Config{
+		Provider: "test", RefreshInterval: "1h", Mappings: []discovery.Mapping{{ModelServer: "default/ms"}},
+	}, store, discovery.Registry{"test": func(types.NamespacedName, map[string]interface{}, func()) (discovery.Source, error) {
+		return discoveredSource{}, nil
+	}})
+	require.NoError(t, err)
+	defer d.Close()
+	factory := informersv1alpha1.NewSharedInformerFactory(kthenafake.NewSimpleClientset(), 0)
+	c, err := NewModelServerController(factory, nil, store, common.NewTransportRegistry(), WithEndpointDiscovery(d))
+	require.NoError(t, err)
+	require.Nil(t, c.podLister)
+	require.Nil(t, c.podSynced)
+	require.Nil(t, c.podRegistration)
+	ms := staticModelServer(aiv1alpha1.Endpoint{Name: "static", Address: "10.0.0.1"})
+	index := factory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
+	require.NoError(t, index.Add(ms))
+	require.NoError(t, c.syncModelServerHandler("default/ms"))
+	discoveredName := types.NamespacedName{Namespace: "default", Name: "ms:discovered"}
+	require.Eventually(t, func() bool { return store.GetPodInfo(discoveredName) != nil }, 5*time.Second, time.Millisecond)
+	require.Nil(t, store.GetPodInfo(types.NamespacedName{Namespace: "default", Name: "ms:static"}))
+	// A normal resource reconciliation must not restore the static endpoint set.
+	require.NoError(t, c.syncModelServerHandler("default/ms"))
+	require.NoError(t, c.syncPodHandler("default/ms:discovered"))
+	require.NotNil(t, store.GetPodInfo(discoveredName))
+	require.NoError(t, index.Delete(ms))
+	require.NoError(t, c.syncModelServerHandler("default/ms"))
+	require.Nil(t, store.GetPodInfo(discoveredName))
+	require.Nil(t, store.GetModelServer(utils.GetNamespaceName(ms)))
 }
 
 func TestModelServerController_ModelServerLifecycle(t *testing.T) {
@@ -319,7 +359,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 
 		sync := waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) > 0 && pods[0].Pod.Name == "test-pod-ready"
+			return len(pods) > 0 && pods[0].GetPodNamespacedName().Name == "test-pod-ready"
 		})
 		assert.True(t, sync, "Pod should be found in store after creation")
 	})
@@ -360,7 +400,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 		// The exact verification depends on your store implementation
 		sync = waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) == 1 && pods[0].Pod.Name == "test-pod-ready"
+			return len(pods) == 1 && pods[0].GetPodNamespacedName().Name == "test-pod-ready"
 		})
 		assert.True(t, sync, "Pod should be found in store after creation")
 	})
@@ -405,7 +445,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 		sync := waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
 			return len(pods) == 2 &&
-				(pods[0].Pod.Name == "test-pod-update-ready" || pods[1].Pod.Name == "test-pod-update-ready")
+				(pods[0].GetPodNamespacedName().Name == "test-pod-update-ready" || pods[1].GetPodNamespacedName().Name == "test-pod-update-ready")
 		})
 		assert.True(t, sync, "Pod should be found in store after update")
 	})
@@ -455,7 +495,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 		// Verify pod was removed from store since it's not ready
 		sync = waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) == 2 && (pods[0].Pod.Name != "test-pod-update-not-ready" && pods[1].Pod.Name != "test-pod-update-not-ready")
+			return len(pods) == 2 && (pods[0].GetPodNamespacedName().Name != "test-pod-update-not-ready" && pods[1].GetPodNamespacedName().Name != "test-pod-update-not-ready")
 		})
 		assert.True(t, sync, "Pod should not be found in store after creation")
 	})
@@ -714,7 +754,7 @@ func TestModelServerController_PodSelectionLogic(t *testing.T) {
 
 		sync := waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) > 0 && pods[0].Pod.Name == "test-pod-matching"
+			return len(pods) > 0 && pods[0].GetPodNamespacedName().Name == "test-pod-matching"
 		})
 		assert.True(t, sync, "Pod should be found in store after creation")
 	})
@@ -1055,7 +1095,7 @@ func TestModelServerController_SharedPods(t *testing.T) {
 	// Verify both pods are present
 	podNames := make(map[types.NamespacedName]bool)
 	for _, pod := range pods {
-		podNames[utils.GetNamespaceName(pod.Pod)] = true
+		podNames[pod.GetPodNamespacedName()] = true
 	}
 	assert.True(t, podNames[pod1Name], "pod1 should be returned for ms2")
 	assert.True(t, podNames[pod2Name], "pod2 should be returned for ms2")

@@ -165,3 +165,63 @@ kubectl apply -f configmap.yaml
 # Restart Router Pod
 kubectl rollout restart deployment/kthena-router
 ```
+
+## External Endpoint Discovery
+
+The optional `endpointDiscovery` section selects a compiled-in discovery provider.
+When omitted (or `provider: kubernetes`), native Pod and static endpoint behavior
+is unchanged. External mode disables Pod discovery for the whole router.
+
+No external providers are included by default. An integration implements
+`discovery.Source` and a `discovery.Factory`, then supplies its registry through
+`Server.EndpointDiscoveryRegistry` before calling `Run`. For example, with an
+integration-provided `customdiscovery.NewSource` factory:
+
+```go
+server.EndpointDiscoveryRegistry = discovery.Registry{
+    "custom": customdiscovery.NewSource,
+}
+```
+
+The matching router configuration could be:
+
+```yaml
+endpointDiscovery:
+  provider: custom
+  refreshInterval: 5s
+  snapshotTimeout: 2s
+  mappings:
+    - modelServer: default/example-model
+      parameters:
+        service: example-model
+```
+
+`custom` and `service` are illustrative, not a bundled provider or a built-in
+parameter. Providers define and validate their own parameters. Selecting a name
+that was not registered fails startup; YAML cannot load a provider implementation.
+
+Sources return complete routable snapshots using the existing Endpoint type. A
+successful empty snapshot removes all instances. Lookup errors and invalid
+snapshots retain the last successful membership and are retried.
+
+Each mapping exclusively owns the ModelServer's endpoint membership. Its selector
+or static endpoints do not override discovery results. ModelServer validation is
+unchanged: keep a valid `workloadSelector.matchLabels` plus `workloadPort`, or valid
+static endpoints. Unmapped static models still work; unmapped selector-based
+models remain empty, with no fallback to Kubernetes Pods.
+
+Both Kubernetes resources and `--config-source=file` are supported. The latter
+loads ModelServer/ModelRoute resource manifests; it is independent of endpoint
+discovery and does not provide an endpoint discovery backend.
+
+Endpoint names are instance identities within a ModelServer. Change the name on
+replacement or address/port changes. Optional `labels` supply scheduling metadata
+such as PD role/group labels; discovery does not infer them from an IP address.
+
+Provider names and mappings require a router restart to change. This draft does
+not support multiple providers per router or Gateway API Inference Extension
+with external discovery. Registry failures can retain stale endpoints without an
+expiry limit; readiness does not prove registry health or serving capacity.
+
+Providers must honor cancellation and release their subscriptions on Close. The
+shared controller owns validation, synthetic Pods and Store synchronization.

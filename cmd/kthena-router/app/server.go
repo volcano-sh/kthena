@@ -26,7 +26,9 @@ import (
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/discovery"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/filesource"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -68,6 +70,9 @@ type Server struct {
 	// RouterConfigFile is the scheduler and authentication configuration. It
 	// defaults to DefaultRouterConfigFile.
 	RouterConfigFile string
+	// EndpointDiscoveryRegistry supplies compiled-in providers before Run.
+	// No external providers are registered by default. Do not mutate it while running.
+	EndpointDiscoveryRegistry discovery.Registry
 	// drainTimeout is HTTP server shutdown grace; not datastore state.
 	drainTimeout time.Duration
 }
@@ -122,14 +127,34 @@ func (s *Server) Run(ctx context.Context) {
 	// Per-ModelServer upstream transport registry, shared between the router
 	// (hot-path lookups) and the ModelServer controller (lifecycle writes).
 	transportRegistry := common.NewTransportRegistry()
+	configFile := s.RouterConfigFile
+	if configFile == "" {
+		configFile = DefaultRouterConfigFile
+	}
+	config, err := conf.ParseRouterConfig(configFile)
+	if err != nil {
+		klog.Fatalf("Failed to load router configuration: %v", err)
+	}
+	endpointDiscovery, err := newEndpointDiscovery(config.EndpointDiscovery, store, s.EnableGatewayAPIInferenceExtension, s.EndpointDiscoveryRegistry)
+	if err != nil {
+		klog.Fatalf("Invalid endpoint discovery configuration: %v", err)
+	}
+	if endpointDiscovery != nil {
+		defer endpointDiscovery.Close()
+		go func() {
+			if err := endpointDiscovery.Run(ctx); err != nil {
+				klog.Fatalf("Endpoint discovery failed: %v", err)
+			}
+		}()
+	}
 
 	// must be run before the controller, because it will register callbacks
 	r := NewRouter(store, s.RouterConfigFile, transportRegistry)
 	// start the configured resource source
 	if s.ConfigSource == ConfigSourceFile {
-		s.controllers = s.startFileSource(store, transportRegistry, ctx.Done())
+		s.controllers = s.startFileSource(store, transportRegistry, ctx.Done(), endpointDiscovery)
 	} else {
-		s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst, transportRegistry)
+		s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst, transportRegistry, endpointDiscovery)
 	}
 
 	// Start store's periodic update loop after controllers have synced
@@ -153,8 +178,8 @@ func (s *Server) HasSynced() bool {
 
 // startFileSource loads resources from ConfigDir and keeps the store in sync
 // with it, replacing the API server backed controllers.
-func (s *Server) startFileSource(store datastore.Store, transportRegistry *common.TransportRegistry, stop <-chan struct{}) Controller {
-	source, err := filesource.NewSource(s.ConfigDir, s.ConfigSyncPeriod, store, transportRegistry)
+func (s *Server) startFileSource(store datastore.Store, transportRegistry *common.TransportRegistry, stop <-chan struct{}, endpointDiscovery *discovery.Controller) Controller {
+	source, err := filesource.NewSource(s.ConfigDir, s.ConfigSyncPeriod, store, transportRegistry, filesource.WithEndpointDiscovery(endpointDiscovery))
 	if err != nil {
 		klog.Fatalf("Failed to create file resource source: %v", err)
 	}

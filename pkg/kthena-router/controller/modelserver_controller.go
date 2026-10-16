@@ -40,6 +40,7 @@ import (
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/discovery"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -61,6 +62,15 @@ type ModelServerController struct {
 	// transportRegistry holds per-ModelServer upstream transports driven by
 	// this controller's single worker, so writes are serialized.
 	transportRegistry *common.TransportRegistry
+	endpointDiscovery *discovery.Controller
+}
+
+type ModelServerControllerOption func(*ModelServerController)
+
+// WithEndpointDiscovery replaces Pod discovery, but retains the ModelServer
+// informer and transport lifecycle. The caller owns discovery.Run/Close.
+func WithEndpointDiscovery(d *discovery.Controller) ModelServerControllerOption {
+	return func(c *ModelServerController) { c.endpointDiscovery = d }
 }
 
 func NewModelServerController(
@@ -68,19 +78,20 @@ func NewModelServerController(
 	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
 	transportRegistry *common.TransportRegistry,
+	options ...ModelServerControllerOption,
 ) (*ModelServerController, error) {
 	modelServerInformer := kthenaInformerFactory.Networking().V1alpha1().ModelServers()
-	podInformer := kubeInformerFactory.Core().V1().Pods()
 
 	controller := &ModelServerController{
 		modelServerLister: modelServerInformer.Lister(),
-		podLister:         podInformer.Lister(),
 		modelServerSynced: modelServerInformer.Informer().HasSynced,
-		podSynced:         podInformer.Informer().HasSynced,
 		workqueue:         workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueItem]()),
 		initialSync:       &atomic.Bool{},
 		store:             store,
 		transportRegistry: transportRegistry,
+	}
+	for _, option := range options {
+		option(controller)
 	}
 
 	var err error
@@ -96,7 +107,13 @@ func NewModelServerController(
 		return nil, fmt.Errorf("failed to add event handler for modelserver controller: %w", err)
 	}
 
-	// Register Pod event handlers
+	if controller.endpointDiscovery != nil {
+		return controller, nil
+	}
+	// Register Pod event handlers only for native Pod discovery.
+	podInformer := kubeInformerFactory.Core().V1().Pods()
+	controller.podLister = podInformer.Lister()
+	controller.podSynced = podInformer.Informer().HasSynced
 	controller.podRegistration, err = podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueuePod,
 		UpdateFunc: func(old, new interface{}) {
@@ -114,7 +131,11 @@ func (c *ModelServerController) Run(stopCh <-chan struct{}) error {
 	defer utilruntime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
-	if ok := cache.WaitForCacheSync(stopCh, c.modelServerSynced, c.podSynced); !ok {
+	syncs := []cache.InformerSynced{c.modelServerSynced}
+	if c.podSynced != nil {
+		syncs = append(syncs, c.podSynced)
+	}
+	if ok := cache.WaitForCacheSync(stopCh, syncs...); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 	// add initialSync signal
@@ -184,7 +205,13 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 	ms, err := c.modelServerLister.ModelServers(namespace).Get(name)
 	if errors.IsNotFound(err) {
 		msName := types.NamespacedName{Namespace: namespace, Name: name}
-		_ = c.store.DeleteModelServer(msName)
+		if c.endpointDiscovery != nil {
+			if err := c.endpointDiscovery.DeleteModelServer(msName); err != nil {
+				return err
+			}
+		} else {
+			_ = c.store.DeleteModelServer(msName)
+		}
 		c.transportRegistry.Delete(msName)
 		return nil
 	}
@@ -199,6 +226,9 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 		cp = ms.Spec.TrafficPolicy.ConnectionPool
 	}
 	c.transportRegistry.Update(utils.GetNamespaceName(ms), cp)
+	if c.endpointDiscovery != nil {
+		return c.endpointDiscovery.UpdateModelServer(ms)
+	}
 
 	if len(ms.Spec.Endpoints) > 0 {
 		return SyncStaticEndpoints(c.store, ms)
@@ -258,6 +288,9 @@ func (c *ModelServerController) syncModelServerHandler(key string) error {
 }
 
 func (c *ModelServerController) syncPodHandler(key string) error {
+	if c.endpointDiscovery != nil {
+		return nil
+	}
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		utilruntime.HandleError(fmt.Errorf("invalid resource key: %s", key))
