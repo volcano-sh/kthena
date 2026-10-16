@@ -289,6 +289,173 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
 
+func TestCreatePodDeletesStalePodFromPreviousSameNamedModelServing(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ms",
+			Namespace: "default",
+			UID:       types.UID("new-uid"),
+		},
+	}
+
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	existing := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ms-entry-0",
+			Namespace: "default",
+			UID:       types.UID("existing-pod-uid"),
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
+				workloadv1alpha1.RoleLabelKey:             "role",
+				workloadv1alpha1.RoleIDKey:                "role-0",
+				workloadv1alpha1.EntryLabelKey:            utils.Entry,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					// Left over from a previous ModelServing with the same name but a
+					// different UID.
+					Name: ms.Name,
+					UID:  types.UID("old-uid"),
+				},
+			},
+		},
+	}
+
+	_, err := h.kubeClient.CoreV1().Pods("default").Create(context.Background(), existing, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, err := controller.podsLister.Pods("default").Get(existing.Name)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	newPod := existing.DeepCopy()
+	newPod.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+			Kind:       workloadv1alpha1.ModelServingKind.Kind,
+			Name:       ms.Name,
+			UID:        ms.UID,
+		},
+	}
+
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod, true, nil, "entry")
+	assert.ErrorContains(t, err, "does not match expected identity")
+
+	_, err = h.kubeClient.CoreV1().Pods("default").Get(context.Background(), existing.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "stale pod from previous same-named ModelServing should have been deleted, got err=%v", err)
+
+	// The delete must be UID-preconditioned on the stale pod itself, not a bare
+	// name-based delete that could also remove a replacement pod with the same name.
+	var deleteAction kubetesting.DeleteAction
+	for _, action := range h.kubeClient.Actions() {
+		if da, ok := action.(kubetesting.DeleteAction); ok && action.Matches("delete", "pods") && da.GetName() == existing.Name {
+			deleteAction = da
+			break
+		}
+	}
+	if assert.NotNil(t, deleteAction, "expected a delete action for the stale pod") {
+		preconditions := deleteAction.GetDeleteOptions().Preconditions
+		if assert.NotNil(t, preconditions, "delete should carry a UID precondition") && assert.NotNil(t, preconditions.UID) {
+			assert.Equal(t, existing.UID, *preconditions.UID)
+		}
+	}
+}
+
+// TestCreatePodRetriesUntilStalePodDeletionCompletes models a real API server,
+// where a DELETE can return before the stale pod is actually gone. It should
+// take an extra reconcile past the one that issues the delete before create
+// succeeds, not a single pass.
+func TestCreatePodRetriesUntilStalePodDeletionCompletes(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ms",
+			Namespace: "default",
+			UID:       types.UID("new-uid"),
+		},
+	}
+
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	existing := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ms-entry-0",
+			Namespace: "default",
+			UID:       types.UID("existing-pod-uid"),
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
+				workloadv1alpha1.RoleLabelKey:             "role",
+				workloadv1alpha1.RoleIDKey:                "role-0",
+				workloadv1alpha1.EntryLabelKey:            utils.Entry,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					// Left over from a previous ModelServing with the same name but a
+					// different UID.
+					Name: ms.Name,
+					UID:  types.UID("old-uid"),
+				},
+			},
+		},
+	}
+
+	_, err := h.kubeClient.CoreV1().Pods("default").Create(context.Background(), existing, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, err := controller.podsLister.Pods("default").Get(existing.Name)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// The first DELETE the code issues succeeds but, as against a real API
+	// server, does not actually remove the pod yet; the second one does.
+	var deleteCalls int
+	h.kubeClient.PrependReactor("delete", "pods", func(kubetesting.Action) (bool, runtime.Object, error) {
+		deleteCalls++
+		return deleteCalls == 1, nil, nil
+	})
+
+	newPod := existing.DeepCopy()
+	newPod.OwnerReferences = []metav1.OwnerReference{
+		{
+			APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+			Kind:       workloadv1alpha1.ModelServingKind.Kind,
+			Name:       ms.Name,
+			UID:        ms.UID,
+		},
+	}
+
+	// First reconcile: requests the delete, but the stale pod is still present
+	// afterward, so create still fails this pass.
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod.DeepCopy(), true, nil, "entry")
+	assert.ErrorContains(t, err, "does not match expected identity")
+	_, err = h.kubeClient.CoreV1().Pods("default").Get(context.Background(), existing.Name, metav1.GetOptions{})
+	assert.NoError(t, err, "stale pod should still be present after the first, not-yet-effective delete")
+
+	// Second reconcile: the earlier delete is still outstanding, so this pass
+	// fails too, but this time the delete actually removes the pod.
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod.DeepCopy(), true, nil, "entry")
+	assert.ErrorContains(t, err, "does not match expected identity")
+	_, err = h.kubeClient.CoreV1().Pods("default").Get(context.Background(), existing.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "stale pod should be gone after the second delete, got err=%v", err)
+
+	// Third reconcile: the stale pod is actually gone, so create succeeds.
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod.DeepCopy(), true, nil, "entry")
+	assert.NoError(t, err, "should converge once the stale pod is actually gone")
+
+	created, err := h.kubeClient.CoreV1().Pods("default").Get(context.Background(), newPod.Name, metav1.GetOptions{})
+	if assert.NoError(t, err) {
+		assert.True(t, utils.IsOwnedByModelServingWithUID(created, ms.UID))
+	}
+}
+
 func TestDeletePodGroupEnqueues(t *testing.T) {
 	ms := newModelServingForDeleteTest("default", "ms")
 	h := newTestController(t, ms)
@@ -2751,6 +2918,8 @@ func TestManageRoleReplicas(t *testing.T) {
 		initialRoleIDs   []int
 		addEntryPod      bool
 		mismatchOwnerUID bool
+		ownerlessPod     bool
+		otherMSOwnedPod  bool
 		expectedRoleSize int
 		expectedPodCount int
 		expectRequeue    bool
@@ -2795,6 +2964,32 @@ func TestManageRoleReplicas(t *testing.T) {
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
 			expectRequeue:    true,
+		},
+		{
+			name:             "pod with no owner references is left untouched and does not panic",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			ownerlessPod:     true,
+			expectedRoleSize: 1,
+			expectedPodCount: 1,
+			// Satisfied by createPod's pre-existing AlreadyExists handling, not by the
+			// orphan-detection logic under test.
+			expectRequeue: true,
+		},
+		{
+			name:             "pod owned by a differently-named ModelServing is left untouched",
+			roleReplicas:     1,
+			workerReplicas:   0,
+			initialRoleIDs:   []int{0},
+			addEntryPod:      true,
+			otherMSOwnedPod:  true,
+			expectedRoleSize: 1,
+			expectedPodCount: 1,
+			// Satisfied by createPod's pre-existing AlreadyExists handling, not by the
+			// orphan-detection logic under test.
+			expectRequeue: true,
 		},
 	}
 
@@ -2856,10 +3051,20 @@ func TestManageRoleReplicas(t *testing.T) {
 				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, roleID), revision, roleTemplateHash)
 			}
 
+			var staleEntryPodUID types.UID
 			if tt.addEntryPod {
 				entryPod := utils.GenerateEntryPod(*ms.Spec.Template.Roles[0].DeepCopy(), ms, groupName, utils.GenerateRoleID(roleName, 0), revision, roleTemplateHash)
 				if tt.mismatchOwnerUID && len(entryPod.OwnerReferences) > 0 {
 					entryPod.OwnerReferences[0].UID = types.UID("mismatched-uid")
+					entryPod.UID = types.UID(fmt.Sprintf("stale-pod-uid-%d", idx))
+					staleEntryPodUID = entryPod.UID
+				}
+				if tt.ownerlessPod {
+					entryPod.OwnerReferences = nil
+				}
+				if tt.otherMSOwnedPod && len(entryPod.OwnerReferences) > 0 {
+					entryPod.OwnerReferences[0].Name = "other-model-serving"
+					entryPod.OwnerReferences[0].UID = types.UID("other-ms-uid")
 				}
 				_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
 				assert.NoError(t, err)
@@ -2888,11 +3093,53 @@ func TestManageRoleReplicas(t *testing.T) {
 			assert.Equal(t, tt.expectedPodCount, len(pods.Items), "pod count should match expected")
 			//}
 
+			if tt.mismatchOwnerUID {
+				// The orphaned pod should be deleted and replaced, not counted as satisfying demand.
+				for _, pod := range pods.Items {
+					assert.True(t, utils.IsOwnedByModelServingWithUID(&pod, ms.UID),
+						"pod %s should be owned by the current ModelServing, not left over from the previous one", pod.Name)
+				}
+
+				// The delete must be UID-preconditioned on the stale pod itself, not a bare
+				// name-based delete that could also remove an unrelated same-named replacement.
+				var deleteAction kubetesting.DeleteAction
+				for _, action := range kubeClient.Actions() {
+					if da, ok := action.(kubetesting.DeleteAction); ok && action.Matches("delete", "pods") {
+						deleteAction = da
+						break
+					}
+				}
+				if assert.NotNil(t, deleteAction, "expected a delete action for the stale pod") {
+					preconditions := deleteAction.GetDeleteOptions().Preconditions
+					if assert.NotNil(t, preconditions, "delete should carry a UID precondition") && assert.NotNil(t, preconditions.UID) {
+						assert.Equal(t, staleEntryPodUID, *preconditions.UID)
+					}
+				}
+			}
+
+			if tt.ownerlessPod {
+				// An ownerless pod is not a ModelServing pod; it must be left untouched.
+				if assert.Len(t, pods.Items, 1) {
+					assert.Empty(t, pods.Items[0].OwnerReferences, "ownerless pod should be left untouched, not deleted")
+				}
+			}
+
+			if tt.otherMSOwnedPod {
+				// A pod owned by a differently-named ModelServing must be left untouched,
+				// not mistaken for a stale pod of the current ModelServing.
+				if assert.Len(t, pods.Items, 1) {
+					if assert.NotEmpty(t, pods.Items[0].OwnerReferences) {
+						assert.Equal(t, "other-model-serving", pods.Items[0].OwnerReferences[0].Name,
+							"pod owned by another ModelServing should be left untouched, not deleted")
+					}
+				}
+			}
+
 			if tt.expectRequeue {
 				requeued := waitForObjectInCache(t, 2*time.Second, func() bool {
 					return controller.workqueue.Len() > 0
 				})
-				assert.True(t, requeued, "model serving should be requeued for owner UID mismatch")
+				assert.True(t, requeued, "model serving should be requeued")
 			}
 		})
 	}
