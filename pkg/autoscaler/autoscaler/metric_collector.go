@@ -47,7 +47,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/autoscaler/datastructure"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/histogram"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
-	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	inferControllerUtils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -128,13 +127,9 @@ func (collector *MetricCollector) UpdateMetrics(
 	podGroups, externalMetrics := collector.planMetricSources(ctx, targetMetricSources)
 
 	for _, g := range podGroups {
-		values, groupUnreadyPods, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
+		values, groupUnreadyPods, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
 		if collectErr != nil {
 			klog.Warningf("collect pod metrics for target %s failed: %v", collector.Target.TargetRef.Name, collectErr)
-			continue
-		}
-		if failed {
-			klog.Warningf("collect pod metrics for target %s skipped because pod failed/restarted", collector.Target.TargetRef.Name)
 			continue
 		}
 		groupMetrics := make([]algorithm.Metrics, 0, len(values))
@@ -244,28 +239,22 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	specs []podMetricSpec,
 	pastHistograms map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
-) (values map[string]algorithm.Metrics, unreadyPods sets.Set[string], failed bool, err error) {
+) (values map[string]algorithm.Metrics, unreadyPods sets.Set[string], err error) {
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
 	}
 	if len(pods) == 0 {
-		return nil, nil, false, fmt.Errorf("pod list is empty")
+		return nil, nil, fmt.Errorf("pod list is empty")
 	}
 
-	unreadyPods, failed = evaluatePodsReadiness(pods)
-	if failed {
-		return
-	}
+	toScrape, unreadyPods := groupPodsByReadiness(pods)
 
 	// Multiple policy keys may target the same scrape metric name.
 	wanted := groupPolicyKeysByScrapeName(specs)
 
-	values = make(map[string]algorithm.Metrics, len(pods))
-	for _, pod := range pods {
-		if !inferControllerUtils.IsPodRunningAndReady(pod) {
-			continue
-		}
+	values = make(map[string]algorithm.Metrics, len(toScrape))
+	for _, pod := range toScrape {
 		podValues := make(algorithm.Metrics, len(specs))
 		if scrapeErr := collector.collectPodMetrics(ctx, pod, podSource, wanted, podValues, pastHistograms, currentHistograms); scrapeErr != nil {
 			// Keep the ready pod as an entry with no values so the algorithm counts
@@ -278,17 +267,23 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	return
 }
 
-// evaluatePodsReadiness counts pods that are not ready and reports whether any
-// pod has failed or restarted.
-func evaluatePodsReadiness(pods []*corev1.Pod) (unreadyPods sets.Set[string], failed bool) {
+// groupPodsByReadiness splits pods into the ones to scrape (running and ready)
+// and the unready ones. Failed or terminating pods are skipped and counted
+// nowhere, as in the Kubernetes HPA. A pod whose container restarted and is
+// ready again is scraped like any other ready pod.
+func groupPodsByReadiness(pods []*corev1.Pod) (toScrape []*corev1.Pod, unreadyPods sets.Set[string]) {
 	unreadyPods = sets.New[string]()
+	toScrape = make([]*corev1.Pod, 0, len(pods))
 	for _, pod := range pods {
+		if util.IsPodFailed(pod) {
+			klog.V(4).Infof("skip pod %s for metrics: failed or terminating", metricPodKey(pod))
+			continue
+		}
 		if !inferControllerUtils.IsPodRunningAndReady(pod) {
 			unreadyPods.Insert(metricPodKey(pod))
+			continue
 		}
-		if util.IsPodFailed(pod) || inplace.UnexpectedRestart(pod) {
-			failed = true
-		}
+		toScrape = append(toScrape, pod)
 	}
 	return
 }

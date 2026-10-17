@@ -35,6 +35,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	corelister "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
@@ -476,6 +477,84 @@ func TestUpdateMetricsReturnsOneEntryPerReadyPod(t *testing.T) {
 	// The recommendation algorithm averages over entries, so each ready pod must
 	// keep its own value instead of being summed into a single entry.
 	require.Equal(t, map[string][]algorithm.Metrics{"queue_depth": {{"queue_depth": 40}, {"queue_depth": 40}}}, readyMetrics)
+}
+
+func TestUpdateMetricsKeepsGroupWhenAPodRestarted(t *testing.T) {
+	// A restarted pod must not cause the whole group to be returned empty: both
+	// ready pods, including the restarted one, keep their entry.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "# TYPE queue_depth gauge\nqueue_depth 40\n")
+	}))
+	t.Cleanup(server.Close)
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(serverURL.Port())
+	require.NoError(t, err)
+
+	labels := map[string]string{
+		workload.ModelServingNameLabelKey: "model",
+		workload.EntryLabelKey:            "true",
+	}
+	podA := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", Labels: labels},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIP:      "127.0.0.1",
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	podB := podA.DeepCopy()
+	podB.Name = "pod-b"
+	podB.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "vllm", RestartCount: 1}}
+
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	require.NoError(t, indexer.Add(podA))
+	require.NoError(t, indexer.Add(podB))
+	podLister := corelister.NewPodLister(indexer)
+
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}}
+	collector := NewMetricCollector(
+		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
+		policy,
+		algorithm.Metrics{"queue_depth": 10},
+	)
+
+	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, map[string]int32{"queue_depth": 0}, unreadyCount)
+	require.Equal(t, map[string][]algorithm.Metrics{"queue_depth": {{"queue_depth": 40}, {"queue_depth": 40}}}, readyMetrics)
+}
+
+func TestGroupPodsByReadiness(t *testing.T) {
+	ready := []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	deleting := metav1.Now()
+	pods := []*corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "ready", Namespace: "default"},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: ready}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "restarted", Namespace: "default"},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: ready,
+				ContainerStatuses: []corev1.ContainerStatus{{Name: "vllm", RestartCount: 2}}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "default"},
+			Status: corev1.PodStatus{Phase: corev1.PodPending}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "failed", Namespace: "default"},
+			Status: corev1.PodStatus{Phase: corev1.PodFailed}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "terminating", Namespace: "default", DeletionTimestamp: &deleting},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: ready}},
+	}
+
+	toScrape, unready := groupPodsByReadiness(pods)
+
+	names := make([]string, 0, len(toScrape))
+	for _, pod := range toScrape {
+		names = append(names, pod.Name)
+	}
+	// A restarted pod that is ready again is scraped. Failed and terminating pods
+	// are counted nowhere, not even as unready.
+	assert.Equal(t, []string{"ready", "restarted"}, names)
+	assert.Equal(t, sets.New("default/pending"), unready)
 }
 
 func TestUpdateMetricsKeepsReadyPodWithFailedScrapeAsMissing(t *testing.T) {
