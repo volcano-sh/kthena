@@ -51,6 +51,11 @@ type ModelServingSpec struct {
 	// +optional
 	Plugins []PluginSpec `json:"plugins,omitempty"`
 
+	// BootstrapAccelerateStrategy creates role replicas in source-aware batches
+	// for peer-to-peer model weight loading. If unset, creation is unchanged.
+	// +optional
+	BootstrapAccelerateStrategy *BootstrapAccelerateStrategy `json:"bootstrapAccelerateStrategy,omitempty"`
+
 	// Template defines the template for ServingGroup
 	Template ServingGroup `json:"template"`
 
@@ -74,6 +79,86 @@ type ModelServingSpec struct {
 }
 
 type RecoveryPolicy string
+
+// BootstrapAccelerateStrategyProvider identifies the weight transfer provider.
+// +kubebuilder:validation:Enum={ModelExpress}
+type BootstrapAccelerateStrategyProvider string
+
+const (
+	BootstrapAccelerateStrategyProviderModelExpress BootstrapAccelerateStrategyProvider = "ModelExpress"
+)
+
+// BootstrapAccelerateStrategy configures source-aware creation of role replicas.
+type BootstrapAccelerateStrategy struct {
+	// Provider is the weight transfer system used by the inference engines.
+	// +kubebuilder:default=ModelExpress
+	// +optional
+	Provider BootstrapAccelerateStrategyProvider `json:"provider,omitempty"`
+
+	// Roles limits acceleration to the listed roles and configures each of them.
+	// Empty means all roles with default settings.
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Roles []BootstrapRole `json:"roles,omitempty"`
+
+	// SourceFanOut is the number of P2P targets that one source can serve, i.e.
+	// starting role replicas (created but not yet Running) per ready replica of
+	// the same role. Once a role replica becomes ready, it acts as a new source
+	// for the other replicas of that role, so the budget grows as more replicas
+	// become ready. The effective budget is at least the role's gang minimum.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
+	// +optional
+	SourceFanOut *int32 `json:"sourceFanOut,omitempty"`
+
+	// ModelExpress configures environment injection for inference engines.
+	// If unset, users configure the engine environment themselves.
+	// +optional
+	ModelExpress *ModelExpressConfig `json:"modelExpress,omitempty"`
+}
+
+// BootstrapRole configures bootstrap acceleration for one role.
+type BootstrapRole struct {
+	// Name is the name of a role in spec.template.roles.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// InitialSeedReplicas is the number of this role's replicas that may be
+	// created while no ready source exists for it. It is a positive integer or a
+	// percentage from 1% to 100% of spec.replicas * role.replicas, rounded up
+	// (10% of 3 is 1). The effective budget is at least the role's gang minimum
+	// in one ServingGroup. A desired count of zero creates nothing.
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 1 : self.matches('^([1-9]|[1-9][0-9]|100)%$')",message="initialSeedReplicas must be a positive integer or a percentage from 1% to 100%"
+	// +kubebuilder:default=1
+	// +optional
+	InitialSeedReplicas *intstr.IntOrString `json:"initialSeedReplicas,omitempty"`
+}
+
+// ModelExpressConfig configures the ModelExpress inference-engine containers.
+type ModelExpressConfig struct {
+	// EngineContainers names regular inference-engine containers in entry and
+	// worker Pods of in-scope roles. Sidecars and init containers are not selected.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:MinLength=1
+	// +listType=set
+	EngineContainers []string `json:"engineContainers"`
+
+	// ServerAddress is the ModelExpress server's gRPC address (host:port).
+	// It is injected as MX_SERVER_ADDRESS only if that variable is not already
+	// set in the selected container. If empty, users supply the endpoint themselves.
+	// +optional
+	ServerAddress string `json:"serverAddress,omitempty"`
+
+	// ReadyURL is the engine endpoint that ModelExpress polls before a source
+	// publishes its metadata; it may differ from the Pod readiness probe.
+	// It is injected as MX_ARTIFACT_READY_URL only if that variable is not already
+	// set in the selected container. If empty, ModelExpress uses the engine default.
+	// +kubebuilder:validation:XValidation:rule="isURL(self) && url(self).getScheme() in ['http', 'https']",message="readyURL must be an absolute http or https URL"
+	// +optional
+	ReadyURL string `json:"readyURL,omitempty"`
+}
 
 // PluginType represents the implementation category of a plugin.
 type PluginType string
