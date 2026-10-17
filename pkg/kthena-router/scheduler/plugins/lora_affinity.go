@@ -42,6 +42,9 @@ func (l *LoraAffinity) Name() string {
 }
 
 func (l *LoraAffinity) Filter(ctx *framework.Context, pods []*datastore.PodInfo) []*datastore.PodInfo {
+	if ctx.Model == "" {
+		return pods
+	}
 	return slices.DeleteFunc(pods, func(info *datastore.PodInfo) bool {
 		return !info.Contains(ctx.Model)
 	})

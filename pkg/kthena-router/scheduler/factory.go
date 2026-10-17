@@ -96,7 +96,6 @@ func registerDefaultPlugins(registry *PluginRegistry) {
 
 func getFilterPlugins(registry *PluginRegistry, filterPluginMap []string, pluginsArgMap map[string]runtime.RawExtension) []framework.FilterPlugin {
 	var list []framework.FilterPlugin
-	// TODO: enable lora affinity when models from metrics are available.
 	for _, pluginName := range filterPluginMap {
 		if builderFunc, exist := registry.getFilterPlugin(pluginName); !exist {
 			klog.Errorf("Failed to get plugin %s.", pluginName)
