@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/histogram"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -330,6 +331,80 @@ request_duration_seconds_count 1
 	// All observations are in the le="1" bucket, so the SLO percentile
 	// extracted from the histogram diff resolves to that upper bound.
 	assert.InDelta(t, 1.0, got, 1e-9)
+}
+
+func TestExtractMetricFromFamilyUsesEmptyBaselineWhenCountDrops(t *testing.T) {
+	const metricName = "time_to_first_token_seconds"
+	family := func(text string) *io_prometheus_client.MetricFamily {
+		families, err := parsePrometheusFamilies(text, map[string][]string{metricName: {metricName}})
+		require.NoError(t, err)
+		return families[metricName]
+	}
+	// 85 requests before the engine restarted. Afterwards the histogram starts
+	// again from zero with 5 requests, and no container restart shows it.
+	before := family(`# TYPE time_to_first_token_seconds histogram
+time_to_first_token_seconds_bucket{le="0.5"} 57
+time_to_first_token_seconds_bucket{le="1"} 76
+time_to_first_token_seconds_bucket{le="2"} 85
+time_to_first_token_seconds_bucket{le="+Inf"} 85
+time_to_first_token_seconds_sum 60
+time_to_first_token_seconds_count 85
+`)
+	after := family(`# TYPE time_to_first_token_seconds histogram
+time_to_first_token_seconds_bucket{le="0.5"} 3
+time_to_first_token_seconds_bucket{le="1"} 4
+time_to_first_token_seconds_bucket{le="2"} 5
+time_to_first_token_seconds_bucket{le="+Inf"} 5
+time_to_first_token_seconds_sum 4
+time_to_first_token_seconds_count 5
+`)
+	_, baseline, _, err := extractMetricFromFamily(before, nil)
+	require.NoError(t, err)
+
+	got, _, found, err := extractMetricFromFamily(after, baseline)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	want, _, _, err := extractMetricFromFamily(after, nil)
+	require.NoError(t, err)
+	assert.InDelta(t, want, got, 1e-9)
+}
+
+func TestPastHistogramMapForPodDropsBaselineAfterEngineRestart(t *testing.T) {
+	started := metav1.NewTime(time.Unix(1000, 0))
+	baseline := map[string]*histogram.Snapshot{"ttft": histogram.NewDefaultSnapshot()}
+	past := map[string]HistogramInfo{
+		"pod-a": {PodStartTime: &started, RestartCount: 0, HistogramMap: baseline},
+	}
+	podWith := func(startedAt metav1.Time, sidecarRestarts, engineRestarts int32) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod-a"},
+			Status: corev1.PodStatus{
+				StartTime: &startedAt,
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: runtimeSidecarContainerName, RestartCount: sidecarRestarts},
+					{Name: "vllm", RestartCount: engineRestarts},
+				},
+			},
+		}
+	}
+	empty := map[string]*histogram.Snapshot{}
+
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want map[string]*histogram.Snapshot
+	}{
+		{name: "no restart keeps the baseline", pod: podWith(started, 0, 0), want: baseline},
+		{name: "engine restart drops the baseline", pod: podWith(started, 0, 1), want: empty},
+		{name: "sidecar-only restart keeps the baseline", pod: podWith(started, 1, 0), want: baseline},
+		{name: "recreated pod drops the baseline", pod: podWith(metav1.NewTime(time.Unix(2000, 0)), 0, 0), want: empty},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, pastHistogramMapForPod(tt.pod, past))
+		})
+	}
 }
 
 func TestParsePrometheusFamiliesReturnsErrorOnMalformedPayload(t *testing.T) {

@@ -79,6 +79,9 @@ func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPol
 type HistogramInfo struct {
 	PodStartTime *metav1.Time
 	HistogramMap map[string]*histogram.Snapshot
+	// RestartCount is the pod's container restart count when the snapshots were
+	// taken, without the runtime sidecar (see engineRestartCount).
+	RestartCount int32
 }
 
 type Scope struct {
@@ -354,15 +357,37 @@ func (collector *MetricCollector) collectPodMetrics(
 	currentHistograms[pod.Name] = HistogramInfo{
 		PodStartTime: pod.Status.StartTime,
 		HistogramMap: currentHistogramMap,
+		RestartCount: engineRestartCount(pod),
 	}
 	return nil
 }
 
+// runtimeSidecarContainerName is the name of the Kthena runtime sidecar in the
+// generated pod templates. The sidecar only relays the engine's /metrics, so its
+// restarts do not reset the engine's histograms.
+const runtimeSidecarContainerName = "runtime"
+
+// engineRestartCount sums the restart counts of the pod's containers, skipping
+// the runtime sidecar. A change means the engine restarted and its histograms
+// started again from zero.
+func engineRestartCount(pod *corev1.Pod) int32 {
+	var restarts int32
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == runtimeSidecarContainerName {
+			continue
+		}
+		restarts += status.RestartCount
+	}
+	return restarts
+}
+
 // pastHistogramMapForPod returns the previous histogram snapshots for pod, but
-// only when the pod has not restarted since they were recorded.
+// only when neither the pod nor its engine container has restarted since they
+// were recorded.
 func pastHistogramMapForPod(pod *corev1.Pod, pastHistograms map[string]HistogramInfo) map[string]*histogram.Snapshot {
 	pastValue, ok := pastHistograms[pod.Name]
-	if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) {
+	if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) &&
+		pastValue.RestartCount == engineRestartCount(pod) {
 		return pastValue.HistogramMap
 	}
 	return map[string]*histogram.Snapshot{}
@@ -468,7 +493,10 @@ func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogra
 		}
 		snapshot := histogram.NewSnapshotOfHistogram(hist)
 		past := histogram.NewDefaultSnapshot()
-		if pastHistogram != nil {
+		// A count below the baseline means the histogram was reset by an engine
+		// restart that no container restart shows, so compare against an empty
+		// baseline instead of returning an error.
+		if pastHistogram != nil && pastHistogram.Count() <= snapshot.Count() {
 			past = pastHistogram
 		}
 		quantile, qErr := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
