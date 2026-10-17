@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -229,7 +230,8 @@ func TestValidateAutoscalingPolicy_DisaggregatedTarget(t *testing.T) {
 	allowed, msg = validator.validateAutoscalingPolicy(invalidPolicy)
 	assert.False(t, allowed)
 	assert.NotContains(t, msg, "spec.metrics and per-role metrics are mutually exclusive")
-	assert.Contains(t, msg, "minReplicas must be <= maxReplicas")
+	// minReplicas <= maxReplicas is now enforced by CRD XValidation, not the webhook.
+	assert.NotContains(t, msg, "minReplicas must be <= maxReplicas")
 	assert.Contains(t, msg, "metricSources key must match an effective metric name")
 
 	missingSourcesPolicy := validPolicy.DeepCopy()
@@ -248,6 +250,66 @@ func TestValidateAutoscalingPolicy_DisaggregatedTarget(t *testing.T) {
 	allowed, msg = validator.validateAutoscalingPolicy(missingInheritedSourcesPolicy)
 	assert.False(t, allowed)
 	assert.Contains(t, msg, "metricSources must be set on every non-fixed role when metrics are configured")
+}
+
+func TestValidateAutoscalingPolicy_MinMaxReplicas(t *testing.T) {
+	// minReplicas <= maxReplicas is enforced by CRD XValidation
+	// (autoscalingpolicy_types.go + generated CRD), not the webhook.
+	// Keep one positive webhook path: valid shapes are still admitted.
+	validator := NewAutoscalingPolicyValidator()
+
+	metrics := []registryv1.AutoscalingPolicyMetric{{Name: "cpu", TargetValue: resource.MustParse("80")}}
+	targetRef := corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "test-target"}
+
+	homoPolicy := &registryv1.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "homo-policy", Namespace: "default"},
+		Spec: registryv1.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			Metrics:          metrics,
+			HomogeneousTarget: &registryv1.HomogeneousTarget{
+				Target:      registryv1.Target{TargetRef: targetRef},
+				MinReplicas: 2,
+				MaxReplicas: 8,
+			},
+		},
+	}
+	allowed, msg := validator.validateAutoscalingPolicy(homoPolicy)
+	assert.True(t, allowed, msg)
+
+	heteroPolicy := &registryv1.AutoscalingPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "hetero-policy", Namespace: "default"},
+		Spec: registryv1.AutoscalingPolicySpec{
+			TolerancePercent: 10,
+			Metrics:          metrics,
+			HeterogeneousTarget: &registryv1.HeterogeneousTarget{
+				Params: []registryv1.HeterogeneousTargetParam{
+					{
+						Target:      registryv1.Target{TargetRef: targetRef},
+						MinReplicas: 1,
+						MaxReplicas: 5,
+						Cost:        10,
+					},
+					{
+						Target:      registryv1.Target{TargetRef: corev1.ObjectReference{Kind: registryv1.ModelServingKind.Kind, Name: "other-target"}},
+						MinReplicas: 2,
+						MaxReplicas: 8,
+						Cost:        20,
+					},
+				},
+			},
+		},
+	}
+	allowed, msg = validator.validateAutoscalingPolicy(heteroPolicy)
+	assert.True(t, allowed, msg)
+}
+
+func TestAutoscalingPolicyCRD_MinMaxReplicas(t *testing.T) {
+	data, err := os.ReadFile("../../../charts/kthena/charts/workload/crds/workload.serving.volcano.sh_autoscalingpolicies.yaml")
+	require.NoError(t, err)
+	content := string(data)
+	// One XValidation per type, message kept identical to old webhook.
+	assert.Contains(t, content, "self.minReplicas <= self.maxReplicas")
+	assert.Contains(t, content, "minReplicas must be <= maxReplicas")
 }
 
 func TestValidateAutoscalingPolicy_DisaggregatedSingleRoleAndFixedRole(t *testing.T) {

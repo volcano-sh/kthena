@@ -401,6 +401,9 @@ spec:
                       - maxReplicas
                       - minReplicas
                       type: object
+                      x-kubernetes-validations:
+                      - message: minReplicas must be <= maxReplicas
+                        rule: self.minReplicas <= self.maxReplicas
                     description: |-
                       Roles defines per-role scaling parameters. The map key is roleName
                       from ModelServing.spec.template.roles[].name. A single role is allowed so
@@ -697,6 +700,9 @@ spec:
                       - maxReplicas
                       - minReplicas
                       type: object
+                      x-kubernetes-validations:
+                      - message: minReplicas must be <= maxReplicas
+                        rule: self.minReplicas <= self.maxReplicas
                     minItems: 1
                     type: array
                 type: object
@@ -901,6 +907,9 @@ spec:
                 - maxReplicas
                 - minReplicas
                 type: object
+                x-kubernetes-validations:
+                - message: minReplicas must be <= maxReplicas
+                  rule: self.minReplicas <= self.maxReplicas
               metrics:
                 description: |-
                   Metrics defines the list of metrics used to evaluate scaling decisions.
