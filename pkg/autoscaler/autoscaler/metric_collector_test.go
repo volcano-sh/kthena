@@ -33,8 +33,10 @@ import (
 	"github.com/stretchr/testify/require"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/histogram"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	corelister "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 
@@ -331,6 +333,80 @@ request_duration_seconds_count 1
 	assert.InDelta(t, 1.0, got, 1e-9)
 }
 
+func TestExtractMetricFromFamilyUsesEmptyBaselineWhenCountDrops(t *testing.T) {
+	const metricName = "time_to_first_token_seconds"
+	family := func(text string) *io_prometheus_client.MetricFamily {
+		families, err := parsePrometheusFamilies(text, map[string][]string{metricName: {metricName}})
+		require.NoError(t, err)
+		return families[metricName]
+	}
+	// 85 requests before the engine restarted. Afterwards the histogram starts
+	// again from zero with 5 requests, and no container restart shows it.
+	before := family(`# TYPE time_to_first_token_seconds histogram
+time_to_first_token_seconds_bucket{le="0.5"} 57
+time_to_first_token_seconds_bucket{le="1"} 76
+time_to_first_token_seconds_bucket{le="2"} 85
+time_to_first_token_seconds_bucket{le="+Inf"} 85
+time_to_first_token_seconds_sum 60
+time_to_first_token_seconds_count 85
+`)
+	after := family(`# TYPE time_to_first_token_seconds histogram
+time_to_first_token_seconds_bucket{le="0.5"} 3
+time_to_first_token_seconds_bucket{le="1"} 4
+time_to_first_token_seconds_bucket{le="2"} 5
+time_to_first_token_seconds_bucket{le="+Inf"} 5
+time_to_first_token_seconds_sum 4
+time_to_first_token_seconds_count 5
+`)
+	_, baseline, _, err := extractMetricFromFamily(before, nil)
+	require.NoError(t, err)
+
+	got, _, found, err := extractMetricFromFamily(after, baseline)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	want, _, _, err := extractMetricFromFamily(after, nil)
+	require.NoError(t, err)
+	assert.InDelta(t, want, got, 1e-9)
+}
+
+func TestPastHistogramMapForPodDropsBaselineAfterEngineRestart(t *testing.T) {
+	started := metav1.NewTime(time.Unix(1000, 0))
+	baseline := map[string]*histogram.Snapshot{"ttft": histogram.NewDefaultSnapshot()}
+	past := map[string]HistogramInfo{
+		"pod-a": {PodStartTime: &started, RestartCount: 0, HistogramMap: baseline},
+	}
+	podWith := func(startedAt metav1.Time, sidecarRestarts, engineRestarts int32) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod-a"},
+			Status: corev1.PodStatus{
+				StartTime: &startedAt,
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: runtimeSidecarContainerName, RestartCount: sidecarRestarts},
+					{Name: "vllm", RestartCount: engineRestarts},
+				},
+			},
+		}
+	}
+	empty := map[string]*histogram.Snapshot{}
+
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want map[string]*histogram.Snapshot
+	}{
+		{name: "no restart keeps the baseline", pod: podWith(started, 0, 0), want: baseline},
+		{name: "engine restart drops the baseline", pod: podWith(started, 0, 1), want: empty},
+		{name: "sidecar-only restart keeps the baseline", pod: podWith(started, 1, 0), want: baseline},
+		{name: "recreated pod drops the baseline", pod: podWith(metav1.NewTime(time.Unix(2000, 0)), 0, 0), want: empty},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, pastHistogramMapForPod(tt.pod, past))
+		})
+	}
+}
+
 func TestParsePrometheusFamiliesReturnsErrorOnMalformedPayload(t *testing.T) {
 	_, err := parsePrometheusFamilies(`# HELP requests_total Total requests.
 # TYPE requests_total counter
@@ -476,6 +552,84 @@ func TestUpdateMetricsReturnsOneEntryPerReadyPod(t *testing.T) {
 	// The recommendation algorithm averages over entries, so each ready pod must
 	// keep its own value instead of being summed into a single entry.
 	require.Equal(t, map[string][]algorithm.Metrics{"queue_depth": {{"queue_depth": 40}, {"queue_depth": 40}}}, readyMetrics)
+}
+
+func TestUpdateMetricsKeepsGroupWhenAPodRestarted(t *testing.T) {
+	// A restarted pod must not cause the whole group to be returned empty: both
+	// ready pods, including the restarted one, keep their entry.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "# TYPE queue_depth gauge\nqueue_depth 40\n")
+	}))
+	t.Cleanup(server.Close)
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(serverURL.Port())
+	require.NoError(t, err)
+
+	labels := map[string]string{
+		workload.ModelServingNameLabelKey: "model",
+		workload.EntryLabelKey:            "true",
+	}
+	podA := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", Labels: labels},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			PodIP:      "127.0.0.1",
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	podB := podA.DeepCopy()
+	podB.Name = "pod-b"
+	podB.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "vllm", RestartCount: 1}}
+
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	require.NoError(t, indexer.Add(podA))
+	require.NoError(t, indexer.Add(podB))
+	podLister := corelister.NewPodLister(indexer)
+
+	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}}
+	collector := NewMetricCollector(
+		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
+		policy,
+		algorithm.Metrics{"queue_depth": 10},
+	)
+
+	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, map[string]int32{"queue_depth": 0}, unreadyCount)
+	require.Equal(t, map[string][]algorithm.Metrics{"queue_depth": {{"queue_depth": 40}, {"queue_depth": 40}}}, readyMetrics)
+}
+
+func TestGroupPodsByReadiness(t *testing.T) {
+	ready := []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	deleting := metav1.Now()
+	pods := []*corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "ready", Namespace: "default"},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: ready}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "restarted", Namespace: "default"},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: ready,
+				ContainerStatuses: []corev1.ContainerStatus{{Name: "vllm", RestartCount: 2}}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "default"},
+			Status: corev1.PodStatus{Phase: corev1.PodPending}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "failed", Namespace: "default"},
+			Status: corev1.PodStatus{Phase: corev1.PodFailed}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "terminating", Namespace: "default", DeletionTimestamp: &deleting},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: ready}},
+	}
+
+	toScrape, unready := groupPodsByReadiness(pods)
+
+	names := make([]string, 0, len(toScrape))
+	for _, pod := range toScrape {
+		names = append(names, pod.Name)
+	}
+	// A restarted pod that is ready again is scraped. Failed and terminating pods
+	// are counted nowhere, not even as unready.
+	assert.Equal(t, []string{"ready", "restarted"}, names)
+	assert.Equal(t, sets.New("default/pending"), unready)
 }
 
 func TestUpdateMetricsKeepsReadyPodWithFailedScrapeAsMissing(t *testing.T) {

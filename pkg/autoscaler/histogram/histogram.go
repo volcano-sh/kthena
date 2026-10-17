@@ -35,6 +35,11 @@ type Bucket struct {
 	count   int64
 }
 
+// Count returns the total number of observations in the snapshot.
+func (s *Snapshot) Count() int64 {
+	return s.count
+}
+
 func NewDefaultSnapshot() *Snapshot {
 	return &Snapshot{
 		sum:     0,
