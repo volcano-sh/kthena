@@ -251,10 +251,29 @@ func TestResetSince(t *testing.T) {
 			want: false,
 		},
 		{
-			// Without buckets only the count shows the reset.
+			// An idle engine serves no requests between two scrapes, so nothing
+			// changed, not even the sum.
+			name: "no new observations",
+			past: past,
+			now:  newSnapshot(3.0, 5, []Bucket{{0.5, 2}, {1, 4}, {math.Inf(1), 5}}),
+			want: false,
+		},
+		{
+			// The engine served 85 requests in 45s, then reset and served 140 fast
+			// requests in 30s. The count and the differences (50, 55, 55, 55) look
+			// valid, but the sum went down, which observations that are not
+			// negative cannot cause.
+			name: "sum below past",
+			past: newSnapshot(45.0, 85, []Bucket{{0.5, 70}, {1, 80}, {2, 85}, {math.Inf(1), 85}}),
+			now:  newSnapshot(30.0, 140, []Bucket{{0.5, 120}, {1, 135}, {2, 140}, {math.Inf(1), 140}}),
+			want: true,
+		},
+		{
+			// Without buckets and with 2 slow requests since the reset (the sum
+			// went up), only the count shows the reset.
 			name: "count below past",
 			past: newSnapshot(3.0, 5, []Bucket{}),
-			now:  newSnapshot(1.0, 2, []Bucket{}),
+			now:  newSnapshot(4.0, 2, []Bucket{}),
 			want: true,
 		},
 		{
@@ -270,11 +289,12 @@ func TestResetSince(t *testing.T) {
 			want: true,
 		},
 		{
-			// Without a +Inf bucket the differences can grow past the count
-			// difference without going down.
+			// Without a +Inf bucket the differences (15, 18) can exceed the count
+			// difference 10 without going down: 10 requests took over 1s before
+			// the reset, and only 2 after it.
 			name: "bucket difference above count difference",
-			past: newSnapshot(3.0, 30, []Bucket{{0.5, 10}, {1, 20}}),
-			now:  newSnapshot(5.0, 40, []Bucket{{0.5, 60}, {1, 70}}),
+			past: newSnapshot(20.0, 30, []Bucket{{0.5, 10}, {1, 20}}),
+			now:  newSnapshot(25.0, 40, []Bucket{{0.5, 25}, {1, 38}}),
 			want: true,
 		},
 		{
@@ -287,8 +307,8 @@ func TestResetSince(t *testing.T) {
 			// Same number of buckets and valid-looking differences (10, 10, 20,
 			// 20), but the bounds changed, so the buckets cannot be subtracted.
 			name: "different bucket bounds",
-			past: newSnapshot(30.0, 100, []Bucket{{0.5, 50}, {1, 80}, {2, 90}, {math.Inf(1), 100}}),
-			now:  newSnapshot(35.0, 120, []Bucket{{0.25, 60}, {0.5, 90}, {1, 110}, {math.Inf(1), 120}}),
+			past: newSnapshot(50.0, 100, []Bucket{{0.5, 50}, {1, 80}, {2, 90}, {math.Inf(1), 100}}),
+			now:  newSnapshot(60.0, 120, []Bucket{{0.25, 60}, {0.5, 90}, {1, 110}, {math.Inf(1), 120}}),
 			want: true,
 		},
 	}

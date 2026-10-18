@@ -37,11 +37,13 @@ type Bucket struct {
 
 // ResetSince reports whether the histogram was reset after past was taken.
 // After a reset, s - past is not a valid histogram of the observations made
-// in between: the count difference is negative, the buckets differ, or the
-// cumulative bucket differences go down or exceed the count difference.
+// in between: the count or sum difference is negative, the buckets differ, or
+// the cumulative bucket differences go down or exceed the count difference.
+// The sum check assumes that no observation is negative, which holds for
+// latencies such as TTFT.
 func (s *Snapshot) ResetSince(past *Snapshot) bool {
 	countDiff := s.count - past.count
-	if countDiff < 0 || len(s.buckets) != len(past.buckets) {
+	if countDiff < 0 || s.sum < past.sum || len(s.buckets) != len(past.buckets) {
 		return true
 	}
 	lastDiff := int64(0)

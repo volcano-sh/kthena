@@ -338,7 +338,8 @@ func TestExtractMetricFromFamilyDropsHistogramBaselineOnlyAfterReset(t *testing.
 	const metricName = "time_to_first_token_seconds"
 	// family builds a histogram from the cumulative counts of the le="0.5",
 	// le="1" and le="2" buckets. Every request is at most 2s, so the +Inf
-	// bucket and the count equal the le="2" bucket.
+	// bucket and the count equal the le="2" bucket. The sum is 0 in every
+	// histogram, so the sum check in ResetSince never decides these cases.
 	family := func(cumulative [3]int) *io_prometheus_client.MetricFamily {
 		text := fmt.Sprintf(`# TYPE time_to_first_token_seconds histogram
 time_to_first_token_seconds_bucket{le="0.5"} %d
