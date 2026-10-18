@@ -245,17 +245,28 @@ func TestOnFlightDecrAfterModelServerDeleted(t *testing.T) {
 	old := s.IncrPodOnFlightRequests(podName)
 	require.NotNil(t, old)
 
-	// The pod's only ModelServer is deleted, which removes the pod from the
-	// store, and then both come back while the request is still running.
+	// The pod's only ModelServer is deleted, which removes the pod and its
+	// Redis key from the store.
 	require.NoError(t, s.DeleteModelServer(msName))
 	require.Nil(t, s.GetPodInfo(podName))
+	_, exists := counter.get(podName)
+	assert.False(t, exists, "the Redis key must be deleted with the pod")
+
+	// Both come back while the old request is still running, and a new
+	// request is sent to the new PodInfo.
 	require.NoError(t, s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]()))
 	require.NoError(t, s.AddOrUpdatePod(pod, servers))
-	require.NotSame(t, old, s.GetPodInfo(podName), "the pod should have a new PodInfo")
+	current := s.IncrPodOnFlightRequests(podName)
+	require.NotNil(t, current)
+	require.NotSame(t, old, current, "the pod should have a new PodInfo")
 
-	// The old request finishes and must leave the shared Redis key alone.
-	before, _ := counter.get(podName)
+	// The old request finishes.
 	s.DecrPodOnFlightRequests(old)
-	after, _ := counter.get(podName)
-	assert.Equal(t, before, after, "the old PodInfo must not change the Redis counter")
+	v, _ := counter.get(podName)
+	assert.Equal(t, int64(1), v, "only the new request is in flight")
+
+	// The new request finishes.
+	s.DecrPodOnFlightRequests(current)
+	v, _ = counter.get(podName)
+	assert.Equal(t, int64(0), v)
 }
