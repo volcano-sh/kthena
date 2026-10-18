@@ -46,6 +46,9 @@ func (s *Snapshot) ResetSince(past *Snapshot) bool {
 	}
 	lastDiff := int64(0)
 	for i, bucket := range s.buckets {
+		if bucket.leValue != past.buckets[i].leValue {
+			return true
+		}
 		diff := bucket.count - past.buckets[i].count
 		if diff < lastDiff || diff > countDiff {
 			return true

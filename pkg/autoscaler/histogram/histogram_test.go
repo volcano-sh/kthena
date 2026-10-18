@@ -283,6 +283,14 @@ func TestResetSince(t *testing.T) {
 			now:  newSnapshot(5.0, 8, []Bucket{{0.5, 3}, {1, 6}}),
 			want: true,
 		},
+		{
+			// Same number of buckets and valid-looking differences (10, 10, 20,
+			// 20), but the bounds changed, so the buckets cannot be subtracted.
+			name: "different bucket bounds",
+			past: newSnapshot(30.0, 100, []Bucket{{0.5, 50}, {1, 80}, {2, 90}, {math.Inf(1), 100}}),
+			now:  newSnapshot(35.0, 120, []Bucket{{0.25, 60}, {0.5, 90}, {1, 110}, {math.Inf(1), 120}}),
+			want: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
