@@ -998,6 +998,15 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 				podInfo.onFlightMu.Lock()
 				podInfo.deleted = true
 				s.pods.Delete(podName)
+				// As in DeletePod: remove the pod's Redis counter, since
+				// DecrPodOnFlightRequests skips Redis for a deleted PodInfo.
+				if s.onFlightCounter != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+					if err := s.onFlightCounter.Delete(ctx, podName); err != nil {
+						klog.V(4).Infof("failed to delete Redis on-flight counter for pod %s: %v", podName, err)
+					}
+					cancel()
+				}
 				podInfo.onFlightMu.Unlock()
 				// Dispatched after the removal, as DeletePod does.
 				s.triggerCallbacks("Pod", EventData{
