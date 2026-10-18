@@ -18,6 +18,7 @@ package autoscaler
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -333,41 +334,80 @@ request_duration_seconds_count 1
 	assert.InDelta(t, 1.0, got, 1e-9)
 }
 
-func TestExtractMetricFromFamilyUsesEmptyBaselineWhenCountDrops(t *testing.T) {
+func TestExtractMetricFromFamilyDropsHistogramBaselineOnlyAfterReset(t *testing.T) {
 	const metricName = "time_to_first_token_seconds"
-	family := func(text string) *io_prometheus_client.MetricFamily {
+	// family builds a histogram from the cumulative counts of the le="0.5",
+	// le="1" and le="2" buckets. Every request is at most 2s, so the +Inf
+	// bucket and the count equal the le="2" bucket.
+	family := func(cumulative [3]int) *io_prometheus_client.MetricFamily {
+		text := fmt.Sprintf(`# TYPE time_to_first_token_seconds histogram
+time_to_first_token_seconds_bucket{le="0.5"} %d
+time_to_first_token_seconds_bucket{le="1"} %d
+time_to_first_token_seconds_bucket{le="2"} %d
+time_to_first_token_seconds_bucket{le="+Inf"} %d
+time_to_first_token_seconds_sum 0
+time_to_first_token_seconds_count %d
+`, cumulative[0], cumulative[1], cumulative[2], cumulative[2], cumulative[2])
 		families, err := parsePrometheusFamilies(text, map[string][]string{metricName: {metricName}})
 		require.NoError(t, err)
 		return families[metricName]
 	}
-	// 85 requests before the engine restarted. Afterwards the histogram starts
-	// again from zero with 5 requests, and no container restart shows it.
-	before := family(`# TYPE time_to_first_token_seconds histogram
-time_to_first_token_seconds_bucket{le="0.5"} 57
-time_to_first_token_seconds_bucket{le="1"} 76
-time_to_first_token_seconds_bucket{le="2"} 85
-time_to_first_token_seconds_bucket{le="+Inf"} 85
-time_to_first_token_seconds_sum 60
-time_to_first_token_seconds_count 85
-`)
-	after := family(`# TYPE time_to_first_token_seconds histogram
-time_to_first_token_seconds_bucket{le="0.5"} 3
-time_to_first_token_seconds_bucket{le="1"} 4
-time_to_first_token_seconds_bucket{le="2"} 5
-time_to_first_token_seconds_bucket{le="+Inf"} 5
-time_to_first_token_seconds_sum 4
-time_to_first_token_seconds_count 5
-`)
-	_, baseline, _, err := extractMetricFromFamily(before, nil)
-	require.NoError(t, err)
 
-	got, _, found, err := extractMetricFromFamily(after, baseline)
-	require.NoError(t, err)
-	require.True(t, found)
+	// Without a reset, the p95 is computed from the requests made between the
+	// two scrapes (after - before). In the other cases the engine restarted
+	// between the two scrapes and no container restart shows it, so the
+	// histogram started again from zero and the p95 must be computed from the
+	// after histogram alone (an empty baseline).
+	tests := []struct {
+		name   string
+		before [3]int
+		after  [3]int
+		want   float64
+	}{
+		{
+			// 5 new requests (3, 4, 5 cumulative), so the p95 is in the le="2"
+			// bucket. Against an empty baseline it would be 1.6.
+			name:   "no reset keeps the baseline",
+			before: [3]int{57, 76, 85},
+			after:  [3]int{60, 80, 90},
+			want:   2,
+		},
+		{
+			// 5 requests since the reset, fewer than the 85 in the baseline.
+			name:   "count below the baseline",
+			before: [3]int{57, 76, 85},
+			after:  [3]int{3, 4, 5},
+			want:   2,
+		},
+		{
+			// 100 slow requests since the reset: the count is above the baseline,
+			// but the le="0.5" and le="1" buckets dropped.
+			name:   "bucket below the baseline",
+			before: [3]int{57, 76, 85},
+			after:  [3]int{0, 0, 100},
+			want:   1.95,
+		},
+		{
+			// 120 requests since the reset: no bucket dropped, but the difference
+			// [50, 90, 35] decreases and is bigger than the count difference 35,
+			// which no set of new requests can produce.
+			name:   "difference not a valid histogram",
+			before: [3]int{10, 20, 85},
+			after:  [3]int{60, 110, 120},
+			want:   1.4,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, baseline, _, err := extractMetricFromFamily(family(tc.before), nil)
+			require.NoError(t, err)
 
-	want, _, _, err := extractMetricFromFamily(after, nil)
-	require.NoError(t, err)
-	assert.InDelta(t, want, got, 1e-9)
+			got, _, found, err := extractMetricFromFamily(family(tc.after), baseline)
+			require.NoError(t, err)
+			require.True(t, found)
+			assert.InDelta(t, tc.want, got, 1e-9)
+		})
+	}
 }
 
 func TestPastHistogramMapForPodDropsBaselineAfterEngineRestart(t *testing.T) {
@@ -517,90 +557,58 @@ func TestUpdateMetricsReturnsOneEntryPerReadyPod(t *testing.T) {
 	port, err := strconv.Atoi(serverURL.Port())
 	require.NoError(t, err)
 
-	labels := map[string]string{
-		workload.ModelServingNameLabelKey: "model",
-		workload.EntryLabelKey:            "true",
-	}
-	podA := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", Labels: labels},
-		Status: corev1.PodStatus{
-			Phase:      corev1.PodRunning,
-			PodIP:      "127.0.0.1",
-			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+	tests := []struct {
+		name                  string
+		podBContainerStatuses []corev1.ContainerStatus
+	}{
+		{name: "all pods ready"},
+		{
+			// A restarted pod must not cause the whole group to be returned empty:
+			// both ready pods, including the restarted one, keep their entry.
+			name:                  "a ready pod restarted",
+			podBContainerStatuses: []corev1.ContainerStatus{{Name: "vllm", RestartCount: 1}},
 		},
 	}
-	podB := podA.DeepCopy()
-	podB.Name = "pod-b"
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			labels := map[string]string{
+				workload.ModelServingNameLabelKey: "model",
+				workload.EntryLabelKey:            "true",
+			}
+			podA := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", Labels: labels},
+				Status: corev1.PodStatus{
+					Phase:      corev1.PodRunning,
+					PodIP:      "127.0.0.1",
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				},
+			}
+			podB := podA.DeepCopy()
+			podB.Name = "pod-b"
+			podB.Status.ContainerStatuses = tc.podBContainerStatuses
 
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	require.NoError(t, indexer.Add(podA))
-	require.NoError(t, indexer.Add(podB))
-	podLister := corelister.NewPodLister(indexer)
+			indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+			require.NoError(t, indexer.Add(podA))
+			require.NoError(t, indexer.Add(podB))
+			podLister := corelister.NewPodLister(indexer)
 
-	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}}
-	collector := NewMetricCollector(
-		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
-		policy,
-		algorithm.Metrics{"queue_depth": 10},
-	)
+			policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}}
+			collector := NewMetricCollector(
+				&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
+				policy,
+				algorithm.Metrics{"queue_depth": 10},
+			)
 
-	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
-		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
-	})
-	require.NoError(t, err)
-	require.Equal(t, map[string]int32{"queue_depth": 0}, unreadyCount)
-	// The recommendation algorithm averages over entries, so each ready pod must
-	// keep its own value instead of being summed into a single entry.
-	require.Equal(t, map[string][]algorithm.Metrics{"queue_depth": {{"queue_depth": 40}, {"queue_depth": 40}}}, readyMetrics)
-}
-
-func TestUpdateMetricsKeepsGroupWhenAPodRestarted(t *testing.T) {
-	// A restarted pod must not cause the whole group to be returned empty: both
-	// ready pods, including the restarted one, keep their entry.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "# TYPE queue_depth gauge\nqueue_depth 40\n")
-	}))
-	t.Cleanup(server.Close)
-
-	serverURL, err := url.Parse(server.URL)
-	require.NoError(t, err)
-	port, err := strconv.Atoi(serverURL.Port())
-	require.NoError(t, err)
-
-	labels := map[string]string{
-		workload.ModelServingNameLabelKey: "model",
-		workload.EntryLabelKey:            "true",
+			unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+				"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
+			})
+			require.NoError(t, err)
+			require.Equal(t, map[string]int32{"queue_depth": 0}, unreadyCount)
+			// The recommendation algorithm averages over entries, so each ready pod must
+			// keep its own value instead of being summed into a single entry.
+			require.Equal(t, map[string][]algorithm.Metrics{"queue_depth": {{"queue_depth": 40}, {"queue_depth": 40}}}, readyMetrics)
+		})
 	}
-	podA := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "pod-a", Namespace: "default", Labels: labels},
-		Status: corev1.PodStatus{
-			Phase:      corev1.PodRunning,
-			PodIP:      "127.0.0.1",
-			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
-		},
-	}
-	podB := podA.DeepCopy()
-	podB.Name = "pod-b"
-	podB.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "vllm", RestartCount: 1}}
-
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
-	require.NoError(t, indexer.Add(podA))
-	require.NoError(t, indexer.Add(podB))
-	podLister := corelister.NewPodLister(indexer)
-
-	policy := &workload.AutoscalingPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}}
-	collector := NewMetricCollector(
-		&workload.Target{TargetRef: corev1.ObjectReference{Namespace: "default", Name: "model"}},
-		policy,
-		algorithm.Metrics{"queue_depth": 10},
-	)
-
-	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
-		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
-	})
-	require.NoError(t, err)
-	require.Equal(t, map[string]int32{"queue_depth": 0}, unreadyCount)
-	require.Equal(t, map[string][]algorithm.Metrics{"queue_depth": {{"queue_depth": 40}, {"queue_depth": 40}}}, readyMetrics)
 }
 
 func TestGroupPodsByReadiness(t *testing.T) {

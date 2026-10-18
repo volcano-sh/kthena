@@ -230,3 +230,63 @@ func Test_givenTwoHistogramsWithEverythingInOneBucket_whenQuantileInDiff_thenRet
 	assert.InDelta(0.65, result, Epsilon)
 	assert.Nil(err)
 }
+
+func TestResetSince(t *testing.T) {
+	past := newSnapshot(3.0, 5, []Bucket{
+		{0.5, 2},
+		{1, 4},
+		{math.Inf(1), 5},
+	})
+
+	tests := []struct {
+		name string
+		past *Snapshot
+		now  *Snapshot
+		want bool
+	}{
+		{
+			name: "difference is a valid histogram",
+			past: past,
+			now:  newSnapshot(5.0, 8, []Bucket{{0.5, 3}, {1, 6}, {math.Inf(1), 8}}),
+			want: false,
+		},
+		{
+			// Without buckets only the count shows the reset.
+			name: "count below past",
+			past: newSnapshot(3.0, 5, []Bucket{}),
+			now:  newSnapshot(1.0, 2, []Bucket{}),
+			want: true,
+		},
+		{
+			name: "bucket below past",
+			past: past,
+			now:  newSnapshot(9.0, 10, []Bucket{{0.5, 0}, {1, 6}, {math.Inf(1), 10}}),
+			want: true,
+		},
+		{
+			name: "bucket difference goes down",
+			past: past,
+			now:  newSnapshot(5.0, 8, []Bucket{{0.5, 4}, {1, 5}, {math.Inf(1), 8}}),
+			want: true,
+		},
+		{
+			// Without a +Inf bucket the differences can grow past the count
+			// difference without going down.
+			name: "bucket difference above count difference",
+			past: newSnapshot(3.0, 30, []Bucket{{0.5, 10}, {1, 20}}),
+			now:  newSnapshot(5.0, 40, []Bucket{{0.5, 60}, {1, 70}}),
+			want: true,
+		},
+		{
+			name: "different buckets",
+			past: past,
+			now:  newSnapshot(5.0, 8, []Bucket{{0.5, 3}, {1, 6}}),
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.now.ResetSince(tc.past))
+		})
+	}
+}

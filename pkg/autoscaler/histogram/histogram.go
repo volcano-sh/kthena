@@ -35,9 +35,24 @@ type Bucket struct {
 	count   int64
 }
 
-// Count returns the total number of observations in the snapshot.
-func (s *Snapshot) Count() int64 {
-	return s.count
+// ResetSince reports whether the histogram was reset after past was taken.
+// The difference s - past then cannot be a histogram of the observations made
+// in between: the count difference is negative, the buckets differ, or the
+// cumulative bucket differences go down or exceed the count difference.
+func (s *Snapshot) ResetSince(past *Snapshot) bool {
+	countDiff := s.count - past.count
+	if countDiff < 0 || len(s.buckets) != len(past.buckets) {
+		return true
+	}
+	lastDiff := int64(0)
+	for i, bucket := range s.buckets {
+		diff := bucket.count - past.buckets[i].count
+		if diff < lastDiff || diff > countDiff {
+			return true
+		}
+		lastDiff = diff
+	}
+	return false
 }
 
 func NewDefaultSnapshot() *Snapshot {

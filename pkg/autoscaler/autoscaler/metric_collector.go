@@ -381,13 +381,21 @@ func engineRestartCount(pod *corev1.Pod) int32 {
 	return restarts
 }
 
+// sameEngine reports whether pod still runs the engine that past was recorded
+// from: the pod was not recreated (same StartTime) and its engine did not
+// restart (same engineRestartCount).
+func sameEngine(pod *corev1.Pod, past HistogramInfo) bool {
+	return pod.Status.StartTime != nil && past.PodStartTime != nil &&
+		pod.Status.StartTime.Equal(past.PodStartTime) &&
+		past.RestartCount == engineRestartCount(pod)
+}
+
 // pastHistogramMapForPod returns the previous histogram snapshots for pod, but
 // only when neither the pod nor its engine container has restarted since they
 // were recorded.
 func pastHistogramMapForPod(pod *corev1.Pod, pastHistograms map[string]HistogramInfo) map[string]*histogram.Snapshot {
 	pastValue, ok := pastHistograms[pod.Name]
-	if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) &&
-		pastValue.RestartCount == engineRestartCount(pod) {
+	if ok && sameEngine(pod, pastValue) {
 		return pastValue.HistogramMap
 	}
 	return map[string]*histogram.Snapshot{}
@@ -493,11 +501,15 @@ func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogra
 		}
 		snapshot := histogram.NewSnapshotOfHistogram(hist)
 		past := histogram.NewDefaultSnapshot()
-		// A count below the baseline means the histogram was reset by an engine
-		// restart that no container restart shows, so compare against an empty
-		// baseline instead of returning an error.
-		if pastHistogram != nil && pastHistogram.Count() <= snapshot.Count() {
-			past = pastHistogram
+		// An engine restart that no container restart shows resets the histogram,
+		// so the baseline can no longer be subtracted from it. Compare against an
+		// empty baseline instead of returning an error or a wrong quantile.
+		if pastHistogram != nil {
+			if snapshot.ResetSince(pastHistogram) {
+				klog.V(4).Infof("histogram %s was reset since the baseline, comparing against an empty baseline", mf.GetName())
+			} else {
+				past = pastHistogram
+			}
 		}
 		quantile, qErr := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
 		if qErr != nil {
