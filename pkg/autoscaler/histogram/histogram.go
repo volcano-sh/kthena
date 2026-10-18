@@ -36,7 +36,7 @@ type Bucket struct {
 }
 
 // ResetSince reports whether the histogram was reset after past was taken.
-// The difference s - past then cannot be a histogram of the observations made
+// After a reset, s - past is not a valid histogram of the observations made
 // in between: the count difference is negative, the buckets differ, or the
 // cumulative bucket differences go down or exceed the count difference.
 func (s *Snapshot) ResetSince(past *Snapshot) bool {

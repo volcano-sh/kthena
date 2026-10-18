@@ -381,8 +381,8 @@ func engineRestartCount(pod *corev1.Pod) int32 {
 	return restarts
 }
 
-// sameEngine reports whether pod still runs the engine that past was recorded
-// from: the pod was not recreated (same StartTime) and its engine did not
+// sameEngine reports whether pod still runs the same engine as when past was
+// recorded: the pod was not recreated (same StartTime) and its engine did not
 // restart (same engineRestartCount).
 func sameEngine(pod *corev1.Pod, past HistogramInfo) bool {
 	return pod.Status.StartTime != nil && past.PodStartTime != nil &&
@@ -501,8 +501,9 @@ func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogra
 		}
 		snapshot := histogram.NewSnapshotOfHistogram(hist)
 		past := histogram.NewDefaultSnapshot()
-		// An engine restart that no container restart shows resets the histogram,
-		// so the baseline can no longer be subtracted from it. Compare against an
+		// If the engine restarted without a container restart (so the pod's
+		// restart count did not change), its histogram started again from zero
+		// and the baseline cannot be subtracted from it. Compare against an
 		// empty baseline instead of returning an error or a wrong quantile.
 		if pastHistogram != nil {
 			if snapshot.ResetSince(pastHistogram) {

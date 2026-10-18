@@ -355,9 +355,9 @@ time_to_first_token_seconds_count %d
 
 	// Without a reset, the p95 is computed from the requests made between the
 	// two scrapes (after - before). In the other cases the engine restarted
-	// between the two scrapes and no container restart shows it, so the
-	// histogram started again from zero and the p95 must be computed from the
-	// after histogram alone (an empty baseline).
+	// between the two scrapes without a container restart, so the histogram
+	// started again from zero and the p95 must be computed from the after
+	// histogram alone (an empty baseline).
 	tests := []struct {
 		name   string
 		before [3]int
