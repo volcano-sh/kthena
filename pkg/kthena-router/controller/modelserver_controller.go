@@ -132,6 +132,11 @@ func (c *ModelServerController) Run(stopCh <-chan struct{}) error {
 	defer c.workqueue.ShutDown()
 
 	syncs := []cache.InformerSynced{c.modelServerSynced}
+	if c.endpointDiscovery != nil {
+		// Cache sync alone does not guarantee that initial ModelServer events
+		// precede the queue barrier used by the server's discovery readiness latch.
+		syncs = append(syncs, c.modelServerRegistration.HasSynced)
+	}
 	if c.podSynced != nil {
 		syncs = append(syncs, c.podSynced)
 	}

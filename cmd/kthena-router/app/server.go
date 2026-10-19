@@ -19,6 +19,7 @@ package app
 import (
 	"context"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/client-go/tools/cache"
@@ -28,6 +29,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/discovery"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/filesource"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/router"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
@@ -73,6 +75,8 @@ type Server struct {
 	// EndpointDiscoveryRegistry supplies compiled-in providers before Run.
 	// No external providers are registered by default. Do not mutate it while running.
 	EndpointDiscoveryRegistry discovery.Registry
+	endpointDiscovery         *discovery.Controller
+	initialDiscoverySynced    atomic.Bool
 	// drainTimeout is HTTP server shutdown grace; not datastore state.
 	drainTimeout time.Duration
 }
@@ -107,10 +111,21 @@ func parseDrainTimeout() time.Duration {
 }
 
 func (s *Server) Run(ctx context.Context) {
+	configFile := s.RouterConfigFile
+	if configFile == "" {
+		configFile = DefaultRouterConfigFile
+	}
+	config, err := conf.ParseRouterConfig(configFile)
+	if err != nil {
+		klog.Fatalf("Failed to load router configuration: %v", err)
+	}
 	// Build store options. When REDIS_HOST is set, use a Redis-backed on-flight
 	// counter so that multiple router replicas share a globally consistent view
 	// of in-flight request counts, enabling better cross-router scheduling.
 	var storeOpts []datastore.Option
+	if config.EndpointDiscovery.External() {
+		storeOpts = append(storeOpts, datastore.WithDeferredRuntimeInspection())
+	}
 	if os.Getenv("REDIS_HOST") != "" {
 		if redisClient := utils.TryGetRedisClient(); redisClient != nil {
 			klog.Infof("Redis on-flight counter enabled: cross-router in-flight tracking active")
@@ -127,18 +142,11 @@ func (s *Server) Run(ctx context.Context) {
 	// Per-ModelServer upstream transport registry, shared between the router
 	// (hot-path lookups) and the ModelServer controller (lifecycle writes).
 	transportRegistry := common.NewTransportRegistry()
-	configFile := s.RouterConfigFile
-	if configFile == "" {
-		configFile = DefaultRouterConfigFile
-	}
-	config, err := conf.ParseRouterConfig(configFile)
-	if err != nil {
-		klog.Fatalf("Failed to load router configuration: %v", err)
-	}
 	endpointDiscovery, err := newEndpointDiscovery(config.EndpointDiscovery, store, s.EnableGatewayAPIInferenceExtension, s.EndpointDiscoveryRegistry)
 	if err != nil {
 		klog.Fatalf("Invalid endpoint discovery configuration: %v", err)
 	}
+	s.endpointDiscovery = endpointDiscovery
 	if endpointDiscovery != nil {
 		defer endpointDiscovery.Close()
 		go func() {
@@ -149,7 +157,7 @@ func (s *Server) Run(ctx context.Context) {
 	}
 
 	// must be run before the controller, because it will register callbacks
-	r := NewRouter(store, s.RouterConfigFile, transportRegistry)
+	r := router.NewRouterWithConfig(store, config, transportRegistry)
 	// start the configured resource source
 	if s.ConfigSource == ConfigSourceFile {
 		s.controllers = s.startFileSource(store, transportRegistry, ctx.Done(), endpointDiscovery)
@@ -160,6 +168,9 @@ func (s *Server) Run(ctx context.Context) {
 	// Start store's periodic update loop after controllers have synced
 	if !cache.WaitForCacheSync(ctx.Done(), s.controllers.HasSynced) {
 		klog.Fatalf("Failed to sync controllers")
+	}
+	if endpointDiscovery != nil {
+		endpointDiscovery.WarnMissingModelServers()
 	}
 	klog.Infof("Controllers have synced, starting store periodic update loop")
 	store.Run(ctx)
@@ -173,7 +184,19 @@ func (s *Server) Run(ctx context.Context) {
 }
 
 func (s *Server) HasSynced() bool {
-	return s.controllers.HasSynced() && s.store.HasSynced()
+	// Do not latch discovery before the initial resources have been processed.
+	if !s.controllers.HasSynced() || !s.store.HasSynced() {
+		return false
+	}
+	if s.endpointDiscovery == nil || s.initialDiscoverySynced.Load() {
+		return true
+	}
+	if !s.endpointDiscovery.HasSynced() {
+		return false
+	}
+	// Later model creation/replacement must not take unrelated models offline.
+	s.initialDiscoverySynced.Store(true)
+	return true
 }
 
 // startFileSource loads resources from ConfigDir and keeps the store in sync

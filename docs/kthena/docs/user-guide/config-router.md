@@ -168,14 +168,13 @@ kubectl rollout restart deployment/kthena-router
 
 ## External Endpoint Discovery
 
-The optional `endpointDiscovery` section selects a compiled-in discovery provider.
-When omitted (or `provider: kubernetes`), native Pod and static endpoint behavior
-is unchanged. External mode disables Pod discovery for the whole router.
+`endpointDiscovery` selects a compiled-in provider. Omit it (or use
+`provider: kubernetes`) to keep native Pod/static discovery. External mode
+disables Pod discovery for the entire router and supports either Kubernetes
+resources or `--config-source=file` resource manifests.
 
-No external providers are included by default. An integration implements
-`discovery.Source` and a `discovery.Factory`, then supplies its registry through
-`Server.EndpointDiscoveryRegistry` before calling `Run`. For example, with an
-integration-provided `customdiscovery.NewSource` factory:
+No external providers are bundled. Implement `discovery.Source` and supply a
+factory through `Server.EndpointDiscoveryRegistry` before `Run`:
 
 ```go
 server.EndpointDiscoveryRegistry = discovery.Registry{
@@ -183,45 +182,89 @@ server.EndpointDiscoveryRegistry = discovery.Registry{
 }
 ```
 
-The matching router configuration could be:
-
 ```yaml
 endpointDiscovery:
   provider: custom
   refreshInterval: 5s
   snapshotTimeout: 2s
+  maxConcurrentSnapshots: 4
+  requireInitialSnapshot: true
   mappings:
     - modelServer: default/example-model
       parameters:
         service: example-model
 ```
 
-`custom` and `service` are illustrative, not a bundled provider or a built-in
-parameter. Providers define and validate their own parameters. Selecting a name
-that was not registered fails startup; YAML cannot load a provider implementation.
+`customdiscovery.NewSource`, `custom` and `service` are illustrative.
+Providers define and validate their parameters. YAML cannot load implementations;
+an unregistered provider fails startup. Provider/mapping changes require restart.
+Multiple providers and Gateway API Inference Extension with external discovery
+are not supported.
 
-Sources return complete routable snapshots using the existing Endpoint type. A
-successful empty snapshot removes all instances. Lookup errors and invalid
-snapshots retain the last successful membership and are retried.
+### Configuration and ownership
 
-Each mapping exclusively owns the ModelServer's endpoint membership. Its selector
-or static endpoints do not override discovery results. ModelServer validation is
-unchanged: keep a valid `workloadSelector.matchLabels` plus `workloadPort`, or valid
-static endpoints. Unmapped static models still work; unmapped selector-based
-models remain empty, with no fallback to Kubernetes Pods.
+| Setting | Default / behavior |
+| --- | --- |
+| `refreshInterval` | 30s; positive duration between refreshes, with approximately +/-10% jitter |
+| `snapshotTimeout` | 5s; positive timeout for each Snapshot call, excluding slot waiting |
+| `maxConcurrentSnapshots` | Omitted/0 means 4; negative values are rejected. Bounds provider queries per process, not inference requests or endpoints |
+| `requireInitialSnapshot` | True; wait for initial discovery before Ready, as described below |
+| `mappings` | Required for external mode; unique `namespace/name` targets with provider-specific parameters |
 
-Both Kubernetes resources and `--config-source=file` are supported. The latter
-loads ModelServer/ModelRoute resource manifests; it is independent of endpoint
-discovery and does not provide an endpoint discovery backend.
+Mapped resources use only provider membership; their selectors/static endpoints
+are ignored. Unmapped static models work; unmapped selector-based models stay
+empty, with warnings and no Pod fallback. ModelServer validation is unchanged:
+declare valid `workloadSelector.matchLabels` and `workloadPort`, or static
+endpoints. File-backed resource loading is not an endpoint discovery provider.
 
-Endpoint names are instance identities within a ModelServer. Change the name on
-replacement or address/port changes. Optional `labels` supply scheduling metadata
-such as PD role/group labels; discovery does not infer them from an IP address.
+Sources return complete snapshots and honor cancellation. Names are DNS-1123
+subdomains (at most 253 characters), unique within a ModelServer; change them when
+the provider replaces an instance or changes its address/port. Supply PD labels explicitly.
+The controller validates snapshots and manages synthetic Pods/Store updates:
+successful empty results clear membership; lookup/validation failures retain the
+entire last successful snapshot without an expiry limit.
 
-Provider names and mappings require a router restart to change. This draft does
-not support multiple providers per router or Gateway API Inference Extension
-with external discovery. Registry failures can retain stale endpoints without an
-expiry limit; readiness does not prove registry health or serving capacity.
+Slots are released before Store updates. Refresh hints are coalesced; refreshes
+wait at least `min(1s, refreshInterval)` after the previous refresh completes.
+Scheduled initial retries back off exponentially up to the interval, with jitter within these
+bounds. The first lookup is immediate; jitter does not eliminate startup bursts.
 
-Providers must honor cancellation and release their subscriptions on Close. The
-shared controller owns validation, synthetic Pods and Store synchronization.
+### Readiness and runtime data
+
+After resource/Store initialization, readiness waits for the first valid applied
+snapshot of each existing mapped ModelServer, including successful empty results.
+Missing/deleted resources do not block it. Server latches this gate once
+satisfied; later discovery changes do not close it.
+
+There is no automatic timeout bypass: a failing initial lookup can block new
+replicas and stall rollout. Set `requireInitialSnapshot: false` to allow startup
+without discovery completion, accepting temporarily unavailable model pools.
+
+External mode constructs Store with `WithDeferredRuntimeInspection()`, including
+for unmapped static models. Metrics/models are fetched by the bounded background
+loop, not discovery; native initialization stays synchronous. Until inspection
+succeeds, LoRA affinity excludes new instances and GPU-cache scoring sees zero
+usage. The scrape interval does not bound this window; Ready does not certify
+endpoint health, fresh metrics or capacity.
+
+Engine/workload-port edits reapply the raw snapshot without clearing membership
+or in-flight counters. Omitted ports follow configuration, explicit ports stay
+fixed, and obsolete scrapes are discarded. Store reconciliation remains a
+multi-operation update, not an atomic swap.
+
+### Observability
+
+Metrics use `model_server` (`namespace/name`); addresses/parameters are not labels.
+
+| Metric | Meaning |
+| --- | --- |
+| `kthena_router_discovery_refresh_total` | Count by `result`: `success`, `error`, or `discarded` (obsolete/cancelled work) |
+| `kthena_router_discovery_refresh_duration_seconds` | Duration including slot waiting and reconciliation |
+| `kthena_router_discovery_last_success_timestamp_seconds` | Last applied snapshot timestamp; 0 before initial success |
+| `kthena_router_discovery_endpoints` | Last successfully applied endpoint count |
+
+Failures leave snapshot gauges unchanged; deletion removes them and replacement
+resets them. Configuration-only reapplication does not advance the last-success
+timestamp. Alert on missing initial success/stale snapshots; these metrics are
+not health checks. Missing mapped resources and ignored static endpoints emit
+warnings.

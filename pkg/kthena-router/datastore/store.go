@@ -187,6 +187,12 @@ func (realPodRuntimeInspector) GetPodModels(engine string, pod *corev1.Pod, port
 
 type Option func(*store)
 
+// WithDeferredRuntimeInspection leaves metrics and model fetching to Run's
+// bounded background scrape loop instead of fetching them during AddOrUpdatePod.
+func WithDeferredRuntimeInspection() Option {
+	return func(s *store) { s.deferRuntimeInspection = true }
+}
+
 func WithPodRuntimeInspector(inspector PodRuntimeInspector) Option {
 	return func(s *store) {
 		if inspector != nil {
@@ -334,6 +340,8 @@ type PodInfo struct {
 	Pod *corev1.Pod
 	// Name of AI inference engine
 	engine string
+	// runtimeVersion invalidates scrapes started before an engine or endpoint change.
+	runtimeVersion uint64
 	// TODO: add metrics here
 	GPUCacheUsage     float64 // GPU KV-cache usage.
 	RequestWaitingNum float64 // Number of requests waiting to be processed.
@@ -431,12 +439,13 @@ type store struct {
 	// initialSynced is used to indicate whether all the resources has been processed and storred into this store.
 	initialSynced *atomic.Bool
 	// model -> RequestPriorityQueue
-	requestWaitingQueue   sync.Map
-	tokenTracker          TokenTracker
-	podRuntimeInspector   PodRuntimeInspector
-	rootCtx               context.Context // Lifecycle context for queue goroutines, set by Run()
-	fairnessQueueConfig   FairnessQueueConfig
-	metricsScrapeInterval time.Duration
+	requestWaitingQueue    sync.Map
+	tokenTracker           TokenTracker
+	podRuntimeInspector    PodRuntimeInspector
+	rootCtx                context.Context // Lifecycle context for queue goroutines, set by Run()
+	fairnessQueueConfig    FairnessQueueConfig
+	metricsScrapeInterval  time.Duration
+	deferRuntimeInspection bool
 }
 
 func New(opts ...Option) Store {
@@ -1178,7 +1187,7 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		return nil
 	}
 
-	// New pod — create PodInfo and fetch initial metrics.
+	// Publish the new pod before optional initial runtime inspection.
 	newPodInfo := &PodInfo{
 		Pod:         pod,
 		engine:      engine,
@@ -1190,12 +1199,14 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		EventType: EventAdd,
 		Pod:       podName,
 	})
-	metricsUpdated := s.updatePodMetrics(newPodInfo)
-	modelsUpdated := s.updatePodModels(newPodInfo)
-	// Recheck once both are in: the pod only counts toward a model's capacity
-	// after its models are known.
-	if metricsUpdated || modelsUpdated {
-		s.recheckSessionBoostQueues()
+	if !s.deferRuntimeInspection {
+		metricsUpdated := s.updatePodMetrics(newPodInfo)
+		modelsUpdated := s.updatePodModels(newPodInfo)
+		// Recheck once both are in: the pod only counts toward a model's capacity
+		// after its models are known.
+		if metricsUpdated || modelsUpdated {
+			s.recheckSessionBoostQueues()
+		}
 	}
 
 	return nil
@@ -1817,12 +1828,11 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 }
 
 func (s *store) updatePodMetrics(pod *PodInfo) bool {
-	engine := pod.GetEngine()
+	engine, podObj, version := pod.runtimeSnapshot()
 	if engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
 		return false
 	}
-	podObj := pod.GetPod()
 	if podObj == nil {
 		klog.V(2).Info("failed to find pod")
 		return false
@@ -1834,6 +1844,11 @@ func (s *store) updatePodMetrics(pod *PodInfo) bool {
 	port := s.getPodWorkloadPort(pod)
 	previousHistogram := getPreviousHistogram(pod)
 	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(engine, podObj, port, previousHistogram)
+	pod.mutex.Lock()
+	defer pod.mutex.Unlock()
+	if version != pod.runtimeVersion {
+		return false
+	}
 	if gaugeMetrics != nil {
 		updateGaugeMetricsInfo(pod, gaugeMetrics)
 	}
@@ -1844,12 +1859,11 @@ func (s *store) updatePodMetrics(pod *PodInfo) bool {
 }
 
 func (s *store) updatePodModels(podInfo *PodInfo) bool {
-	engine := podInfo.GetEngine()
+	engine, podObj, version := podInfo.runtimeSnapshot()
 	if engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
 		return false
 	}
-	podObj := podInfo.GetPod()
 	if podObj == nil {
 		klog.V(2).Info("failed to find pod")
 		return false
@@ -1865,7 +1879,12 @@ func (s *store) updatePodModels(podInfo *PodInfo) bool {
 		return false
 	}
 
-	podInfo.UpdateModels(models)
+	podInfo.mutex.Lock()
+	defer podInfo.mutex.Unlock()
+	if version != podInfo.runtimeVersion {
+		return false
+	}
+	podInfo.models = sets.New[string](models...)
 	return true
 }
 
@@ -1902,10 +1921,8 @@ func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {
 	return previousHistogram
 }
 
+// Caller holds podinfo.mutex so runtime-version checks and metric writes are atomic.
 func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) {
-	podinfo.mutex.Lock()
-	defer podinfo.mutex.Unlock()
-
 	for _, name := range metricsName {
 		if updateFunc, exist := gaugeUpdateFuncs[name]; exist {
 			updateFunc(podinfo, metricsInfo[name])
@@ -1915,10 +1932,8 @@ func updateGaugeMetricsInfo(podinfo *PodInfo, metricsInfo map[string]float64) {
 	}
 }
 
+// Caller holds podinfo.mutex.
 func updateHistogramMetrics(podinfo *PodInfo, histogramMetrics map[string]*dto.Histogram) {
-	podinfo.mutex.Lock()
-	defer podinfo.mutex.Unlock()
-
 	for _, name := range histogramMetricsName {
 		if updateFunc, exist := histogramUpdateFuncs[name]; exist {
 			updateFunc(podinfo, histogramMetrics[name])
@@ -1974,10 +1989,24 @@ func (p *PodInfo) GetPodNamespacedName() types.NamespacedName {
 	return types.NamespacedName{Namespace: p.Pod.Namespace, Name: p.Pod.Name}
 }
 
-// UpdatePod replaces pod metadata tracked by PodInfo while preserving runtime metrics and models.
+func (p *PodInfo) runtimeSnapshot() (string, *corev1.Pod, uint64) {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+	return p.engine, p.Pod, p.runtimeVersion
+}
+
+// UpdatePod preserves runtime data unless its engine or synthetic endpoint changes.
 func (p *PodInfo) UpdatePod(pod *corev1.Pod, engine string, modelServers sets.Set[types.NamespacedName]) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
+	if p.engine != engine || utils.EndpointPort(p.Pod, 0) != utils.EndpointPort(pod, 0) ||
+		(p.Pod != nil && pod != nil && p.Pod.Status.PodIP != pod.Status.PodIP) {
+		p.runtimeVersion++
+		p.GPUCacheUsage, p.RequestWaitingNum, p.RequestRunningNum = 0, 0, 0
+		p.TPOT, p.TTFT = 0, 0
+		p.TimePerOutputToken, p.TimeToFirstToken = nil, nil
+		p.models = nil
+	}
 	p.Pod = pod
 	p.engine = engine
 	p.modelServer = modelServers

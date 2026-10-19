@@ -140,6 +140,11 @@ type Metrics struct {
 	SessionBoostQueueCancelledTotal prometheus.CounterVec
 	SessionBoostQueueDequeueTotal   prometheus.CounterVec
 	SessionBoostQueueInflight       prometheus.GaugeVec
+
+	DiscoveryRefreshTotal         prometheus.CounterVec
+	DiscoveryRefreshDuration      prometheus.HistogramVec
+	DiscoveryLastSuccessTimestamp prometheus.GaugeVec
+	DiscoveryEndpoints            prometheus.GaugeVec
 }
 
 // NewMetrics creates a new Metrics instance with all Prometheus metrics registered
@@ -403,7 +408,40 @@ func NewMetrics() *Metrics {
 		},
 	)
 
+	m.DiscoveryRefreshTotal = *promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kthena_router_discovery_refresh_total",
+		Help: "Endpoint discovery refreshes by result: success, error or discarded",
+	}, []string{LabelModelServer, "result"})
+	m.DiscoveryRefreshDuration = *promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "kthena_router_discovery_refresh_duration_seconds",
+		Help:    "Endpoint discovery refresh duration including slot waiting and Store reconciliation",
+		Buckets: prometheus.DefBuckets,
+	}, []string{LabelModelServer})
+	m.DiscoveryLastSuccessTimestamp = *promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kthena_router_discovery_last_success_timestamp_seconds",
+		Help: "Unix timestamp of the last applied discovery snapshot; zero before initial success",
+	}, []string{LabelModelServer})
+	m.DiscoveryEndpoints = *promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kthena_router_discovery_endpoints",
+		Help: "Endpoint count in the last successfully applied discovery snapshot",
+	}, []string{LabelModelServer})
+
 	return m
+}
+
+func (m *Metrics) RecordDiscoveryRefresh(modelServer, result string, duration time.Duration) {
+	m.DiscoveryRefreshTotal.WithLabelValues(modelServer, result).Inc()
+	m.DiscoveryRefreshDuration.WithLabelValues(modelServer).Observe(duration.Seconds())
+}
+
+func (m *Metrics) SetDiscoverySnapshot(modelServer string, count int, timestamp float64) {
+	m.DiscoveryEndpoints.WithLabelValues(modelServer).Set(float64(count))
+	m.DiscoveryLastSuccessTimestamp.WithLabelValues(modelServer).Set(timestamp)
+}
+
+func (m *Metrics) DeleteDiscoverySnapshot(modelServer string) {
+	m.DiscoveryEndpoints.DeleteLabelValues(modelServer)
+	m.DiscoveryLastSuccessTimestamp.DeleteLabelValues(modelServer)
 }
 
 // SetPrefixCacheEntriesProvider sets the callback read by the prefix_cache_entries gauge at scrape time.

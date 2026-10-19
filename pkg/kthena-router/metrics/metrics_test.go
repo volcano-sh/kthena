@@ -96,6 +96,31 @@ func gaugeVal(t *testing.T, vec *prometheus.GaugeVec, lvs ...string) float64 {
 	return m.GetGauge().GetValue()
 }
 
+func TestDiscoveryMetrics(t *testing.T) {
+	m := DefaultMetrics
+	name := "default/metrics-test"
+	before := counterVal(t, &m.DiscoveryRefreshTotal, name, "success")
+	beforeDuration := histCount(t, &m.DiscoveryRefreshDuration, name)
+	m.RecordDiscoveryRefresh(name, "success", 2*time.Second)
+	m.SetDiscoverySnapshot(name, 3, 123)
+	if got := counterVal(t, &m.DiscoveryRefreshTotal, name, "success"); got != before+1 {
+		t.Fatalf("refresh count = %v, want %v", got, before+1)
+	}
+	if got := histCount(t, &m.DiscoveryRefreshDuration, name); got != beforeDuration+1 {
+		t.Fatalf("duration samples = %v, want %v", got, beforeDuration+1)
+	}
+	if got := gaugeVal(t, &m.DiscoveryEndpoints, name); got != 3 {
+		t.Fatalf("endpoint count = %v, want 3", got)
+	}
+	if got := gaugeVal(t, &m.DiscoveryLastSuccessTimestamp, name); got != 123 {
+		t.Fatalf("last-success timestamp = %v, want 123", got)
+	}
+	m.DeleteDiscoverySnapshot(name)
+	if m.DiscoveryEndpoints.DeleteLabelValues(name) || m.DiscoveryLastSuccessTimestamp.DeleteLabelValues(name) {
+		t.Fatal("snapshot gauges were not deleted")
+	}
+}
+
 func TestFairnessMetricsAggregateUserIdentity(t *testing.T) {
 	m := DefaultMetrics
 	const model = "metricstest-fairness-aggregate-user"

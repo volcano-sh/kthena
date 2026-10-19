@@ -13,123 +13,145 @@ creation-date: 2026-10-10
 
 ### Summary
 
-Draft implementation for [issue #1864](https://github.com/volcano-sh/kthena/issues/1864).
-Introduce an in-process discovery extension point that reuses the networking API's
-`Endpoint`, synthetic Pods, and `datastore.Store`. Providers supply full snapshots;
-a shared controller handles Store synchronization. Interface and configuration
-choices remain subject to community discussion.
+For [issue #1864](https://github.com/volcano-sh/kthena/issues/1864), add an
+in-process discovery extension point. Providers return existing networking
+`Endpoint` objects; a shared controller maintains synthetic Pods in
+`datastore.Store`, without adding discovery I/O to inference requests.
 
 ### Motivation
 
-Serving instances can be registered outside the router's Kubernetes cluster.
-Integrations should not need to modify the scheduler or proxy to discover them.
+Model instances may be registered outside the router's Kubernetes cluster.
+Integrations need to discover them without changing scheduling or proxying.
 
 #### Goals
 
-- Preserve default Pod discovery and static endpoint behavior when not enabled.
-- Share reconciliation between static endpoints and external discovery.
-- Support Kubernetes-backed and file-backed ModelServer configuration.
-- Distinguish lookup failure from successful empty membership.
+- Preserve native Pod/static discovery when the extension is disabled.
+- Share endpoint reconciliation across providers and static endpoints.
+- Support both Kubernetes-backed and file-backed ModelServer resources.
 
 #### Non-Goals
 
-- New CRD fields, another Endpoint type, or changes to the inference request path.
-- Bundled discovery backends, vendor-specific registries, dynamically loaded Go
-  plugins, or a remote plugin RPC.
-- Multiple discovery providers in one router, dynamic mapping reload, or discovery
-  for Gateway API Inference Extension InferencePools.
+- CRD changes, bundled providers, remote RPC or dynamically loaded plugins.
+- Mixed Pod/external discovery, multiple providers per router, mapping hot reload,
+  or external discovery for Gateway API Inference Extension InferencePools.
 
 ### Proposal
 
-Select one compiled-in provider through `endpointDiscovery.provider`. Explicit
-`namespace/name` mappings provide its parameters for each ModelServer. Factories
-are registered by name in a constructor-supplied `Registry`. Integrations inject
-their factories through `Server.EndpointDiscoveryRegistry` before starting the
-server. No external providers are bundled; an unregistered provider name fails
-startup. The default native discovery path does not require a registry.
+Select one compiled-in provider and map ModelServers to its parameters.
+External mode disables the Pod informer, not resource configuration loading.
+
+| ModelServer in external mode | Membership owner |
+| --- | --- |
+| Mapped | Discovery controller; selector/static endpoints are ignored |
+| Unmapped, with static endpoints | Shared static endpoint reconciliation |
+| Unmapped, selector only | Empty pool with a warning; no Pod fallback |
+
+#### User Stories
+
+- Discover instances across clusters from a registry without watching each cluster.
+- Add a registry integration while reusing the existing scheduler, proxy and Store.
+
+#### Risks and Mitigations
+
+- **Startup:** by default, one failing mapped model can prevent a new replica from
+  becoming Ready and stall rollout. `requireInitialSnapshot: false` permits
+  startup without discovery completion, accepting unavailable model pools.
+- **Staleness:** lookup/validation failures retain the entire last valid snapshot,
+  possibly indefinitely. Endpoint count and last-success metrics support alerts;
+  they do not certify endpoint health.
+- **Cold instances:** runtime inspection is asynchronous in external mode. Until
+  it completes, LoRA filtering excludes new instances and GPU-cache scoring sees
+  zero usage. Readiness does not imply populated metrics or inference capacity.
+- **Consistency:** Store updates are serialized per ModelServer, not an atomic
+  snapshot swap. A provider ignoring cancellation can delay refresh or shutdown.
+
+### Design Details
+
+#### Integration
+
+Implement `discovery.Source` and register a `Factory` in
+`Server.EndpointDiscoveryRegistry` before `Run`:
+
+```go
+type Source interface {
+    Snapshot(context.Context) ([]networkingv1alpha1.Endpoint, error)
+    Close()
+}
+
+type Factory func(types.NamespacedName, map[string]interface{}, func()) (Source, error)
+type Registry map[string]Factory
+```
+
+The factory receives the ModelServer name, read-only parameters and a refresh
+hint callback. It must avoid blocking I/O; Source must honor cancellation, return
+immutable full snapshots and promptly release its own subscription on Close.
+Providers never receive Store access. Unknown provider names fail startup.
+
+```yaml
+endpointDiscovery:
+  provider: custom
+  refreshInterval: 30s
+  snapshotTimeout: 5s
+  maxConcurrentSnapshots: 4
+  requireInitialSnapshot: true
+  mappings:
+    - modelServer: default/example-model
+      parameters:
+        service: example-model
+```
+
+`custom` is integration-supplied; no providers are bundled. Provider/mapping
+changes require restart. ModelServer validation remains unchanged: declare valid
+selector/port fields or static endpoints. Operational details are in the
+[configuration guide](../kthena/docs/user-guide/config-router.md#external-endpoint-discovery).
+
+#### Reconciliation
 
 ```text
 Kubernetes / resource files -> ModelServer lifecycle
                                       |
-Provider Source -> Endpoint snapshot -> Discovery controller -> synthetic Pods -> Store
+Provider Source -> Endpoint snapshot -> Discovery Controller -> synthetic Pods -> Store
 ```
 
-External mode disables the Pod informer, not the ModelServer resource source.
-Mapped ModelServers have a single owner for membership: the discovery controller.
-Their selector and static endpoints cannot overwrite discovered instances.
-Unmapped static ModelServers remain supported; unmapped selector-based models
-have empty pools and emit warnings, rather than silently falling back to Pods.
-
-The ModelServer schema and validation stay unchanged. A mapped ModelServer must
-still declare a valid selector and workload port, or valid static endpoints. This
-is a compatibility constraint of the draft, not a claim that a selector-only
-resource shape is ideal for external discovery. A future API change would need
-separate agreement and generated schema/client updates.
-
-### Design Details
-
-`Source` provides `Snapshot(context.Context) ([]networkingv1alpha1.Endpoint, error)`
-and `Close()`. A factory receives a ModelServer name, read-only parameters, and a
-nonblocking refresh callback. It must not perform blocking discovery I/O.
-
-`Controller` receives the Store and implements `Run(ctx)` / `Close()`. ModelServer
-controllers and file sources delegate updates and deletions to it. The existing
-ModelServer controller continues managing transport configuration. Provider code
-does not access Store internals.
-
-- Refresh hints are coalesced; periodic snapshots repair missed hints. At most
-  four snapshot/reconciliation operations run concurrently.
-- Snapshot and Close are serialized per source. Providers must honor cancellation
-  and release only their own subscriptions on Close.
-- Writes are serialized per ModelServer. Deletion cancels its subscription;
-  generation checks discard results from replaced or updated ModelServers.
-- Successful snapshots are validated in full before Store writes. Errors retain
-  the last successful membership; a successful empty snapshot clears it.
-- Endpoint names are scoped to the ModelServer. Providers must change names on
-  instance replacement, including address or port changes. Role/group labels must
-  be supplied explicitly for PD routing; identity-dependent runtime integrations
-  still require compatible instance identities.
-- Default refresh interval is 30 seconds, with a 5-second snapshot timeout.
-  Mappings and provider selection are startup configuration; changes need restart.
-- Controller readiness is resource initialization, not proof of healthy discovery.
-  Initial discovery failures leave mapped pools empty and are retried. Provider
-  factory failures are also logged and retried in the background.
-
-#### Risks and Mitigations
-
-Retaining the last successful snapshot can leave stale endpoints indefinitely
-during a registry outage. This draft does not introduce a maximum stale age or
-claim routing health from registry membership. A stale-snapshot eviction policy
-remains an explicit follow-up design question.
-
-Store reconciliation consists of multiple operations, not an atomic snapshot
-swap. The controller provides single-writer ownership and retries failures, but
-does not add transactional visibility to the existing Store.
-
-Providers are trusted, compiled-in code. Snapshot cancellation cannot forcibly
-stop a provider that ignores context. Implementations must bound discovery I/O,
-honor cancellation, and release subscriptions promptly on Close.
+- The controller implements `Run(ctx)` / `Close()`. It serializes Snapshot/Close
+  per source and Store writes per ModelServer. Deletion cancels the subscription;
+  subscription/version checks discard obsolete results.
+- Validate the whole snapshot before writing. A successful empty snapshot clears
+  membership; any invalid endpoint rejects the snapshot. Names follow Endpoint
+  DNS-1123 rules and must change on provider-reported instance/address/port changes.
+  Providers supply PD role/group labels and identities compatible with runtime
+  cache/session integrations.
+- Reuse the raw snapshot on engine/workload-port changes, preserving membership
+  and in-flight counters. Omitted ports follow configuration; explicit ports stay
+  fixed. Store invalidates affected runtime data and discards older scrapes.
+- External mode uses `WithDeferredRuntimeInspection()`, including for unmapped
+  static models. The existing bounded scrape loop handles runtime I/O; native
+  initialization and the public Store interface remain unchanged.
+- Bound provider queries by `maxConcurrentSnapshots` (default 4), releasing slots
+  before reconciliation. Refresh hints are coalesced/rate-limited; periodic
+  refresh repairs missed hints. Scheduled initial retries back off from
+  `min(1s, refreshInterval)` to the interval; refreshes use bounded jitter.
+  The immediate first lookup can still produce a startup burst.
+- After resource/Store initialization, Server waits for each existing mapped
+  ModelServer's first valid applied snapshot, including an empty one. Missing or
+  deleted resources do not block readiness. Once satisfied, the gate is latched;
+  later model changes cannot close it. There is no automatic timeout bypass.
 
 #### Test Plan
 
-Unit tests cover configuration/registry validation, add/update/remove, successful
-empty snapshots versus lookup errors, invalid snapshots, per-endpoint ports and
-labels, stale results after deletion or metadata change, cancellation, refresh
-notifications, periodic repair, and independent targets. Integration-style unit
-tests verify ownership delegation through both the ModelServer controller and
-file resource source. Test-only sources exercise factory injection and lifecycle
-without introducing a production backend. Existing native and static endpoint
-tests remain in place.
+Keep native/static regression tests. Cover snapshot validation and failure
+retention, lifecycle/obsolete results, cancellation, query limits, retry/jitter,
+readiness latching, configuration updates and cold-start scheduling. Exercise
+both resource-source integrations with test-only providers.
 
-Run scoped tests with the race detector, then repository lint/tests before opening
-a PR. Cluster and standalone smoke tests should validate actual routing and
-membership replacement; unit coverage alone is not an end-to-end verification.
+Run affected packages with `-race`, repository lint and unit tests. Actual
+registry/routing smoke tests remain necessary; unit tests are not end-to-end
+verification.
 
 ### Alternatives
 
-- An external synchronizer can continue updating `ModelServer.spec.endpoints` or
-  resource files. That remains appropriate when no in-process extension is needed.
-- Providers could write directly to Store. Shared helpers would still be needed
-  to keep deletion, identity and failed-snapshot behavior consistent.
-- Per-ModelServer provider selection and mixed Pod/external discovery could be
-  added later; this draft uses a process-wide mode to keep ownership explicit.
+- **External synchronizer:** update static endpoints or resource files without an
+  in-process extension; suitable when existing resource publication is enough.
+- **Provider writes Store:** duplicates ownership, deletion and failure handling.
+- **Mixed discovery:** defer per-ModelServer Pod/external selection to keep initial
+  ownership explicit; current mappings already identify individual ModelServers.

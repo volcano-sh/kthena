@@ -36,6 +36,8 @@ endpointDiscovery:
   provider: custom
   refreshInterval: 5s
   snapshotTimeout: 2s
+  maxConcurrentSnapshots: 8
+  requireInitialSnapshot: false
   mappings:
     - modelServer: default/model
       parameters:
@@ -46,6 +48,9 @@ endpointDiscovery:
 	require.NoError(t, config.EndpointDiscovery.Validate())
 	require.True(t, config.EndpointDiscovery.External())
 	require.Equal(t, "custom", config.EndpointDiscovery.Provider)
+	require.Equal(t, 8, config.EndpointDiscovery.MaxConcurrentSnapshots)
+	require.NotNil(t, config.EndpointDiscovery.RequireInitialSnapshot)
+	require.False(t, *config.EndpointDiscovery.RequireInitialSnapshot)
 	require.Equal(t, "model-service", config.EndpointDiscovery.Mappings[0].Parameters["service"])
 	require.Equal(t, "least-request", config.Scheduler.Plugins.Score.Enabled[0].Name)
 }

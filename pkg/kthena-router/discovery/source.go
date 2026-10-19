@@ -51,10 +51,14 @@ type Factory func(target types.NamespacedName, parameters map[string]interface{}
 type Registry map[string]Factory
 
 type Config struct {
-	Provider        string    `yaml:"provider"`
-	RefreshInterval string    `yaml:"refreshInterval"`
-	SnapshotTimeout string    `yaml:"snapshotTimeout"`
-	Mappings        []Mapping `yaml:"mappings"`
+	Provider        string `yaml:"provider"`
+	RefreshInterval string `yaml:"refreshInterval"`
+	SnapshotTimeout string `yaml:"snapshotTimeout"`
+	// MaxConcurrentSnapshots bounds provider queries per controller; zero defaults to four.
+	MaxConcurrentSnapshots int `yaml:"maxConcurrentSnapshots"`
+	// RequireInitialSnapshot defaults to true; the server latches this startup gate.
+	RequireInitialSnapshot *bool     `yaml:"requireInitialSnapshot"`
+	Mappings               []Mapping `yaml:"mappings"`
 }
 
 type Mapping struct {
@@ -83,6 +87,9 @@ func (c Config) durations() (time.Duration, time.Duration, error) {
 }
 
 func (c Config) Validate() error {
+	if c.MaxConcurrentSnapshots < 0 {
+		return fmt.Errorf("maxConcurrentSnapshots must not be negative")
+	}
 	if _, _, err := c.durations(); err != nil {
 		return err
 	}

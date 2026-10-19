@@ -50,6 +50,10 @@ func SyncEndpoints(store datastore.Store, ms *api.ModelServer, endpoints []api.E
 		return err
 	}
 	for _, endpoint := range endpoints {
+		// Keep the resolved port on the synthetic Pod, so a later ModelServer
+		// update can invalidate runtime data without deleting the instance.
+		port := endpointPort(ms, endpoint)
+		endpoint.Port = &port
 		if err := store.AddOrUpdatePod(utils.EndpointPod(ms, endpoint), []*api.ModelServer{ms}); err != nil {
 			return err
 		}
@@ -73,8 +77,8 @@ func validateSnapshot(ms *api.ModelServer, endpoints, previous []api.Endpoint) e
 	}
 	seen := make(map[string]bool, len(endpoints))
 	for _, endpoint := range endpoints {
-		if endpoint.Name == "" || seen[endpoint.Name] {
-			return fmt.Errorf("empty or duplicate endpoint name %q", endpoint.Name)
+		if len(validation.IsDNS1123Subdomain(endpoint.Name)) > 0 || seen[endpoint.Name] {
+			return fmt.Errorf("invalid or duplicate endpoint name %q: must be a unique DNS-1123 subdomain", endpoint.Name)
 		}
 		seen[endpoint.Name] = true
 		if net.ParseIP(endpoint.Address) == nil && (endpoint.Address == "" || len(validation.IsDNS1123Subdomain(endpoint.Address)) > 0) {

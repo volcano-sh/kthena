@@ -33,6 +33,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -461,26 +462,37 @@ func TestStoreAddOrUpdatePod(t *testing.T) {
 }
 
 func TestStoreAddOrUpdatePodFiresPodEvents(t *testing.T) {
-	s := &store{
-		modelServer: sync.Map{},
-		pods:        sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
-	}
-	ms := &aiv1alpha1.ModelServer{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model1"}}
-	assert.NoError(t, s.AddOrUpdateModelServer(ms, nil))
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod1"}}
+	for _, tc := range []struct {
+		name     string
+		deferred bool
+	}{
+		{name: "immediate"},
+		{name: "deferred", deferred: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &store{
+				modelServer:            sync.Map{},
+				pods:                   sync.Map{},
+				callbacks:              make(map[string][]CallbackFunc),
+				deferRuntimeInspection: tc.deferred,
+			}
+			ms := &aiv1alpha1.ModelServer{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model1"}}
+			assert.NoError(t, s.AddOrUpdateModelServer(ms, nil))
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod1"}}
 
-	events := make(chan EventData, 1)
-	s.RegisterCallback("Pod", func(data EventData) { events <- data })
+			events := make(chan EventData, 1)
+			s.RegisterCallback("Pod", func(data EventData) { events <- data })
 
-	for _, want := range []EventType{EventAdd, EventUpdate} {
-		assert.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
-		select {
-		case got := <-events:
-			assert.Equal(t, EventData{EventType: want, Pod: utils.GetNamespaceName(pod)}, got)
-		case <-time.After(time.Second):
-			t.Fatalf("no Pod %s event fired", want)
-		}
+			for _, want := range []EventType{EventAdd, EventUpdate} {
+				assert.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
+				select {
+				case got := <-events:
+					assert.Equal(t, EventData{EventType: want, Pod: utils.GetNamespaceName(pod)}, got)
+				case <-time.After(time.Second):
+					t.Fatalf("no Pod %s event fired", want)
+				}
+			}
+		})
 	}
 }
 
@@ -2198,6 +2210,67 @@ func TestAddOrUpdatePod_NewPodStillFetchesMetrics(t *testing.T) {
 	podInfo := s.GetPodInfo(utils.GetNamespaceName(pod))
 	assert.InDelta(t, 0.3, podInfo.GetGPUCacheUsage(), 1e-9)
 	assert.InDelta(t, 2.0, podInfo.GetRequestRunningNum(), 1e-9)
+}
+
+func TestRuntimeChangeDiscardsOldScrapes(t *testing.T) {
+	for _, change := range []string{"engine", "port"} {
+		t.Run(change, func(t *testing.T) {
+			started, release := make(chan struct{}, 2), make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			defer unblock()
+			inspector := &fakePodRuntimeInspector{
+				metricsFn: func(string, *corev1.Pod, uint32, map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
+					started <- struct{}{}
+					<-release
+					return map[string]float64{utils.KVCacheUsage: 0.9}, map[string]*dto.Histogram{utils.TTFT: {}}
+				},
+				modelsFn: func(string, *corev1.Pod, uint32) ([]string, error) {
+					started <- struct{}{}
+					<-release
+					return []string{"stale-model"}, nil
+				},
+			}
+			s := New(WithPodRuntimeInspector(inspector), WithDeferredRuntimeInspection()).(*store)
+			ms := createTestModelServer("default", "ms", aiv1alpha1.VLLM)
+			ep := aiv1alpha1.Endpoint{Name: "a", Address: "10.0.0.1", Port: ptr(int32(8000))}
+			pod := utils.EndpointPod(ms, ep)
+			require.NoError(t, s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]()))
+			require.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
+			info := s.GetPodInfo(utils.GetNamespaceName(pod))
+			info.GPUCacheUsage, info.TTFT = 0.5, 1
+			info.UpdateModels([]string{"old-model"})
+			info.IncrOnFlightRequests()
+			var metricsUpdated, modelsUpdated bool
+			var wg sync.WaitGroup
+			wg.Go(func() { metricsUpdated = s.updatePodMetrics(info) })
+			wg.Go(func() { modelsUpdated = s.updatePodModels(info) })
+			for i := 0; i < 2; i++ {
+				select {
+				case <-started:
+				case <-time.After(5 * time.Second):
+					t.Fatal("scrape did not start")
+				}
+			}
+			next := ms.DeepCopy()
+			if change == "engine" {
+				next.Spec.InferenceEngine = aiv1alpha1.SGLang
+			} else {
+				ep.Port = ptr(int32(9000))
+			}
+			require.NoError(t, s.AddOrUpdateModelServer(next, nil))
+			require.NoError(t, s.AddOrUpdatePod(utils.EndpointPod(next, ep), []*aiv1alpha1.ModelServer{next}))
+			unblock()
+			wg.Wait()
+			require.False(t, metricsUpdated, "discarded metrics must not trigger a queue recheck")
+			require.False(t, modelsUpdated, "discarded models must not trigger a queue recheck")
+			require.Same(t, info, s.GetPodInfo(utils.GetNamespaceName(pod)))
+			require.Equal(t, int64(1), info.GetOnFlightRequestNum())
+			require.Zero(t, info.GetGPUCacheUsage())
+			require.Zero(t, info.GetTTFT())
+			require.Empty(t, info.GetModels())
+			require.Empty(t, getPreviousHistogram(info))
+		})
+	}
 }
 
 func TestAddOrUpdatePod_ModelServerChangePreservesMetrics(t *testing.T) {

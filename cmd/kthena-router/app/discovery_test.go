@@ -18,7 +18,6 @@ package app
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,16 +31,19 @@ import (
 )
 
 type assemblySource struct {
-	snapshots atomic.Int32
-	closed    atomic.Bool
+	release chan struct{}
 }
 
 func (s *assemblySource) Snapshot(ctx context.Context) ([]api.Endpoint, error) {
-	s.snapshots.Add(1)
-	return nil, ctx.Err()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.release:
+		return nil, nil
+	}
 }
 
-func (s *assemblySource) Close() { s.closed.Store(true) }
+func (*assemblySource) Close() {}
 
 func TestEndpointDiscoveryAssembly(t *testing.T) {
 	registry := discovery.Registry{"custom": func(types.NamespacedName, map[string]interface{}, func()) (discovery.Source, error) {
@@ -82,43 +84,83 @@ func TestEndpointDiscoveryAssembly(t *testing.T) {
 	}
 }
 
-func TestEndpointDiscoveryUsesInjectedFactory(t *testing.T) {
+func TestServerDiscoveryWiring(t *testing.T) {
 	type factoryCall struct {
 		target     types.NamespacedName
 		parameters map[string]interface{}
 		notify     func()
+		release    chan struct{}
 	}
 	calls := make(chan factoryCall, 1)
-	source := &assemblySource{}
-	s := &Server{EndpointDiscoveryRegistry: discovery.Registry{
+	store := &readinessStore{Store: datastore.New()}
+	s := &Server{store: store, controllers: readinessController(false), EndpointDiscoveryRegistry: discovery.Registry{
 		"custom": func(target types.NamespacedName, parameters map[string]interface{}, notify func()) (discovery.Source, error) {
-			calls <- factoryCall{target, parameters, notify}
+			source := &assemblySource{release: make(chan struct{})}
+			calls <- factoryCall{target, parameters, notify, source.release}
 			return source, nil
 		},
 	}}
 	config := discovery.Config{
 		Provider: "custom", RefreshInterval: "1h",
-		Mappings: []discovery.Mapping{{ModelServer: "default/model", Parameters: map[string]interface{}{"service": "model-service"}}},
+		Mappings: []discovery.Mapping{{ModelServer: "default/model", Parameters: map[string]interface{}{"service": "model-service"}}, {ModelServer: "default/other"}},
 	}
-	d, err := newEndpointDiscovery(config, datastore.New(), false, s.EndpointDiscoveryRegistry)
+	d, err := newEndpointDiscovery(config, store, false, s.EndpointDiscoveryRegistry)
 	require.NoError(t, err)
 	t.Cleanup(d.Close)
-	require.NoError(t, d.UpdateModelServer(&api.ModelServer{
+	s.endpointDiscovery = d
+	require.False(t, s.HasSynced(), "do not latch before resource initialization")
+	s.controllers = readinessController(true)
+	require.False(t, s.HasSynced(), "do not latch before Store initialization")
+	store.ready = true
+	lateBinding := &Server{store: store, controllers: readinessController(true), endpointDiscovery: d}
+	require.True(t, lateBinding.HasSynced(), "absent mapped resources do not block startup")
+	ms := &api.ModelServer{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model"},
 		Spec:       api.ModelServerSpec{InferenceEngine: api.VLLM, WorkloadPort: api.WorkloadPort{Port: 8000}},
-	}))
-	var call factoryCall
-	select {
-	case call = <-calls:
-	case <-time.After(5 * time.Second):
-		t.Fatal("injected factory did not run")
 	}
+	require.NoError(t, d.UpdateModelServer(ms))
+	getCall := func() factoryCall {
+		select {
+		case call := <-calls:
+			return call
+		case <-time.After(5 * time.Second):
+			t.Fatal("injected factory did not run")
+			return factoryCall{}
+		}
+	}
+	call := getCall()
 	require.Equal(t, types.NamespacedName{Namespace: "default", Name: "model"}, call.target)
 	require.Equal(t, config.Mappings[0].Parameters, call.parameters)
 	require.NotNil(t, call.notify)
-	require.Eventually(t, func() bool { return source.snapshots.Load() == 1 }, 5*time.Second, time.Millisecond)
-	call.notify()
-	require.Eventually(t, func() bool { return source.snapshots.Load() >= 2 }, 5*time.Second, time.Millisecond)
-	d.Close()
-	require.True(t, source.closed.Load())
+	require.False(t, s.HasSynced())
+	require.True(t, lateBinding.HasSynced())
+	close(call.release)
+	require.Eventually(t, s.HasSynced, 5*time.Second, time.Millisecond)
+	for _, name := range []string{"model", "other"} {
+		next := ms.DeepCopy()
+		next.Name, next.UID = name, "replacement"
+		require.NoError(t, d.UpdateModelServer(next))
+		getCall() // Leave the new source blocked until cancellation.
+		require.False(t, d.HasSynced())
+		require.True(t, s.HasSynced(), "replacement/new models cannot close the startup gate")
+	}
+	store.ready = false
+	require.False(t, s.HasSynced())
+	store.ready = true
+	s.controllers = readinessController(false)
+	require.False(t, s.HasSynced())
+	s.controllers = readinessController(true)
+	s.endpointDiscovery = nil
+	require.True(t, s.HasSynced(), "native readiness is unchanged")
 }
+
+type readinessController bool
+
+func (c readinessController) HasSynced() bool { return bool(c) }
+
+type readinessStore struct {
+	datastore.Store
+	ready bool
+}
+
+func (s *readinessStore) HasSynced() bool { return s.ready }

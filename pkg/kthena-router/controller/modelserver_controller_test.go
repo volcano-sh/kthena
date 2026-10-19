@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
@@ -96,6 +97,29 @@ func TestExternalDiscoveryOwnsMembership(t *testing.T) {
 	require.NoError(t, c.syncModelServerHandler("default/ms"))
 	require.Nil(t, store.GetPodInfo(discoveredName))
 	require.Nil(t, store.GetModelServer(utils.GetNamespaceName(ms)))
+}
+
+type pendingModelServerEvents struct{}
+
+func (pendingModelServerEvents) HasSynced() bool { return false }
+
+func TestDiscoveryStartupWaitsForModelServerEvents(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		factory := informersv1alpha1.NewSharedInformerFactory(kthenafake.NewSimpleClientset(), 0)
+		c, err := NewModelServerController(factory, nil, newStoreWithMockBackend(), common.NewTransportRegistry(),
+			WithEndpointDiscovery(&discovery.Controller{}))
+		require.NoError(t, err)
+		c.modelServerSynced = func() bool { return true }
+		c.modelServerRegistration = pendingModelServerEvents{}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- c.Run(ctx.Done()) }()
+		synctest.Wait()
+		require.False(t, c.HasSynced(), "initial events must be queued before readiness can latch")
+		cancel()
+		require.ErrorContains(t, <-done, "failed to wait for caches")
+	})
 }
 
 func TestModelServerController_ModelServerLifecycle(t *testing.T) {
