@@ -333,7 +333,7 @@ func (c *Controller) refresh(name types.NamespacedName, t *target, sub *subscrip
 	// Metadata-only updates do not invalidate a snapshot; always publish the
 	// latest resource metadata rather than the copy from before the lookup.
 	ms := sub.ms
-	if err := validateSnapshot(ms, endpoints, sub.last); err != nil {
+	if err := validateSnapshot(ms, endpoints); err != nil {
 		return err
 	}
 	snapshot := make([]api.Endpoint, len(endpoints))

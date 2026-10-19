@@ -118,7 +118,9 @@ Provider Source -> Endpoint snapshot -> Discovery Controller -> synthetic Pods -
   subscription/version checks discard obsolete results.
 - Validate the whole snapshot before writing. A successful empty snapshot clears
   membership; any invalid endpoint rejects the snapshot. Names follow Endpoint
-  DNS-1123 rules and must change on provider-reported instance/address/port changes.
+  DNS-1123 rules and may remain stable across address/port changes. These changes
+  update the synthetic Pod in place, invalidating metrics/models and older scrapes
+  while preserving in-flight counters and emitting a Pod update event.
   Providers supply PD role/group labels and identities compatible with runtime
   cache/session integrations.
 - Reuse the raw snapshot on engine/workload-port changes, preserving membership

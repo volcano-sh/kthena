@@ -70,11 +70,7 @@ func SyncEndpoints(store datastore.Store, ms *api.ModelServer, endpoints []api.E
 	return nil
 }
 
-func validateSnapshot(ms *api.ModelServer, endpoints, previous []api.Endpoint) error {
-	old := make(map[string]api.Endpoint, len(previous))
-	for _, endpoint := range previous {
-		old[endpoint.Name] = endpoint
-	}
+func validateSnapshot(ms *api.ModelServer, endpoints []api.Endpoint) error {
 	seen := make(map[string]bool, len(endpoints))
 	for _, endpoint := range endpoints {
 		if len(validation.IsDNS1123Subdomain(endpoint.Name)) > 0 || seen[endpoint.Name] {
@@ -92,9 +88,6 @@ func validateSnapshot(ms *api.ModelServer, endpoints, previous []api.Endpoint) e
 			if len(validation.IsQualifiedName(key)) > 0 || len(validation.IsValidLabelValue(value)) > 0 {
 				return fmt.Errorf("endpoint %q has invalid label %q", endpoint.Name, key)
 			}
-		}
-		if last, ok := old[endpoint.Name]; ok && (last.Address != endpoint.Address || endpointPort(ms, last) != port) {
-			return fmt.Errorf("endpoint %q changed address or port without changing its name", endpoint.Name)
 		}
 	}
 	return nil

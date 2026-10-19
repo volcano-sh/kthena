@@ -2213,7 +2213,7 @@ func TestAddOrUpdatePod_NewPodStillFetchesMetrics(t *testing.T) {
 }
 
 func TestRuntimeChangeDiscardsOldScrapes(t *testing.T) {
-	for _, change := range []string{"engine", "port"} {
+	for _, change := range []string{"engine", "port", "IP"} {
 		t.Run(change, func(t *testing.T) {
 			started, release := make(chan struct{}, 2), make(chan struct{})
 			unblock := sync.OnceFunc(func() { close(release) })
@@ -2252,10 +2252,13 @@ func TestRuntimeChangeDiscardsOldScrapes(t *testing.T) {
 				}
 			}
 			next := ms.DeepCopy()
-			if change == "engine" {
+			switch change {
+			case "engine":
 				next.Spec.InferenceEngine = aiv1alpha1.SGLang
-			} else {
+			case "port":
 				ep.Port = ptr(int32(9000))
+			case "IP":
+				ep.Address = "10.0.0.9"
 			}
 			require.NoError(t, s.AddOrUpdateModelServer(next, nil))
 			require.NoError(t, s.AddOrUpdatePod(utils.EndpointPod(next, ep), []*aiv1alpha1.ModelServer{next}))

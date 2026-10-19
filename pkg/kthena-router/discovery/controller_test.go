@@ -153,8 +153,8 @@ func TestSnapshotReconciliation(t *testing.T) {
 	endpoints = []api.Endpoint{{Name: "bad", Address: "http://not-an-address"}}
 	require.Error(t, refresh())
 	assertRetained()
-	endpoints = []api.Endpoint{{Name: "a", Address: "10.0.0.2", Port: ptr.To(int32(9000))}}
-	require.ErrorContains(t, refresh(), "without changing its name")
+	endpoints = []api.Endpoint{{Name: "a", Address: "10.0.0.1"}, {Name: "a", Address: "10.0.0.2"}}
+	require.ErrorContains(t, refresh(), "duplicate endpoint name")
 	assertRetained()
 
 	// Timeouts must retain the same membership as lookup and validation errors.
@@ -182,6 +182,68 @@ func TestSnapshotReconciliation(t *testing.T) {
 	require.False(t, m.DiscoveryLastSuccessTimestamp.DeleteLabelValues(name))
 }
 
+func TestSnapshotEndpointAddressUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		address string
+		port    int32
+	}{
+		{"IP", "10.0.0.9", 9000},
+		{"port", "10.0.0.1", 9001},
+		{"IP and port", "10.0.0.9", 9001},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testController(t, testConfig(), nil, nil)
+			ms := testModel()
+			target, sub := installTarget(t, c, ms)
+			endpoints := []api.Endpoint{
+				{Name: "a", Address: "10.0.0.1", Port: ptr.To(int32(9000))},
+				{Name: "removed", Address: "10.0.0.2"},
+			}
+			source := snapshotSource(endpoints, nil)
+			refresh := func() error { return c.refresh(utils.GetNamespaceName(ms), target, sub, &source) }
+			require.NoError(t, refresh())
+			podName := types.NamespacedName{Namespace: ms.Namespace, Name: "model:a"}
+			added := types.NamespacedName{Namespace: ms.Namespace, Name: "model:added"}
+			removed := types.NamespacedName{Namespace: ms.Namespace, Name: "model:removed"}
+			info := c.store.GetPodInfo(podName)
+			require.NotNil(t, info)
+			info.IncrOnFlightRequests()
+			info.GPUCacheUsage = 0.5
+			info.UpdateModels([]string{"old-model"})
+			events := make(chan datastore.EventData, 3)
+			c.store.RegisterCallback("Pod", func(event datastore.EventData) {
+				events <- event
+			})
+
+			// Address changes must not block other additions or removals in the snapshot.
+			endpoints = []api.Endpoint{
+				{Name: "a", Address: tc.address, Port: ptr.To(tc.port)},
+				{Name: "added", Address: "10.0.0.3"},
+			}
+			source = snapshotSource(endpoints, nil)
+			require.NoError(t, refresh())
+			require.Same(t, info, c.store.GetPodInfo(podName))
+			require.Equal(t, tc.address, info.GetPod().Status.PodIP)
+			require.Equal(t, tc.port, utils.EndpointPort(info.GetPod(), 0))
+			require.Equal(t, int64(1), info.GetOnFlightRequestNum())
+			require.Zero(t, info.GetGPUCacheUsage())
+			require.Empty(t, info.GetModels())
+			require.NotNil(t, c.store.GetPodInfo(added))
+			require.Nil(t, c.store.GetPodInfo(removed))
+			pods, err := c.store.GetPodsByModelServer(utils.GetNamespaceName(ms))
+			require.NoError(t, err)
+			require.Len(t, pods, 2)
+			require.Equal(t, endpoints, sub.last)
+			require.ElementsMatch(t, []datastore.EventData{
+				{Pod: podName, EventType: datastore.EventUpdate},
+				{Pod: added, EventType: datastore.EventAdd},
+				{Pod: removed, EventType: datastore.EventDelete},
+			}, []datastore.EventData{receive(t, events), receive(t, events), receive(t, events)})
+		})
+	}
+}
+
 func TestSnapshotValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -202,7 +264,7 @@ func TestSnapshotValidation(t *testing.T) {
 		{"label", []api.Endpoint{{Name: "a", Address: "10.0.0.1", Labels: map[string]string{"bad key": "v"}}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateSnapshot(testModel(), tc.endpoints, nil)
+			err := validateSnapshot(testModel(), tc.endpoints)
 			if tc.valid {
 				require.NoError(t, err)
 			} else {

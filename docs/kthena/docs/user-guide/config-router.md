@@ -168,10 +168,18 @@ kubectl rollout restart deployment/kthena-router
 
 ## External Endpoint Discovery
 
-`endpointDiscovery` selects a compiled-in provider. Omit it (or use
-`provider: kubernetes`) to keep native Pod/static discovery. External mode
-disables Pod discovery for the entire router and supports either Kubernetes
-resources or `--config-source=file` resource manifests.
+Place `endpointDiscovery` alongside `scheduler` and `auth` in the Router
+configuration file selected by `--router-config` (default:
+`/etc/config/routerConfiguration.yaml`, populated from the ConfigMap's
+`routerConfiguration` key). It is not a ModelServer field.
+All discovery settings are read at startup; changing them requires restarting
+the Router replicas. Endpoint changes from the provider are applied automatically
+without a restart.
+
+Each Router process selects one compiled-in provider for all mappings. Omit
+`endpointDiscovery` (or use `provider: kubernetes`) to keep native Pod/static
+discovery. External mode disables Pod discovery for the entire router and
+supports either Kubernetes resources or `--config-source=file` resource manifests.
 
 No external providers are bundled. Implement `discovery.Source` and supply a
 factory through `Server.EndpointDiscoveryRegistry` before `Run`:
@@ -197,19 +205,22 @@ endpointDiscovery:
 
 `customdiscovery.NewSource`, `custom` and `service` are illustrative.
 Providers define and validate their parameters. YAML cannot load implementations;
-an unregistered provider fails startup. Provider/mapping changes require restart.
-Multiple providers and Gateway API Inference Extension with external discovery
+an unregistered provider fails startup. Selecting different providers per
+ModelServer and using Gateway API Inference Extension with external discovery
 are not supported.
 
 ### Configuration and ownership
 
-| Setting | Default / behavior |
-| --- | --- |
-| `refreshInterval` | 30s; positive duration between refreshes, with approximately +/-10% jitter |
-| `snapshotTimeout` | 5s; positive timeout for each Snapshot call, excluding slot waiting |
-| `maxConcurrentSnapshots` | Omitted/0 means 4; negative values are rejected. Bounds provider queries per process, not inference requests or endpoints |
-| `requireInitialSnapshot` | True; wait for initial discovery before Ready, as described below |
-| `mappings` | Required for external mode; unique `namespace/name` targets with provider-specific parameters |
+| Setting | Default | Scope and behavior | Constraints |
+| --- | --- | --- | --- |
+| `provider` | Empty, equivalent to `kubernetes` | Process-wide discovery mode; an external provider's factory creates a separate Source for each mapped ModelServer | External provider must be registered before `Run`; no native Pod discovery fallback |
+| `refreshInterval` | `30s` | Periodic delay after a refresh completes, per Source; approximately +/-10% jitter, with earlier notification-driven refreshes | Positive duration; not an endpoint-freshness guarantee |
+| `snapshotTimeout` | `5s` | Context timeout for each `Source.Snapshot` call | Positive duration; excludes slot waiting, factory construction and Store updates; Source must honor cancellation |
+| `maxConcurrentSnapshots` | `4` | Shared provider-query concurrency across mappings in one process; each replica has its own limit | Omitted/0 uses the default; negative values are invalid; not an inference-request or endpoint-count limit |
+| `requireInitialSnapshot` | `true` | Startup readiness waits for a valid applied snapshot of each existing mapped ModelServer; empty snapshots count as success | Gate latches once satisfied; no timeout bypass; `false` skips only this discovery gate |
+| `mappings` | Empty | Binds ModelServers to independent Sources using the selected provider | Required in external mode; must be empty in native mode; no duplicate targets |
+| `mappings[].modelServer` | None | Resource key in `namespace/name` format, not the request's model name; discovery starts when the resource is observed | Does not create the ModelServer; missing resources warn but do not block readiness |
+| `mappings[].parameters` | `nil` | Provider-specific parameters passed unchanged to its factory | Provider defines required fields, defaults and validation |
 
 Mapped resources use only provider membership; their selectors/static endpoints
 are ignored. Unmapped static models work; unmapped selector-based models stay
@@ -217,17 +228,28 @@ empty, with warnings and no Pod fallback. ModelServer validation is unchanged:
 declare valid `workloadSelector.matchLabels` and `workloadPort`, or static
 endpoints. File-backed resource loading is not an endpoint discovery provider.
 
+### Refresh and reconciliation
+
+Each replica creates Sources independently as mapped ModelServers are observed.
+Discovery runs in the background; request routing reads Store without querying
+the provider. Deleting a ModelServer cancels its subscription and removes its
+Store membership.
+
+The first lookup starts immediately, subject to available concurrency slots.
+Subsequent lookups run periodically or on provider notifications and ModelServer
+spec changes. Notifications are coalesced; refreshes wait at least
+`min(1s, refreshInterval)` after the previous refresh completes. Before the first
+successful snapshot, scheduled retries back off exponentially from that minimum
+up to `refreshInterval`, with jitter within these bounds. Jitter spreads periodic
+queries but does not eliminate startup bursts. Slots are released before Store
+updates.
+
 Sources return complete snapshots and honor cancellation. Names are DNS-1123
-subdomains (at most 253 characters), unique within a ModelServer; change them when
-the provider replaces an instance or changes its address/port. Supply PD labels explicitly.
+subdomains (at most 253 characters), unique within a ModelServer; they may remain
+stable across address/port changes. Supply PD labels explicitly.
 The controller validates snapshots and manages synthetic Pods/Store updates:
 successful empty results clear membership; lookup/validation failures retain the
 entire last successful snapshot without an expiry limit.
-
-Slots are released before Store updates. Refresh hints are coalesced; refreshes
-wait at least `min(1s, refreshInterval)` after the previous refresh completes.
-Scheduled initial retries back off exponentially up to the interval, with jitter within these
-bounds. The first lookup is immediate; jitter does not eliminate startup bursts.
 
 ### Readiness and runtime data
 
@@ -246,6 +268,17 @@ loop, not discovery; native initialization stays synchronous. Until inspection
 succeeds, LoRA affinity excludes new instances and GPU-cache scoring sees zero
 usage. The scrape interval does not bound this window; Ready does not certify
 endpoint health, fresh metrics or capacity.
+
+An endpoint's address/port can change without renaming it. Store updates the
+synthetic Pod in place and emits a Pod update event, invalidating metrics/models
+and discarding obsolete scrapes while preserving in-flight counters.
+
+Names also identify affinity state within a ModelServer: an address/port update
+does not invalidate name-keyed `prefix-cache` history or session-sticky bindings.
+Normal cache eviction, binding TTL and scheduling filters still apply. Providers
+must use a new name when a replacement must not inherit this affinity state,
+for example after a restart that loses its cache. A replacement with an unchanged
+name, address and port cannot be inferred from the snapshot.
 
 Engine/workload-port edits reapply the raw snapshot without clearing membership
 or in-flight counters. Omitted ports follow configuration, explicit ports stay
