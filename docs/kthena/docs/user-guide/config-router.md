@@ -181,8 +181,9 @@ Each Router process selects one compiled-in provider for all mappings. Omit
 discovery. External mode disables Pod discovery for the entire router and
 supports either Kubernetes resources or `--config-source=file` resource manifests.
 
-No external providers are bundled. Implement `discovery.Source` and supply a
-factory through `Server.EndpointDiscoveryRegistry` before `Run`:
+No external provider is registered in the default binary. Implement
+`discovery.Source` and supply a factory through `Server.EndpointDiscoveryRegistry`
+before `Run`:
 
 ```go
 server.EndpointDiscoveryRegistry = discovery.Registry{
@@ -208,6 +209,9 @@ Providers define and validate their parameters. YAML cannot load implementations
 an unregistered provider fails startup. Selecting different providers per
 ModelServer and using Gateway API Inference Extension with external discovery
 are not supported.
+
+For a complete implementation, build commands and a local routing smoke test,
+see [Build an endpoint discovery provider](./endpoint-discovery-provider.md).
 
 ### Configuration and ownership
 

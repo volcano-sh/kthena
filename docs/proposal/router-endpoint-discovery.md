@@ -31,7 +31,7 @@ Integrations need to discover them without changing scheduling or proxying.
 
 #### Non-Goals
 
-- CRD changes, bundled providers, remote RPC or dynamically loaded plugins.
+- CRD changes, default external providers, out-of-process plugins or dynamic loading.
 - Mixed Pod/external discovery, multiple providers per router, mapping hot reload,
   or external discovery for Gateway API Inference Extension InferencePools.
 
@@ -45,6 +45,25 @@ External mode disables the Pod informer, not resource configuration loading.
 | Mapped | Discovery controller; selector/static endpoints are ignored |
 | Unmapped, with static endpoints | Shared static endpoint reconciliation |
 | Unmapped, selector only | Empty pool with a warning; no Pod fallback |
+
+```mermaid
+flowchart LR
+    K[Kubernetes resource watches] --> M[ModelServer lifecycle]
+    F[File resource loader] --> M
+    M --> N[Native / static reconciliation]
+    P[Pod informer] --> N
+    M --> D[Discovery Controller - new]
+    E[Provider Source - extension] -->|Endpoint snapshots| D
+    N --> S[datastore.Store]
+    D -->|Synthetic Pods| S
+    S --> R[Scheduler / proxy]
+```
+
+Resource loading and instance discovery are independent. Kubernetes watches or
+the existing file loader supply ModelServer configuration. Native mode retains
+Pod/static reconciliation; external mode disables the Pod informer and assigns
+mapped models exclusively to the new controller. Unmapped static models still
+work. Both paths use the existing Store; the request path is unchanged.
 
 #### User Stories
 
@@ -100,44 +119,55 @@ endpointDiscovery:
         service: example-model
 ```
 
-`custom` is integration-supplied; no providers are bundled. Provider/mapping
-changes require restart. ModelServer validation remains unchanged: declare valid
-selector/port fields or static endpoints. Operational details are in the
+`custom` is integration-supplied; no external provider is registered by default.
+Provider/mapping changes require restart. ModelServer validation remains
+unchanged: declare valid selector/port fields or static endpoints. Details are in the
 [configuration guide](../kthena/docs/user-guide/config-router.md#external-endpoint-discovery).
+A complete [HTTP/JSON example](../kthena/docs/user-guide/endpoint-discovery-provider.md)
+includes a custom binary, configuration and local mock backend.
 
 #### Reconciliation
 
-```text
-Kubernetes / resource files -> ModelServer lifecycle
-                                      |
-Provider Source -> Endpoint snapshot -> Discovery Controller -> synthetic Pods -> Store
-```
+**1. Attach a source.** At startup, Router configuration selects a compiled-in
+factory. When either resource loader observes a mapped ModelServer, the
+controller creates its subscription and calls the factory with that model's
+parameters. Each Router replica maintains its own Sources; the first lookup
+starts immediately when a query slot is available.
 
-- The controller implements `Run(ctx)` / `Close()`. It serializes Snapshot/Close
-  per source and Store writes per ModelServer. Deletion cancels the subscription;
-  subscription/version checks discard obsolete results.
-- Validate the whole snapshot before writing. A successful empty snapshot clears
-  membership; any invalid endpoint rejects the snapshot. Names follow Endpoint
-  DNS-1123 rules and may remain stable across address/port changes. These changes
-  update the synthetic Pod in place, invalidating metrics/models and older scrapes
-  while preserving in-flight counters and emitting a Pod update event.
-  Providers supply PD role/group labels and identities compatible with runtime
-  cache/session integrations.
-- Reuse the raw snapshot on engine/workload-port changes, preserving membership
-  and in-flight counters. Omitted ports follow configuration; explicit ports stay
-  fixed. Store invalidates affected runtime data and discards older scrapes.
-- External mode uses `WithDeferredRuntimeInspection()`, including for unmapped
-  static models. The existing bounded scrape loop handles runtime I/O; native
-  initialization and the public Store interface remain unchanged.
-- Bound provider queries by `maxConcurrentSnapshots` (default 4), releasing slots
-  before reconciliation. Refresh hints are coalesced/rate-limited; periodic
-  refresh repairs missed hints. Scheduled initial retries back off from
-  `min(1s, refreshInterval)` to the interval; refreshes use bounded jitter.
-  The immediate first lookup can still produce a startup burst.
-- After resource/Store initialization, Server waits for each existing mapped
-  ModelServer's first valid applied snapshot, including an empty one. Missing or
-  deleted resources do not block readiness. Once satisfied, the gate is latched;
-  later model changes cannot close it. There is no automatic timeout bypass.
+**2. Refresh and apply.** The controller calls `Snapshot(ctx)` outside its
+ModelServer lock, with a timeout and process-wide query limit (default 4).
+Periodic refresh, a provider's `notify()` hint or a ModelServer spec change can
+trigger another lookup. Notifications coalesce and are rate-limited. Scheduled
+initial retries back off from `min(1s, refreshInterval)` to the interval;
+periodic delays have approximately +/-10% jitter. Slots are released before
+validation and Store reconciliation.
+
+| Result | Store action |
+| --- | --- |
+| Valid full snapshot | Add/update synthetic Pods and remove omitted members |
+| Successful empty snapshot | Clear this ModelServer's membership |
+| Lookup error or any invalid endpoint | Keep the entire last valid snapshot |
+| Cancelled/replaced subscription or changed spec version | Discard the obsolete result |
+
+Writes are serialized per ModelServer, but not an atomic Store snapshot swap.
+Endpoint names are DNS-1123 identities within the model. A same-name address/port
+change updates the Pod in place: in-flight counters and name-keyed affinity
+remain, while runtime metrics/models and old scrapes are invalidated. Use a new
+name for a replacement that must not inherit affinity; provide PD role/group
+labels when needed. The existing bounded inspection loop fetches metrics/models
+asynchronously in external mode, including for unmapped static models.
+
+**3. Handle lifecycle changes.** A spec edit reapplies the last raw snapshot
+before requesting a refresh, so engine/port changes do not clear membership.
+Omitted ports follow ModelServer configuration; explicit endpoint ports do not.
+Deletion cancels the subscription and removes membership; a different UID starts
+a fresh subscription. The controller's `Run(ctx)` / `Close()` own these workers,
+with `Snapshot` and `Close` serialized for each Source.
+
+By default, after resource/Store initialization, Server waits for the first valid applied
+snapshot of every existing mapped model; empty snapshots count. Missing/deleted
+models do not block it. This startup gate latches once satisfied, with no
+automatic timeout bypass; later model changes cannot make the Router Unready.
 
 #### Test Plan
 
@@ -146,9 +176,9 @@ retention, lifecycle/obsolete results, cancellation, query limits, retry/jitter,
 readiness latching, configuration updates and cold-start scheduling. Exercise
 both resource-source integrations with test-only providers.
 
-Run affected packages with `-race`, repository lint and unit tests. Actual
-registry/routing smoke tests remain necessary; unit tests are not end-to-end
-verification.
+Run affected packages with `-race`, repository lint and unit tests. The HTTP
+example provides a local discovery/routing smoke test with a mock backend;
+real registry and inference-engine integrations still need their own validation.
 
 ### Alternatives
 

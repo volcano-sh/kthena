@@ -1,0 +1,30 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: demo
+  namespace: default
+spec:
+  model: demo
+  inferenceEngine: vLLM
+  # Required by ModelServer validation; provider membership overrides selection.
+  workloadSelector:
+    matchLabels:
+      app: demo
+  workloadPort:
+    port: 18081
+    protocol: http
+  trafficPolicy:
+    timeout: 10s
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: demo
+  namespace: default
+spec:
+  modelName: demo
+  rules:
+    - name: default
+      targetModels:
+        - modelServerName: demo
+          weight: 100
