@@ -35,6 +35,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/autoscaler/autoscaler"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	resource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -1216,6 +1217,97 @@ func TestUpdateHomogeneousPolicyStatus_TargetNotFound(t *testing.T) {
 	}
 	if targetCond == nil || targetCond.Status != metav1.ConditionFalse || targetCond.Reason != "TargetInvalid" {
 		t.Errorf("unexpected TargetFound condition: %+v", targetCond)
+	}
+}
+
+func TestUpdatePolicyStatus_ReconcileErrorKeepsPreviousTargetStatus(t *testing.T) {
+	lastScaleTime := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	prevHomogeneous := &workload.TargetScalingStatus{CurrentReplicas: 2, DesiredReplicas: 3, Mode: "Stable", LastScaleTime: &lastScaleTime}
+	prevHeterogeneous := []workload.TargetScalingStatus{{Name: "ms-a", CurrentReplicas: 1, DesiredReplicas: 2, Mode: "Stable", LastScaleTime: &lastScaleTime}}
+	prevDisaggregated := &workload.DisaggregatedScalingStatus{Roles: []workload.TargetScalingStatus{{Name: "prefill", CurrentReplicas: 1, DesiredReplicas: 2, Mode: "Stable", LastScaleTime: &lastScaleTime}}}
+	reconcileErr := fmt.Errorf("metric collection failed")
+
+	tests := []struct {
+		name   string
+		status workload.AutoscalingPolicyStatus
+		update func(ac *AutoscaleController, policy *workload.AutoscalingPolicy) error
+		check  func(t *testing.T, status workload.AutoscalingPolicyStatus)
+	}{
+		{
+			name:   "homogeneous scale error",
+			status: workload.AutoscalingPolicyStatus{HomogeneousStatus: prevHomogeneous},
+			update: func(ac *AutoscaleController, policy *workload.AutoscalingPolicy) error {
+				return ac.updateHomogeneousPolicyStatus(context.Background(), policy, 4, 0, "", reconcileErr, true)
+			},
+			check: func(t *testing.T, status workload.AutoscalingPolicyStatus) {
+				if !equality.Semantic.DeepEqual(status.HomogeneousStatus, prevHomogeneous) {
+					t.Errorf("expected previous HomogeneousStatus %+v, got %+v", prevHomogeneous, status.HomogeneousStatus)
+				}
+			},
+		},
+		{
+			name:   "homogeneous target not found",
+			status: workload.AutoscalingPolicyStatus{HomogeneousStatus: prevHomogeneous},
+			update: func(ac *AutoscaleController, policy *workload.AutoscalingPolicy) error {
+				return ac.updateHomogeneousPolicyStatus(context.Background(), policy, 0, 0, "", reconcileErr, false)
+			},
+			check: func(t *testing.T, status workload.AutoscalingPolicyStatus) {
+				if !equality.Semantic.DeepEqual(status.HomogeneousStatus, prevHomogeneous) {
+					t.Errorf("expected previous HomogeneousStatus %+v, got %+v", prevHomogeneous, status.HomogeneousStatus)
+				}
+			},
+		},
+		{
+			name:   "heterogeneous error without target statuses",
+			status: workload.AutoscalingPolicyStatus{HeterogeneousStatus: prevHeterogeneous},
+			update: func(ac *AutoscaleController, policy *workload.AutoscalingPolicy) error {
+				return ac.updateHeterogeneousPolicyStatus(context.Background(), policy, nil, reconcileErr, true)
+			},
+			check: func(t *testing.T, status workload.AutoscalingPolicyStatus) {
+				if !equality.Semantic.DeepEqual(status.HeterogeneousStatus, prevHeterogeneous) {
+					t.Errorf("expected previous HeterogeneousStatus %+v, got %+v", prevHeterogeneous, status.HeterogeneousStatus)
+				}
+			},
+		},
+		{
+			name:   "disaggregated error without scale result",
+			status: workload.AutoscalingPolicyStatus{DisaggregatedStatus: prevDisaggregated},
+			update: func(ac *AutoscaleController, policy *workload.AutoscalingPolicy) error {
+				return ac.updateDisaggregatedPolicyStatus(context.Background(), policy, nil, reconcileErr, true)
+			},
+			check: func(t *testing.T, status workload.AutoscalingPolicyStatus) {
+				if !equality.Semantic.DeepEqual(status.DisaggregatedStatus, prevDisaggregated) {
+					t.Errorf("expected previous DisaggregatedStatus %+v, got %+v", prevDisaggregated, status.DisaggregatedStatus)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := &workload.AutoscalingPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: "default", Generation: 2},
+				Status:     *tt.status.DeepCopy(),
+			}
+			client := clientfake.NewSimpleClientset(policy)
+			ac := &AutoscaleController{client: client}
+
+			if err := tt.update(ac, policy); err != nil {
+				t.Fatalf("status update returned error: %v", err)
+			}
+			updated, err := client.WorkloadV1alpha1().AutoscalingPolicies("default").Get(context.Background(), "policy", metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("failed to get updated policy: %v", err)
+			}
+			if updated.Status.ObservedGeneration != 2 {
+				t.Errorf("expected ObservedGeneration=2, got %d", updated.Status.ObservedGeneration)
+			}
+			ready := findPolicyCondition(updated.Status.Conditions, "Ready")
+			if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ReconcileFailed" {
+				t.Errorf("expected Ready=False/ReconcileFailed, got %+v", ready)
+			}
+			tt.check(t, updated.Status)
+		})
 	}
 }
 
