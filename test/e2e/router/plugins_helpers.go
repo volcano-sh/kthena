@@ -18,6 +18,8 @@ package router
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,6 +30,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/tokenization"
 	plugincontext "github.com/volcano-sh/kthena/test/e2e/router/router-plugins/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
@@ -48,7 +52,9 @@ const (
 	kvCacheFixtureDeploymentName   = "router-plugin-kvcache-mock"
 	kvCacheFixtureAppLabel         = kvCacheFixtureDeploymentName
 	kvCacheOwnershipWaitTimeout    = 90 * time.Second
+	kvCacheMappingPrefix           = "vllm:kv:block"
 	kvCacheOwnershipPrefix         = "matrix:kv:block"
+	kvCacheBlockSize               = 8
 	kvCacheRoutingRequestCount     = 200
 	mixedPluginDominantWeight      = 101 // one more than either plugin's maximum score
 )
@@ -94,6 +100,37 @@ func setupKVCacheFixture(t *testing.T, kube kubernetes.Interface, namespace, red
 
 func waitForKVCacheOwnership(t *testing.T, pod corev1.Pod, redisNamespace, model, prompt string) {
 	t.Helper()
+	tokenizerPort := utils.AllocateLocalPort(t)
+	tokenizerPF, err := utils.SetupPortForwardToPod(pod.Namespace, pod.Name, tokenizerPort, "8000")
+	require.NoError(t, err, "port-forward to tokenizer")
+	defer tokenizerPF.Close()
+
+	tokenizer, err := tokenization.NewRemoteTokenizer(tokenization.RemoteTokenizerConfig{
+		Engine:   tokenization.EngineVLLM,
+		Endpoint: "http://127.0.0.1:" + tokenizerPort,
+		Model:    model,
+	})
+	require.NoError(t, err, "create tokenizer")
+	extendedTokenizer, ok := tokenizer.(tokenization.ExtendedTokenizer)
+	require.True(t, ok, "vLLM tokenizer must support chat templates")
+
+	tokenizeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	result, err := extendedTokenizer.TokenizeWithOptions(tokenizeCtx, tokenization.TokenizeInput{
+		Type:                tokenization.ChatInput,
+		Messages:            []common.Message{{Role: "user", Content: prompt}},
+		AddGenerationPrompt: true,
+	})
+	cancel()
+	require.NoError(t, err, "tokenize KV-cache prompt")
+	require.GreaterOrEqual(t, len(result.Tokens), kvCacheBlockSize, "KV-cache prompt must contain a complete block")
+
+	tokenBytes := make([]byte, kvCacheBlockSize*4)
+	for i, tokenID := range result.Tokens[:kvCacheBlockSize] {
+		binary.BigEndian.PutUint32(tokenBytes[i*4:], uint32(tokenID))
+	}
+	sum := sha256.Sum256(tokenBytes)
+	expectedHash := fmt.Sprintf("%d", binary.BigEndian.Uint64(sum[:8])&0x7FFFFFFFFFFFFFFF)
+
 	localPort := utils.AllocateLocalPort(t)
 	pf, err := utils.SetupPortForward(redisNamespace, "redis-server", localPort, "6379")
 	require.NoError(t, err, "port-forward to Redis")
@@ -103,25 +140,47 @@ func waitForKVCacheOwnership(t *testing.T, pod corev1.Pod, redisNamespace, model
 	defer client.Close()
 
 	owner := pod.Name + "." + pod.Namespace
-	ownershipPattern := fmt.Sprintf("%s:%s@*", kvCacheOwnershipPrefix, model)
+	mappingPattern := fmt.Sprintf("%s:%s@*", kvCacheMappingPrefix, owner)
+	var observedMappings map[string]string
+	var lastRedisErr error
 	deadline := time.Now().Add(kvCacheOwnershipWaitTimeout)
 	for time.Now().Before(deadline) {
 		// Re-send while polling because ZMQ may drop an event before the subscriber is ready.
 		utils.DirectChatToPod(t, pod, model, prompt, 1)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		iter := client.Scan(ctx, 0, ownershipPattern, 0).Iterator()
+		observedMappings = make(map[string]string)
+		iter := client.Scan(ctx, 0, mappingPattern, 0).Iterator()
 		for iter.Next(ctx) {
-			exists, err := client.HExists(ctx, iter.Val(), owner).Result()
+			mappingKey := iter.Val()
+			standardHash, err := client.Get(ctx, mappingKey).Result()
+			if err != nil {
+				lastRedisErr = err
+				continue
+			}
+			observedMappings[mappingKey] = standardHash
+			if standardHash != expectedHash {
+				continue
+			}
+
+			ownershipKey := fmt.Sprintf("%s:%s@%s", kvCacheOwnershipPrefix, model, standardHash)
+			exists, err := client.HExists(ctx, ownershipKey, owner).Result()
 			if err == nil && exists {
 				cancel()
 				return
+			} else if err != nil {
+				lastRedisErr = err
 			}
+		}
+		if err := iter.Err(); err != nil {
+			lastRedisErr = err
 		}
 		cancel()
 		time.Sleep(time.Second)
 	}
-	require.FailNowf(t, "KV-cache ownership not found", "expected ownership for %s", owner)
+	require.FailNowf(t, "KV-cache ownership not found",
+		"owner=%s expected standardized hash=%s observed engine mappings=%v last Redis error=%v",
+		owner, expectedHash, observedMappings, lastRedisErr)
 }
 
 func waitForSchedulerPluginInMetrics(t *testing.T, metricsURL, pluginName, pluginType string) {
