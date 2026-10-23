@@ -25,13 +25,23 @@ Before installing Kthena, ensure you have the following:
 
 ### Method 1: Helm Installation (Recommended)
 
-Kthena Helm charts are published to the GitHub Container Registry (GHCR).
+Kthena Helm charts are published to the GitHub Container Registry (GHCR) and to the [volcano-sh Helm repository](https://github.com/volcano-sh/helm-charts).
 
 1. **Install Kthena directly from GHCR:**
 
    ```bash
    helm install kthena oci://ghcr.io/volcano-sh/charts/kthena --version v1.0.0 --namespace kthena-system --create-namespace
    ```
+
+2. **Or install Kthena from the volcano-sh Helm repository:**
+
+   ```bash
+   helm repo add volcano-sh https://volcano-sh.github.io/helm-charts
+   helm repo update
+   helm install kthena volcano-sh/kthena --namespace kthena-system --create-namespace
+   ```
+
+   Chart versions in this repository have no `v` prefix (for example, `--version 1.2.0`). Run `helm search repo volcano-sh/kthena --versions` to list them, and add `--devel` to include pre-releases.
 
 ### Method 2: Manual Installation with GitHub Release Manifests
 
