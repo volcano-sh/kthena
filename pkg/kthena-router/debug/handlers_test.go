@@ -361,6 +361,14 @@ func (m *MockStore) GetSecret(name types.NamespacedName) *corev1.Secret {
 	return nil
 }
 
+func (m *MockStore) AddOrUpdateModelServerSecret(secret *corev1.Secret) error { return nil }
+
+func (m *MockStore) DeleteModelServerSecret(name types.NamespacedName) error { return nil }
+
+func (m *MockStore) GetModelServerSecret(name types.NamespacedName) *corev1.Secret {
+	return nil
+}
+
 func (m *MockStore) SyncOnFlightCounts() {}
 
 func (m *MockStore) IncrPodOnFlightRequests(podName types.NamespacedName) {}
