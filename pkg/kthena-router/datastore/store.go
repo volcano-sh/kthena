@@ -631,8 +631,12 @@ func (s *store) Run(ctx context.Context) {
 					go func(pod *PodInfo) {
 						defer wg.Done()
 						defer func() { <-sem }()
-						s.updatePodMetrics(pod)
-						s.updatePodModels(pod)
+						if s.updatePodMetrics(pod) {
+							s.recheckSessionBoostQueues()
+						}
+						if s.updatePodModels(pod) {
+							s.recheckSessionBoostQueues()
+						}
 					}(p)
 				}
 				return true
@@ -823,6 +827,22 @@ func (s *store) GetSessionIDHeader() string {
 	return s.fairnessQueueConfig.SessionIDHeader
 }
 
+// recheckSessionBoostQueues asks every session-boost queue that still holds
+// requests to re-evaluate admission against the metrics just scraped. All queues
+// are visited because queues are keyed by the requested model name, which need
+// not match the model name the backend pods serve.
+func (s *store) recheckSessionBoostQueues() {
+	if !s.fairnessQueueConfig.SessionBoostEnabled {
+		return
+	}
+	s.requestWaitingQueue.Range(func(_, value any) bool {
+		if queue, ok := value.(*RequestPriorityQueue); ok && queue != nil {
+			queue.RecheckBackpressure()
+		}
+		return true
+	})
+}
+
 func (s *store) GetRequestWaitingQueueStats() []QueueStat {
 	stats := make([]QueueStat, 0)
 	s.requestWaitingQueue.Range(func(modelName, queueVal interface{}) bool {
@@ -953,6 +973,7 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 	}
 	modelServerObj := value.(*modelServer)
 	podNames := modelServerObj.getPods()
+	podRemoved := false
 	// then delete the model server from all pod info
 	for _, podName := range podNames {
 		if value, ok := s.pods.Load(podName); ok {
@@ -960,6 +981,7 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 			podInfo.RemoveModelServer(ms)
 			if podInfo.GetModelServerCount() == 0 {
 				s.pods.Delete(podName)
+				podRemoved = true
 				// Dispatched after the removal, as DeletePod does.
 				s.triggerCallbacks("Pod", EventData{
 					EventType: EventDelete,
@@ -969,6 +991,11 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 		} else {
 			klog.Warningf("pod %s not found", podName)
 		}
+	}
+	// As in DeletePod: removing the last pod serving a model changes the
+	// checker's answer, and no later scrape will signal it.
+	if podRemoved {
+		s.recheckSessionBoostQueues()
 	}
 
 	return nil
@@ -1163,8 +1190,13 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		EventType: EventAdd,
 		Pod:       podName,
 	})
-	s.updatePodMetrics(newPodInfo)
-	s.updatePodModels(newPodInfo)
+	metricsUpdated := s.updatePodMetrics(newPodInfo)
+	modelsUpdated := s.updatePodModels(newPodInfo)
+	// Recheck once both are in: the pod only counts toward a model's capacity
+	// after its models are known.
+	if metricsUpdated || modelsUpdated {
+		s.recheckSessionBoostQueues()
+	}
 
 	return nil
 }
@@ -1221,6 +1253,9 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 			}
 		}
 		s.pods.Delete(podName)
+		// Removing the last pod serving a model changes the checker's answer
+		// (no pods -> allow), and no later scrape will signal it.
+		s.recheckSessionBoostQueues()
 		// Remove the pod's Redis counter so stale keys do not accumulate.
 		if s.onFlightCounter != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -1781,20 +1816,20 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 	return 0, nil
 }
 
-func (s *store) updatePodMetrics(pod *PodInfo) {
+func (s *store) updatePodMetrics(pod *PodInfo) bool {
 	engine := pod.GetEngine()
 	if engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
-		return
+		return false
 	}
 	podObj := pod.GetPod()
 	if podObj == nil {
 		klog.V(2).Info("failed to find pod")
-		return
+		return false
 	}
 
 	if podObj.Status.PodIP == "" {
-		return
+		return false
 	}
 	port := s.getPodWorkloadPort(pod)
 	previousHistogram := getPreviousHistogram(pod)
@@ -1805,31 +1840,33 @@ func (s *store) updatePodMetrics(pod *PodInfo) {
 	if histogramMetrics != nil {
 		updateHistogramMetrics(pod, histogramMetrics)
 	}
+	return gaugeMetrics != nil
 }
 
-func (s *store) updatePodModels(podInfo *PodInfo) {
+func (s *store) updatePodModels(podInfo *PodInfo) bool {
 	engine := podInfo.GetEngine()
 	if engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
-		return
+		return false
 	}
 	podObj := podInfo.GetPod()
 	if podObj == nil {
 		klog.V(2).Info("failed to find pod")
-		return
+		return false
 	}
 
 	if podObj.Status.PodIP == "" {
-		return
+		return false
 	}
 	port := s.getPodWorkloadPort(podInfo)
 	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, port)
 	if err != nil {
 		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podObj.GetNamespace(), podObj.GetName(), err)
-		return
+		return false
 	}
 
 	podInfo.UpdateModels(models)
+	return true
 }
 
 func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {

@@ -192,11 +192,14 @@ func (pq *RequestPriorityQueue) admitSessionBoost(req *Request) bool {
 //  1. Inflight limit: at most InflightPerPod requests in flight per backend pod.
 //  2. Backend metrics check: at least one pod reports capacity available.
 //
-// The loop is fully event-driven: it reacts to releases and new arrivals. There
-// is no metrics-refresh signal or independent timer: in single-router operation
-// every moment backend capacity frees up coincides with one of our own requests
-// completing (a release), so releases and arrivals alone cover every dequeue
-// opportunity.
+// The loop is event-driven: it reacts to releases, new arrivals and backend
+// metrics refreshes. Releases and arrivals alone are not enough, because the
+// backend check reads scraped metrics rather than live backend state: when the
+// last request completes, the release can still observe a stale "busy" snapshot
+// and hold, and then no further release or arrival may ever come. Capacity can
+// also grow without a release, e.g. when a new backend pod becomes Ready. A
+// refresh signal (see RecheckBackpressure) re-evaluates held requests once fresh
+// metrics are in the store.
 //
 // Session Grace Period: when SessionBoostGracePeriod > 0, a release briefly holds
 // the freed slot (via waitGraceAndDequeue) so a same-session follow-up has time to
@@ -224,24 +227,55 @@ func (pq *RequestPriorityQueue) runSessionBoostMode(ctx context.Context) {
 			} else {
 				pq.tryBackpressureDequeue(ctx)
 			}
-		// A fresh request was enqueued. With grace enabled, if a release is also
-		// pending, route through the grace path so the freed slot is held for a
-		// same-session follow-up; otherwise admit immediately so an idle queue need
-		// not wait for the next signal.
+		// A fresh request was enqueued. Admit immediately so an idle queue need not
+		// wait for the next signal, unless a release is also pending.
 		case <-pq.notifyCh:
-			if grace && pq.drainPendingRelease() {
-				pq.waitGraceAndDequeue(ctx)
-			} else {
-				pq.tryBackpressureDequeue(ctx)
-			}
+			pq.dequeueOrHoldPendingRelease(ctx, grace)
+		// Backend metrics were refreshed while requests were held. This is not a
+		// freed slot, so re-check admission directly, unless a release is also
+		// pending.
+		case <-pq.recheckCh:
+			pq.dequeueOrHoldPendingRelease(ctx, grace)
 		}
 	}
 }
 
+// dequeueOrHoldPendingRelease handles a signal that did not itself free a slot:
+// an arrival or a backend metrics refresh. With grace enabled, if a release is
+// also pending, it routes through the grace path so the freed slot is held for a
+// same-session follow-up; otherwise it re-checks admission directly.
+func (pq *RequestPriorityQueue) dequeueOrHoldPendingRelease(ctx context.Context, grace bool) {
+	if grace && pq.drainPendingRelease() {
+		pq.waitGraceAndDequeue(ctx)
+		return
+	}
+	pq.tryBackpressureDequeue(ctx)
+}
+
+// RecheckBackpressure asks the session-boost dequeue loop to re-evaluate held
+// requests after backend state may have changed, such as a completed metrics
+// scrape. It is non-blocking, coalesces redundant signals, and is a no-op when
+// the queue is empty or not in session-boost mode.
+func (pq *RequestPriorityQueue) RecheckBackpressure() {
+	if !pq.sessionBoost {
+		return
+	}
+	pq.mu.RLock()
+	held := len(pq.heap) > 0
+	pq.mu.RUnlock()
+	if !held {
+		return
+	}
+	select {
+	case pq.recheckCh <- struct{}{}:
+	default:
+	}
+}
+
 // drainPendingRelease non-blockingly consumes one pending release signal, reporting
-// whether one was present. It lets the arrival branch prefer the grace path when a
-// release is also waiting, keeping that ordering deterministic despite select's
-// random choice between simultaneously-ready cases.
+// whether one was present. It lets the arrival and recheck branches prefer the
+// grace path when a release is also waiting, keeping that ordering deterministic
+// despite select's random choice between simultaneously-ready cases.
 func (pq *RequestPriorityQueue) drainPendingRelease() bool {
 	select {
 	case <-pq.releaseCh:
