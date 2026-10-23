@@ -330,7 +330,7 @@ curl http://$ROUTER_IP/v1/responses \
     }"
 ```
 
-**Multi-turn conversations**: Responses requests can chain turns with `previous_response_id` or a `conversation` identifier. If a backend keeps per-conversation state on the Pod that produced a response, follow-up turns need to reach that same Pod to use it. Kthena Router does not currently guarantee this, for Responses or for Chat Completions: [Session Boost](./session-boost) affects queue *ordering* only and explicitly does not guarantee Pod affinity on its own, and this PR does not add a Responses-specific affinity mechanism. Pod-level conversation affinity is tracked as related future work in [#1144](https://github.com/volcano-sh/kthena/issues/1144).
+**Multi-turn conversations**: Responses requests can chain turns with `previous_response_id` or a `conversation` identifier. If a backend keeps per-conversation state on the Pod that produced a response, follow-up turns need to reach that same Pod to use it. Kthena Router does not derive Pod affinity from these fields, and [Session Boost](./session-boost) affects queue *ordering* only. To keep a conversation's turns on one Pod, enable [session sticky routing](./session-sticky) and send the configured session key (for example an `X-Session-ID` header) on every turn. If that Pod is no longer available, the router moves the session to another Pod, and state kept only on the old Pod is not carried over.
 
 ---
 
