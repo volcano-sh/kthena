@@ -39,6 +39,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 )
 
 // promStub starts an httptest.Server that mimics the Prometheus instant-query
@@ -599,4 +600,63 @@ func TestUpdateMetricsWithDisjointSelectorsScalesToMinAtZeroLoad(t *testing.T) {
 	recommended, skip := alg.GetRecommendedInstances()
 	require.False(t, skip)
 	require.Equal(t, int32(1), recommended)
+}
+
+func TestEvaluatePodsReadinessRestartCause(t *testing.T) {
+	const image = "example.com/engine:v2"
+	newPod := func(t *testing.T, restartCount int32, phase inplace.Phase) *corev1.Pod {
+		t.Helper()
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "pod",
+				UID:       "pod-uid",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: workload.SchemeGroupVersion.String(),
+					Kind:       workload.ModelServingKind.Kind,
+					UID:        "ms-uid",
+				}},
+			},
+			Status: corev1.PodStatus{
+				Phase:             corev1.PodRunning,
+				ContainerStatuses: []corev1.ContainerStatus{{Name: "main", Image: image, RestartCount: restartCount}},
+			},
+		}
+		if phase != "" {
+			state := &inplace.State{
+				Version:  inplace.StateVersion,
+				OwnerUID: "ms-uid",
+				PodUID:   "pod-uid",
+				Phase:    phase,
+				Baseline: map[string]inplace.ContainerBaseline{"main": {RestartCount: 2}},
+			}
+			if phase == inplace.PhasePatched {
+				state.Patched = map[string]inplace.PatchedContainer{"main": {Image: image, RestartCount: 2}}
+			}
+			value, err := state.Encode()
+			require.NoError(t, err)
+			pod.Annotations = map[string]string{workload.InPlaceUpdateStateAnnotationKey: value}
+		}
+		return pod
+	}
+
+	tests := []struct {
+		name       string
+		pod        func(t *testing.T) *corev1.Pod
+		wantFailed bool
+	}{
+		{name: "no restart", pod: func(t *testing.T) *corev1.Pod { return newPod(t, 0, "") }},
+		{name: "restart without in-place update", pod: func(t *testing.T) *corev1.Pod { return newPod(t, 1, "") }, wantFailed: true},
+		{name: "image-change restart during in-place update", pod: func(t *testing.T) *corev1.Pod { return newPod(t, 3, inplace.PhasePatched) }},
+		{name: "restart beyond the image change during in-place update", pod: func(t *testing.T) *corev1.Pod { return newPod(t, 4, inplace.PhasePatched) }, wantFailed: true},
+		{name: "restart before the image patch", pod: func(t *testing.T) *corev1.Pod { return newPod(t, 3, inplace.PhaseDraining) }, wantFailed: true},
+		{name: "restart count equal to baseline after in-place update", pod: func(t *testing.T) *corev1.Pod { return newPod(t, 2, inplace.PhaseDone) }},
+		{name: "restart beyond baseline after in-place update", pod: func(t *testing.T) *corev1.Pod { return newPod(t, 3, inplace.PhaseDone) }, wantFailed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, failed := evaluatePodsReadiness([]*corev1.Pod{tt.pod(t)})
+			assert.Equal(t, tt.wantFailed, failed)
+		})
+	}
 }

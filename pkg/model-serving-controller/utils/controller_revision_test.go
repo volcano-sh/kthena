@@ -21,6 +21,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	kubefake "k8s.io/client-go/kubernetes/fake"
@@ -203,4 +206,54 @@ func TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions(t *tes
 	// The total number of preserved revisions should be exactly 2 (CurrentRevision and UpdateRevision)
 	assert.Equal(t, 2, len(list.Items),
 		"Should preserve exactly CurrentRevision and UpdateRevision")
+}
+
+func TestModelServingAtRevision(t *testing.T) {
+	ctx := context.Background()
+	newMS := func(schedulerName, image string) *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default", UID: "test-uid"},
+			Spec: workloadv1alpha1.ModelServingSpec{
+				SchedulerName: schedulerName,
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Name: "decode",
+					EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "engine", Image: image}},
+					}},
+				}}},
+			},
+		}
+	}
+	current := newMS("current-scheduler", "engine:v2")
+	source := newMS("source-scheduler", "engine:v1")
+
+	t.Run("legacy revision restores the Roles only", func(t *testing.T) {
+		client := kubefake.NewSimpleClientset()
+		cr, err := CreateControllerRevision(ctx, client, current, "legacy", source.Spec.Template.Roles)
+		require.NoError(t, err)
+
+		got, err := ModelServingAtRevision(current, cr)
+		require.NoError(t, err)
+		assert.Equal(t, "engine:v1", got.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image)
+		assert.Equal(t, "current-scheduler", got.Spec.SchedulerName)
+		assert.Equal(t, "engine:v2", current.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image, "the input is not mutated")
+	})
+
+	t.Run("v1 revision restores every revisioned field", func(t *testing.T) {
+		client := kubefake.NewSimpleClientset()
+		data, err := BuildRevisionData(source)
+		require.NoError(t, err)
+		cr, _, err := RecordModelServingRevision(ctx, client, current, data)
+		require.NoError(t, err)
+
+		got, err := ModelServingAtRevision(current, cr)
+		require.NoError(t, err)
+		assert.Equal(t, "engine:v1", got.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image)
+		assert.Equal(t, "source-scheduler", got.Spec.SchedulerName)
+	})
+
+	t.Run("unreadable revision", func(t *testing.T) {
+		_, err := ModelServingAtRevision(current, &appsv1.ControllerRevision{})
+		assert.Error(t, err)
+	})
 }

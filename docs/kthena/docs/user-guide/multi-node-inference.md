@@ -409,6 +409,32 @@ spec:
 
 The per-Role settings are applied in every `ServingGroup`; the ModelServing-level `rollingUpdateConfiguration` does not apply. `RoleRollingUpdate` is therefore recommended for a ModelServing with a single `ServingGroup`. To rebuild only the changed Role, use `recoveryPolicy: RoleRecreate`; `ServingGroupRecreate` causes the entire group to be recreated when an outdated Role is deleted.
 
+### In-place Update
+
+By default, an outdated `ServingGroup` or Role is deleted and recreated. Set `updateMethod: InPlace` to patch the container images on the existing Pods instead when only images change. The Pods keep their node placement, downloaded weights, and caches, and kubelet restarts only the changed containers.
+
+```yaml
+spec:
+  rolloutStrategy:
+    type: ServingGroupRollingUpdate
+    updateMethod: InPlace
+    progressDeadlineSeconds: 1800
+    rollingUpdateConfiguration:
+      maxUnavailable: 1
+```
+
+- With `ServingGroupRollingUpdate`, each `ServingGroup` is updated as one unit. With `RoleRollingUpdate`, each Role instance (its entry Pod and its workers) is updated as one unit, and only Roles whose template changed are updated. A unit returns to service once all of its Pods are Ready on the new image, and uses one slot of `maxUnavailable` while it is updated.
+- `RoleRollingUpdate` uses each Role's `maxUnavailable` and `partition`, as with `Recreate`. A Role without `maxUnavailable` updates all of its outdated instances at once.
+- A unit that cannot be updated in place is recreated instead, as with `Recreate`, and an `InPlaceUpdateFallback` event explains why. This happens when its update changes anything other than regular-container images, when a Pod does not have `restartPolicy: Always` or a container sets its own restart policy, or when the target of an unfinished in-place update changes.
+- Every outdated resource is recreated when a plugin does not support in-place updates, or when `maxUnavailable` resolves to `0`. Under `RoleRollingUpdate`, a Role whose `maxUnavailable` resolves to `0` is recreated. The `lws-standard-labels` plugin supports in-place updates.
+- `maxSurge` only applies to units that are recreated.
+- If a unit is not Ready on the new image within `progressDeadlineSeconds` (default 1800), its Pods that are not Ready follow the `recoveryPolicy`. With `recoveryPolicy: None`, patched Pods are kept, and a unit with a Pod that was never patched is recreated.
+- You can switch back to `updateMethod: Recreate` at any time. A unit whose in-place update is unfinished then counts as outdated and is recreated by the rolling update.
+
+:::note
+A ModelServing with a single `ServingGroup` and a single Role replica (`replicas: 1` and the Role's `replicas: 1`) is also supported. An in-place update takes that `ServingGroup` out of service, so the service is unavailable until it is Ready on the new image. If this interruption is not acceptable, set `maxUnavailable: 0` and `maxSurge: 1` so that the `ServingGroup` is recreated next to a surge `ServingGroup` instead, or run more than one `ServingGroup`.
+:::
+
 ## Gang Scheduling and Network Topology
 
 Gang scheduling is a feature that allows pods to be scheduled together. This is useful when you have a set of pods that need to be scheduled together. For example, you may have a set of pods that need to be scheduled together because they are pods of the same model.

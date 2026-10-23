@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,6 +57,7 @@ import (
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
@@ -67,6 +69,11 @@ const (
 
 	GroupNameKey = "GroupName"
 	RoleIDKey    = "RoleID"
+	// InPlaceUpdateKey indexes the Pods with an unfinished in-place update by their ModelServing.
+	InPlaceUpdateKey = "InPlaceUpdate"
+
+	// defaultInPlaceRestartGracePeriod is the minimum recovery grace period during an in-place update.
+	defaultInPlaceRestartGracePeriod = 2 * time.Minute
 )
 
 // PodGroupManager is the interface for managing PodGroups.
@@ -114,6 +121,12 @@ type ModelServingController struct {
 	initialSync     atomic.Bool // indicates whether the initial sync has been completed
 	pluginsRegistry *plugins.Registry
 	recorder        record.EventRecorder
+
+	// inPlaceRestartEvents dedupes InPlaceUpdateRestart events per Pod.
+	inPlaceRestartEvents      sync.Map
+	inPlaceRestartGracePeriod time.Duration
+	// inPlaceFallbackEvents dedupes InPlaceUpdateFallback events per ModelServing and Role.
+	inPlaceFallbackEvents sync.Map
 }
 
 func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
@@ -140,8 +153,9 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 	modelServingInformer := modelServingInformerFactory.Workload().V1alpha1().ModelServings()
 
 	err = podsInformer.Informer().AddIndexers(cache.Indexers{
-		GroupNameKey: utils.GroupNameIndexFunc,
-		RoleIDKey:    utils.RoleIDIndexFunc,
+		GroupNameKey:     utils.GroupNameIndexFunc,
+		RoleIDKey:        utils.RoleIDIndexFunc,
+		InPlaceUpdateKey: inPlaceUpdateIndexFunc,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot create pod Informer Index, err: %v", err)
@@ -183,6 +197,8 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		store:           store,
 		pluginsRegistry: plugins.DefaultRegistry,
 		recorder:        recorder,
+
+		inPlaceRestartGracePeriod: defaultInPlaceRestartGracePeriod,
 	}
 
 	registerPodGroupHandler := func(pgInformer cache.SharedIndexInformer) {
@@ -322,6 +338,12 @@ func (c *ModelServingController) deleteModelServing(obj interface{}) {
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
 	})
+	c.inPlaceFallbackEvents.Range(func(key, _ any) bool {
+		if key.(inPlaceFallbackKey).ms == ms.UID {
+			c.inPlaceFallbackEvents.Delete(key)
+		}
+		return true
+	})
 	// ControllerRevisions will be automatically deleted via OwnerReference when ModelServing is deleted
 }
 
@@ -353,35 +375,109 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 		return
 	}
 
+	// A Pod change moves an in-place update to its next step.
+	if c.initialSync.Load() && inplace.InUpdate([]*corev1.Pod{newPod}, ms.UID) {
+		defer c.enqueueModelServing(ms)
+	}
+
 	if c.shouldSkipHandling(ms, servingGroupName, newPod) {
 		return
 	}
 
-	switch {
-	case utils.IsPodRunningAndReady(newPod):
+	if utils.IsPodRunningAndReady(newPod) {
 		klog.V(4).Infof("handleReadyPod: %s/%s", newPod.Namespace, newPod.Name)
 		// The pod is available, that is, the state is running, and the container is ready
 		err = c.handleReadyPod(ms, servingGroupName, newPod)
 		if err != nil {
 			klog.Errorf("handle running pod %s/%s failed for ModelServing %s/%s: %v", newPod.Namespace, newPod.Name, ms.Namespace, ms.Name, err)
 		}
-	case utils.IsPodFailed(newPod) || utils.ContainerRestarted(newPod):
+		return
+	}
+
+	// Only the restart that applies an in-place image patch is expected.
+	// Any other restart follows the RecoveryPolicy.
+	// Under Recreate, an unfinished update has no update window.
+	restartCause := inplace.ClassifyRestart(newPod)
+	inPlace := inplace.UpdateMethodOf(ms) == workloadv1alpha1.InPlaceUpdateMethod
+	switch {
+	case utils.IsPodFailed(newPod) || restartCause == inplace.UnexpectedRestart:
 		klog.V(4).Infof("handleErrorPod: %s/%s", newPod.Namespace, newPod.Name)
+		c.recordInPlaceUpdateRestarts(ms, newPod)
 		err = c.handleErrorPod(ms, servingGroupName, newPod)
 		if err != nil {
 			klog.Errorf("handle error pod %s/%s failed for ModelServing %s/%s: %v", newPod.Namespace, newPod.Name, ms.Namespace, ms.Name, err)
 		}
+	case restartCause == inplace.InPlaceUpdateRestart || (inPlace && inplace.InUpdateWindow(newPod)):
+		klog.V(4).Infof("handleInPlaceUpdatingPod: %s/%s", newPod.Namespace, newPod.Name)
+		err = c.handleInPlaceUpdatingPod(ms, servingGroupName, newPod)
+		if err != nil {
+			klog.Errorf("handle in-place updating pod %s/%s failed for ModelServing %s/%s: %v", newPod.Namespace, newPod.Name, ms.Namespace, ms.Name, err)
+		}
 	default:
 		klog.V(4).Infof("handleDefault: %s/%s", newPod.Namespace, newPod.Name)
 		if !c.initialSync.Load() {
-			roleName := utils.GetRoleName(newPod)
-			roleTemplateHash := c.resolveRoleTemplateHash(ms, roleName, newPod)
-			c.store.AddServingGroupAndRole(types.NamespacedName{
-				Namespace: ms.Namespace,
-				Name:      ms.Name,
-			}, servingGroupName, utils.ObjectRevision(newPod), roleTemplateHash, roleName, utils.GetRoleID(newPod))
+			c.addServingGroupAndRoleFromPod(ms, servingGroupName, newPod)
 		}
 	}
+}
+
+func (c *ModelServingController) addServingGroupAndRoleFromPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) {
+	roleName := utils.GetRoleName(pod)
+	roleTemplateHash := c.resolveRoleTemplateHash(ms, roleName, pod)
+	c.store.AddServingGroupAndRole(types.NamespacedName{
+		Namespace: ms.Namespace,
+		Name:      ms.Name,
+	}, servingGroupName, utils.ObjectRevision(pod), roleTemplateHash, roleName, utils.GetRoleID(pod))
+}
+
+// handleInPlaceUpdatingPod marks a pod that is not ready during an in-place update unavailable, without deleting it.
+func (c *ModelServingController) handleInPlaceUpdatingPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) error {
+	if !c.initialSync.Load() {
+		c.addServingGroupAndRoleFromPod(ms, servingGroupName, pod)
+	}
+	if err := c.markPodUnavailable(ms, servingGroupName, pod); err != nil {
+		return err
+	}
+	c.recordInPlaceUpdateRestarts(ms, pod)
+	c.enqueueModelServing(ms)
+	return nil
+}
+
+func (c *ModelServingController) recordInPlaceUpdateRestarts(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) {
+	restarts, ok := inplace.UpdateRestarts(pod)
+	if !ok || c.recorder == nil {
+		return
+	}
+	eventType := corev1.EventTypeNormal
+	var parts []string
+	for _, r := range restarts {
+		if r.ImageChange == 0 && r.Other == 0 {
+			continue
+		}
+		if r.Other > 0 {
+			eventType = corev1.EventTypeWarning
+		}
+		part := fmt.Sprintf("container %s: image-change=%d other=%d", r.Name, r.ImageChange, r.Other)
+		if r.LastTermination != "" {
+			part += fmt.Sprintf(" (last termination: %s)", r.LastTermination)
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return
+	}
+	message := fmt.Sprintf("Pod %s restarted during an in-place update: %s", pod.Name, strings.Join(parts, "; "))
+	// The update start time is part of the key, so a later update reports its restarts again.
+	reported := reportedInPlaceRestarts{update: inplace.MatchingState(pod).StartedAt.UTC().Format(time.RFC3339Nano), message: message}
+	if last, ok := c.inPlaceRestartEvents.Swap(pod.UID, reported); ok && last == reported {
+		return
+	}
+	c.recorder.Event(ms, eventType, "InPlaceUpdateRestart", message)
+}
+
+type reportedInPlaceRestarts struct {
+	update  string
+	message string
 }
 
 func (c *ModelServingController) deletePod(obj interface{}) {
@@ -399,6 +495,8 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 			return
 		}
 	}
+
+	c.inPlaceRestartEvents.Delete(pod.UID)
 
 	ms, servingGroupName, roleName, roleID := c.getModelServingAndResourceDetails(pod)
 	// ms is nil means the modelserving is deleted
@@ -561,6 +659,11 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 
 	revision := utils.ModelServingRevision(ms)
 
+	// Keep units with an unfinished in-place update outdated before any step compares revisions.
+	if err := c.syncInPlaceUnitRevisions(ms, revision); err != nil {
+		return fmt.Errorf("failed to sync revisions of in-place updates: %v", err)
+	}
+
 	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
 	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)
@@ -665,8 +768,14 @@ func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, m
 		if partitionErr != nil {
 			return fmt.Errorf("failed to calculate partition: %v", partitionErr)
 		}
-		if maxSurge > 0 && hasUpdateableOutdatedServingGroup(servingGroupList, newRevision, partition) {
-			expectedCount += maxSurge
+		if maxSurge > 0 {
+			surge, err := c.needsServingGroupSurge(ctx, ms, servingGroupList, newRevision, partition)
+			if err != nil {
+				return fmt.Errorf("failed to check whether ServingGroups need maxSurge: %v", err)
+			}
+			if surge {
+				expectedCount += maxSurge
+			}
 		}
 	}
 
@@ -855,6 +964,7 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 		return fmt.Errorf("cannot get ServingGroup of modelServing: %s from map: %v", ms.GetName(), err)
 	}
 	partition, _, _ := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
+	roleSurge := c.newRoleSurgeRollout(ms)
 	for index, servingGroup := range servingGroupList {
 		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroup.Name) == datastore.ServingGroupDeleting {
 			// Deleting ServingGroup will be recreated after the deletion is complete, so there is no need to scale the roles
@@ -889,7 +999,7 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 		}
 
 		for _, targetRole := range rolesToManage {
-			c.manageRoleReplicasPerGroup(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse)
+			c.manageRoleReplicasPerGroup(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse, roleSurge)
 		}
 	}
 	return nil
@@ -1111,7 +1221,7 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 
 // manageRoleReplicasPerGroup manages the replicas of a specific role within an Serving group
 // It handles both scale up and scale down operations for the role
-func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, servingGroupOrdinal int, newRevision string) {
+func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, servingGroupOrdinal int, newRevision string, roleSurge *inPlaceRollout) {
 	// TODO: add podGroup update after gang scheduler finished
 	// Get all replicas of a role from storage, for example, prefill-0, prefill-1...
 	roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), groupName, targetRole.Name)
@@ -1122,7 +1232,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 
 	expectedCount := roleReplicas(targetRole)
 	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate &&
-		c.hasUpdateableOutdatedRole(ms, groupName, targetRole, roleList) {
+		c.needsRoleSurge(ctx, roleSurge, ms, groupName, targetRole, roleList) {
 		maxSurge, err := utils.GetMaxSurgeForRole(targetRole)
 		if err != nil {
 			klog.Errorf("manageRoleReplicasPerGroup: failed to calculate maxSurge for role %s in ServingGroup %s: %v", targetRole.Name, groupName, err)
@@ -1377,6 +1487,24 @@ func (c *ModelServingController) manageRollingUpdate(ctx context.Context, ms *wo
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
 	}
 
+	// InPlace falls back to the Recreate path below when no unit can be updated in place.
+	if inplace.UpdateMethodOf(ms) == workloadv1alpha1.InPlaceUpdateMethod {
+		fallback, err := c.inPlaceRolloutFallback(ms)
+		if err != nil {
+			return err
+		}
+		if fallback == nil {
+			c.inPlaceFallbackEvents.Delete(inPlaceFallbackKey{ms: ms.UID})
+			if isRoleRollingUpdate(ms) {
+				return c.manageInPlaceRoleRollout(ctx, ms, servingGroupList, revision)
+			}
+			return c.manageInPlaceRollout(ctx, ms, servingGroupList, revision)
+		}
+		if slices.ContainsFunc(servingGroupList, func(sg datastore.ServingGroup) bool { return sg.Revision != revision }) {
+			c.emitInPlaceFallbackEvent(ms, inPlaceFallbackKey{ms: ms.UID}, fallback)
+		}
+	}
+
 	partition, _, _ := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
 	// Separate outdated groups into two categories: not-running and running
 	// We prioritize updating not-running outdated groups first
@@ -1539,11 +1667,6 @@ type roleToDelete struct {
 }
 
 func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv1alpha1.ModelServing, sg datastore.ServingGroup) ([]roleToDelete, bool, error) {
-	roleSpecByName := make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles))
-	for _, role := range ms.Spec.Template.Roles {
-		roleSpecByName[role.Name] = role
-	}
-
 	allRoles, err := c.store.GetRolesByGroup(utils.GetNamespaceName(ms), sg.Name)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to get roles for ServingGroup %s: %v", sg.Name, err)
@@ -1552,64 +1675,83 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 	var rolesToDelete []roleToDelete
 	hasOutdatedRoles := false
 	for _, roleSpec := range ms.Spec.Template.Roles {
-		roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, roleSpec.Name)
-		if err != nil {
-			return nil, false, fmt.Errorf("failed to get roles for ServingGroup %s, role %s: %v", sg.Name, roleSpec.Name, err)
-		}
-
-		outdatedRoles, newUnavailable := c.outdatedRoles(ms, sg, roleSpec, roleList)
-		partition, partitionConfigured, partitionErr := c.getPartition(rolePartition(ms, roleSpec), roleReplicas(roleSpec))
-		if partitionErr != nil {
-			return nil, false, fmt.Errorf("failed to parse partition for role %s: %v", roleSpec.Name, partitionErr)
-		}
-		protected := sets.New[string]()
-		if partitionConfigured && partition > 0 {
-			for i := 0; i < partition && i < len(roleList); i++ {
-				protected.Insert(roleList[i].Name)
-			}
-		}
-		if len(protected) > 0 && len(outdatedRoles) > 0 {
-			filtered := outdatedRoles[:0]
-			for _, r := range outdatedRoles {
-				if protected.Has(r.Name) {
-					continue
-				}
-				filtered = append(filtered, r)
-			}
-			outdatedRoles = filtered
-		}
-		if len(outdatedRoles) == 0 {
-			if len(protected) > 0 {
-				expectedHash := utils.CalRoleTemplateHash(roleSpec)
-				for _, role := range roleList {
-					if !protected.Has(role.Name) {
-						continue
-					}
-					if role.Status == datastore.RoleDeleting {
-						continue
-					}
-					observedHash, ok := c.resolveRoleTemplateHashForComparison(ms, sg, roleSpec.Name, role)
-					if ok && observedHash != expectedHash {
-						hasOutdatedRoles = true
-						break
-					}
-				}
-			}
-			continue
-		}
-		hasOutdatedRoles = true
-		maxScaleDown, err := calMaxScaleDown(roleSpec, outdatedRoles, len(roleList), newUnavailable)
-		if err != nil {
-			klog.Errorf("failed to calculate maxScaleDown for role %s in ServingGroup %s: %v", roleSpec.Name, sg.Name, err)
-		}
-
-		selectedRoles, err := selectOutdatedRolesToDelete(roleSpec.Name, outdatedRoles, maxScaleDown)
+		selectedRoles, hasOutdated, err := c.outdatedRolesToDelete(ms, sg, roleSpec)
 		if err != nil {
 			return nil, false, err
 		}
+		hasOutdatedRoles = hasOutdatedRoles || hasOutdated
 		rolesToDelete = append(rolesToDelete, selectedRoles...)
 	}
 
+	removedRoles := c.removedRolesToDelete(ms, allRoles)
+	return append(rolesToDelete, removedRoles...), hasOutdatedRoles || len(removedRoles) > 0, nil
+}
+
+// outdatedRolesToDelete selects outdated instances of one Role to delete within its budget.
+func (c *ModelServingController) outdatedRolesToDelete(ms *workloadv1alpha1.ModelServing, sg datastore.ServingGroup, roleSpec workloadv1alpha1.Role) ([]roleToDelete, bool, error) {
+	roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), sg.Name, roleSpec.Name)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to get roles for ServingGroup %s, role %s: %v", sg.Name, roleSpec.Name, err)
+	}
+
+	outdatedRoles, newUnavailable := c.outdatedRoles(ms, sg, roleSpec, roleList)
+	partition, partitionConfigured, partitionErr := c.getPartition(rolePartition(ms, roleSpec), roleReplicas(roleSpec))
+	if partitionErr != nil {
+		return nil, false, fmt.Errorf("failed to parse partition for role %s: %v", roleSpec.Name, partitionErr)
+	}
+	protected := sets.New[string]()
+	if partitionConfigured && partition > 0 {
+		for i := 0; i < partition && i < len(roleList); i++ {
+			protected.Insert(roleList[i].Name)
+		}
+	}
+	if len(protected) > 0 && len(outdatedRoles) > 0 {
+		filtered := outdatedRoles[:0]
+		for _, r := range outdatedRoles {
+			if protected.Has(r.Name) {
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		outdatedRoles = filtered
+	}
+	if len(outdatedRoles) == 0 {
+		if len(protected) > 0 {
+			expectedHash := utils.CalRoleTemplateHash(roleSpec)
+			for _, role := range roleList {
+				if !protected.Has(role.Name) {
+					continue
+				}
+				if role.Status == datastore.RoleDeleting {
+					continue
+				}
+				observedHash, ok := c.resolveRoleTemplateHashForComparison(ms, sg, roleSpec.Name, role)
+				if ok && observedHash != expectedHash {
+					return nil, true, nil
+				}
+			}
+		}
+		return nil, false, nil
+	}
+	maxScaleDown, err := calMaxScaleDown(roleSpec, outdatedRoles, len(roleList), newUnavailable)
+	if err != nil {
+		klog.Errorf("failed to calculate maxScaleDown for role %s in ServingGroup %s: %v", roleSpec.Name, sg.Name, err)
+	}
+
+	selectedRoles, err := selectOutdatedRolesToDelete(roleSpec.Name, outdatedRoles, maxScaleDown)
+	if err != nil {
+		return nil, false, err
+	}
+	return selectedRoles, true, nil
+}
+
+// removedRolesToDelete returns the instances of Roles that the spec no longer has.
+func (c *ModelServingController) removedRolesToDelete(ms *workloadv1alpha1.ModelServing, allRoles map[string]map[string]*datastore.Role) []roleToDelete {
+	roleSpecByName := make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		roleSpecByName[role.Name] = role
+	}
+	var rolesToDelete []roleToDelete
 	// handle the case when there are roles whose roleSpec has been deleted in the new revision. Those roles should be deleted directly since they are all outdated.
 	for roleName, roles := range allRoles {
 		if _, ok := roleSpecByName[roleName]; ok {
@@ -1619,12 +1761,10 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(ms *workloadv
 			if role.Status == datastore.RoleDeleting {
 				continue
 			}
-			hasOutdatedRoles = true
 			rolesToDelete = append(rolesToDelete, roleToDelete{roleName: roleName, roleID: roleID})
 		}
 	}
-
-	return rolesToDelete, hasOutdatedRoles, nil
+	return rolesToDelete
 }
 
 func (c *ModelServingController) outdatedRoles(ms *workloadv1alpha1.ModelServing, sg datastore.ServingGroup, roleSpec workloadv1alpha1.Role, roleList []datastore.Role) ([]datastore.Role, int) {
@@ -1750,7 +1890,7 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, errPod *corev1.Pod) error {
 	// None: leave a restarted, still-alive pod to the kubelet (do not delete it),
 	// but mark it unavailable. A terminal PodFailed pod falls through to deletion.
-	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy && utils.ContainerRestarted(errPod) && !utils.IsPodFailed(errPod) {
+	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy && !utils.IsPodFailed(errPod) {
 		if err := c.markPodUnavailable(ms, servingGroupName, errPod); err != nil {
 			klog.Warningf("mark pod %s unavailable: %v", errPod.Name, err)
 		}
@@ -1809,10 +1949,22 @@ func (c *ModelServingController) markPodUnavailable(ms *workloadv1alpha1.ModelSe
 	return nil
 }
 
-func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.ModelServing, errPod *corev1.Pod) {
+// restartGracePeriod returns how long a Pod with an unexpected restart may take to become ready before recovery.
+func (c *ModelServingController) restartGracePeriod(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) time.Duration {
+	var gracePeriod time.Duration
 	if ms.Spec.Template.RestartGracePeriodSeconds != nil && *ms.Spec.Template.RestartGracePeriodSeconds > 0 {
+		gracePeriod = time.Duration(*ms.Spec.Template.RestartGracePeriodSeconds) * time.Second
+	}
+	if !utils.IsPodFailed(pod) && inplace.UpdateMethodOf(ms) == workloadv1alpha1.InPlaceUpdateMethod && inplace.InUpdateWindow(pod) {
+		gracePeriod = max(gracePeriod, c.inPlaceRestartGracePeriod)
+	}
+	return gracePeriod
+}
+
+func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.ModelServing, errPod *corev1.Pod) {
+	if gracePeriod := c.restartGracePeriod(ms, errPod); gracePeriod > 0 {
 		// Wait for the grace period before making a decision
-		time.Sleep(time.Duration(*ms.Spec.Template.RestartGracePeriodSeconds) * time.Second)
+		time.Sleep(gracePeriod)
 		klog.V(4).Infof("%s after grace time", errPod.Name)
 		defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
 

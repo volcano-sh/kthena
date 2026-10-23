@@ -67,6 +67,7 @@ rules:
       - deletecollection
       - get
       - list
+      - patch
       - watch
   - apiGroups:
       - ""

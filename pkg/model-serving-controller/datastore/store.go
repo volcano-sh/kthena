@@ -50,6 +50,7 @@ type Store interface {
 	DeleteRunningPodFromServingGroup(modelServingName types.NamespacedName, groupName string, pod string)
 	UpdateServingGroupStatus(modelServingName types.NamespacedName, groupName string, Status ServingGroupStatus) error
 	UpdateServingGroupRevision(modelServingName types.NamespacedName, groupName string, revision string) error
+	UpdateRoleRevision(modelServingName types.NamespacedName, groupName, roleName, roleID, revision, roleTemplateHash string) error
 	// DumpCache returns a JSON dump of the current store cache representation, which is useful for debugging and monitoring purposes. The structure of the JSON will be a map of modelServing names to their ServingGroups, and each ServingGroup will include its roles and running pods.
 	DumpCache() ([]byte, error)
 }
@@ -487,6 +488,24 @@ func (s *store) UpdateServingGroupStatus(modelServingName types.NamespacedName, 
 	} else {
 		return fmt.Errorf("failed to find ServingGroup %s in modelServing %s", groupName, modelServingName.Namespace+"/"+modelServingName.Name)
 	}
+	return nil
+}
+
+// UpdateRoleRevision updates the revision and the Role template hash of a Role
+func (s *store) UpdateRoleRevision(modelServingName types.NamespacedName, groupName, roleName, roleID, revision, roleTemplateHash string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	group, ok := s.servingGroup[modelServingName][groupName]
+	if !ok {
+		return fmt.Errorf("failed to find ServingGroup %s in modelServing %s", groupName, modelServingName.Namespace+"/"+modelServingName.Name)
+	}
+	role, ok := group.roles[roleName][roleID]
+	if !ok {
+		return fmt.Errorf("failed to find Role %s/%s in ServingGroup %s", roleName, roleID, groupName)
+	}
+	role.Revision = revision
+	role.RoleTemplateHash = roleTemplateHash
 	return nil
 }
 

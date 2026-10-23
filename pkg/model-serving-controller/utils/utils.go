@@ -287,6 +287,15 @@ func GetModelServingAndGroupByLabel(podLabels map[string]string) (string, string
 
 // IsOwnedByModelServingWithUID returns true when the object is owned by the ModelServing with the provided UID.
 func IsOwnedByModelServingWithUID(obj metav1.Object, uid types.UID) bool {
+	if HasModelServingOwner(obj, uid) {
+		return true
+	}
+	klog.Warningf("object %s/%s is not owned by ModelServing with UID %s", obj.GetNamespace(), obj.GetName(), uid)
+	return false
+}
+
+// HasModelServingOwner is IsOwnedByModelServingWithUID without the warning on a mismatch.
+func HasModelServingOwner(obj metav1.Object, uid types.UID) bool {
 	for _, ownerRef := range obj.GetOwnerReferences() {
 		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() &&
 			ownerRef.Kind == workloadv1alpha1.ModelServingKind.Kind &&
@@ -294,7 +303,6 @@ func IsOwnedByModelServingWithUID(obj metav1.Object, uid types.UID) bool {
 			return true
 		}
 	}
-	klog.Warningf("object %s/%s is not owned by ModelServing with UID %s", obj.GetNamespace(), obj.GetName(), uid)
 	return false
 }
 
@@ -374,25 +382,6 @@ func ExpectedPodNum(ms *workloadv1alpha1.ModelServing) int {
 		num += (1 + int(role.WorkerReplicas)) * int(*role.Replicas)
 	}
 	return num
-}
-
-// ContainerRestarted return true when there is any container in the pod that gets restarted
-func ContainerRestarted(pod *corev1.Pod) bool {
-	if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodPending {
-		for j := range pod.Status.InitContainerStatuses {
-			stat := pod.Status.InitContainerStatuses[j]
-			if stat.RestartCount > 0 {
-				return true
-			}
-		}
-		for j := range pod.Status.ContainerStatuses {
-			stat := pod.Status.ContainerStatuses[j]
-			if stat.RestartCount > 0 {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func newCondition(condType workloadv1alpha1.ModelServingConditionType, message string) metav1.Condition {

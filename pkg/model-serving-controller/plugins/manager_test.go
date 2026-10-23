@@ -113,3 +113,37 @@ func TestNewChainTypeValidation(t *testing.T) {
 		t.Fatalf("expected error for unsupported type")
 	}
 }
+
+type inPlacePlugin struct {
+	testPlugin
+	supported bool
+}
+
+func (p *inPlacePlugin) SupportsInPlaceUpdate() bool { return p.supported }
+
+func TestChainPluginWithoutInPlaceUpdate(t *testing.T) {
+	calls := []string{}
+	supported := &inPlacePlugin{testPlugin: testPlugin{name: "supported", calls: &calls}, supported: true}
+	unsupported := &inPlacePlugin{testPlugin: testPlugin{name: "unsupported", calls: &calls}}
+	undeclared := &testPlugin{name: "undeclared", calls: &calls}
+	tests := []struct {
+		name    string
+		chain   *Chain
+		want    string
+		wantAny bool
+	}{
+		{name: "no chain"},
+		{name: "every plugin supports in-place updates", chain: &Chain{entries: []entry{{plugin: supported}}}},
+		{name: "a plugin declares no support", chain: &Chain{entries: []entry{{plugin: supported}, {plugin: unsupported}}}, want: "unsupported", wantAny: true},
+		{name: "a plugin does not declare", chain: &Chain{entries: []entry{{plugin: undeclared}, {plugin: unsupported}}}, want: "undeclared", wantAny: true},
+		{name: "lws-standard-labels", chain: &Chain{entries: []entry{{plugin: &LWSLabelsPlugin{name: LWSLabelsPluginName}}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := tt.chain.PluginWithoutInPlaceUpdate()
+			if got != tt.want || ok != tt.wantAny {
+				t.Fatalf("PluginWithoutInPlaceUpdate() = %q, %v, want %q, %v", got, ok, tt.want, tt.wantAny)
+			}
+		})
+	}
+}

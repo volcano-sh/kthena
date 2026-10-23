@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,7 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 	kubetesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -49,6 +51,7 @@ import (
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -2866,7 +2869,7 @@ func TestManageRoleReplicas(t *testing.T) {
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
 			}
 
-			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+			controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision, nil)
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
@@ -2937,7 +2940,7 @@ func TestManageRoleReplicasUsesMaxSurgeDuringRoleRollingUpdate(t *testing.T) {
 		controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", ordinal), "old-revision", "old-hash")
 	}
 
-	controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision")
+	controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision", nil)
 
 	roles, err := controller.store.GetRoleList(key, groupName, "decode")
 	require.NoError(t, err)
@@ -8999,4 +9002,341 @@ func TestResolveRoleTemplateHash_ReturnsEmptyWhenControllerRevisionNotFound(t *t
 
 	hash := controller.resolveRoleTemplateHash(ms, roleName, pod)
 	assert.Equal(t, "", hash)
+}
+
+const (
+	inPlaceTestImage  = "test-image:v2"
+	inPlaceTestMSUID  = types.UID("inplace-ms-uid")
+	inPlaceTestPodUID = types.UID("inplace-pod-uid")
+)
+
+// newInPlaceRestartPod returns a running, not-ready entry Pod of createStandardModelServing("test-inplace", 1, 1).
+func newInPlaceRestartPod(t *testing.T, state *inplace.State, restartCount int32) *corev1.Pod {
+	t.Helper()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-inplace-0-prefill-0-0",
+			UID:       inPlaceTestPodUID,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: "test-inplace",
+				workloadv1alpha1.GroupNameLabelKey:        "test-inplace-0",
+				workloadv1alpha1.RoleLabelKey:             "prefill",
+				workloadv1alpha1.RoleIDKey:                "prefill-0",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+				Kind:       workloadv1alpha1.ModelServingKind.Kind,
+				Name:       "test-inplace",
+				UID:        inPlaceTestMSUID,
+			}},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:         "prefill-container",
+				Image:        inPlaceTestImage,
+				RestartCount: restartCount,
+			}},
+		},
+	}
+	if state != nil {
+		value, err := state.Encode()
+		require.NoError(t, err)
+		pod.Annotations = map[string]string{workloadv1alpha1.InPlaceUpdateStateAnnotationKey: value}
+	}
+	return pod
+}
+
+func newInPlaceState(phase inplace.Phase, baselineRestarts int32) *inplace.State {
+	state := &inplace.State{
+		Version:        inplace.StateVersion,
+		OwnerUID:       inPlaceTestMSUID,
+		PodUID:         inPlaceTestPodUID,
+		Unit:           "test-inplace-0",
+		SourceRevision: "rev-1",
+		TargetRevision: "rev-2",
+		Phase:          phase,
+		Baseline:       map[string]inplace.ContainerBaseline{"prefill-container": {RestartCount: baselineRestarts}},
+	}
+	if phase == inplace.PhasePatched {
+		state.Patched = map[string]inplace.PatchedContainer{
+			"prefill-container": {Image: inPlaceTestImage, RestartCount: baselineRestarts},
+		}
+	}
+	return state
+}
+
+func newInPlaceTestModelServing() *workloadv1alpha1.ModelServing {
+	ms := createStandardModelServing("test-inplace", 1, 1)
+	ms.UID = inPlaceTestMSUID
+	ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
+		Type:         workloadv1alpha1.ServingGroupRollingUpdate,
+		UpdateMethod: workloadv1alpha1.InPlaceUpdateMethod,
+	}
+	return ms
+}
+
+func newInPlaceRestartController(t *testing.T, pod *corev1.Pod) (*ModelServingController, *kubefake.Clientset, *record.FakeRecorder) {
+	t.Helper()
+	ms := newInPlaceTestModelServing()
+
+	kubeClient := kubefake.NewSimpleClientset(pod.DeepCopy())
+	controller, err := NewModelServingController(kubeClient, kthenafake.NewSimpleClientset(),
+		volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+	t.Cleanup(controller.workqueue.ShutDown)
+	recorder := record.NewFakeRecorder(10)
+	controller.recorder = recorder
+	// Recovery starts right away, so the tests observe it without waiting for the in-place grace period.
+	controller.inPlaceRestartGracePeriod = 0
+	require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(ms))
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(pod.DeepCopy()))
+	controller.initialSync.Store(true)
+
+	msKey := utils.GetNamespaceName(ms)
+	controller.store.AddServingGroupAndRole(msKey, "test-inplace-0", "rev-2", "", "prefill", "prefill-0")
+	controller.store.AddRunningPodToServingGroup(msKey, "test-inplace-0", pod.Name, "rev-2", "", "prefill", "prefill-0")
+	require.NoError(t, controller.store.UpdateRoleStatus(msKey, "test-inplace-0", "prefill", "prefill-0", datastore.RoleRunning))
+	require.NoError(t, controller.store.UpdateServingGroupStatus(msKey, "test-inplace-0", datastore.ServingGroupRunning))
+	return controller, kubeClient, recorder
+}
+
+func TestUpdatePodRestartCause(t *testing.T) {
+	tests := []struct {
+		name         string
+		state        func() *inplace.State
+		restartCount int32
+		// wantRecovery means the Pod enters the grace period and is deleted.
+		wantRecovery bool
+		wantGroup    datastore.ServingGroupStatus
+		// wantEvent is the expected event prefix, or empty when no event is expected.
+		wantEvent string
+	}{
+		{
+			name:         "restart without state follows the recovery policy",
+			state:        func() *inplace.State { return nil },
+			restartCount: 1,
+			wantRecovery: true,
+		},
+		{
+			name:         "restart before the image patch follows the recovery policy",
+			state:        func() *inplace.State { return newInPlaceState(inplace.PhaseDraining, 0) },
+			restartCount: 1,
+			wantRecovery: true,
+			wantEvent:    "Warning InPlaceUpdateRestart Pod test-inplace-0-prefill-0-0 restarted during an in-place update: container prefill-container: image-change=0 other=1",
+		},
+		{
+			name:         "the one restart that applies the patched image is expected",
+			state:        func() *inplace.State { return newInPlaceState(inplace.PhasePatched, 5) },
+			restartCount: 6,
+			wantGroup:    datastore.ServingGroupCreating,
+			wantEvent:    "Normal InPlaceUpdateRestart Pod test-inplace-0-prefill-0-0 restarted during an in-place update: container prefill-container: image-change=1 other=0",
+		},
+		{
+			name:         "a patched pod that is not ready before kubelet restarts it is unavailable",
+			state:        func() *inplace.State { return newInPlaceState(inplace.PhasePatched, 5) },
+			restartCount: 5,
+			wantGroup:    datastore.ServingGroupCreating,
+		},
+		{
+			name:         "further restarts after the patch follow the recovery policy",
+			state:        func() *inplace.State { return newInPlaceState(inplace.PhasePatched, 5) },
+			restartCount: 7,
+			wantRecovery: true,
+			wantEvent:    "Warning InPlaceUpdateRestart Pod test-inplace-0-prefill-0-0 restarted during an in-place update: container prefill-container: image-change=1 other=1",
+		},
+		{
+			name:         "restart beyond the baseline after the update follows the recovery policy",
+			state:        func() *inplace.State { return newInPlaceState(inplace.PhaseDone, 3) },
+			restartCount: 4,
+			wantRecovery: true,
+		},
+		{
+			name:         "restarts within the baseline after the update are not failures",
+			state:        func() *inplace.State { return newInPlaceState(inplace.PhaseDone, 3) },
+			restartCount: 3,
+			wantGroup:    datastore.ServingGroupRunning,
+		},
+		{
+			name: "state written for a previous Pod does not exempt a restart",
+			state: func() *inplace.State {
+				state := newInPlaceState(inplace.PhasePatched, 0)
+				state.PodUID = "previous-pod-uid"
+				return state
+			},
+			restartCount: 1,
+			wantRecovery: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := newInPlaceRestartPod(t, tt.state(), tt.restartCount)
+			controller, kubeClient, recorder := newInPlaceRestartController(t, pod)
+			msKey := types.NamespacedName{Namespace: "default", Name: "test-inplace"}
+			startActions := len(kubeClient.Actions())
+
+			controller.updatePod(nil, pod)
+
+			var events []string
+			for len(recorder.Events) > 0 {
+				events = append(events, <-recorder.Events)
+			}
+			if tt.wantEvent != "" {
+				assert.Contains(t, events, tt.wantEvent)
+			} else {
+				for _, event := range events {
+					assert.NotContains(t, event, "InPlaceUpdateRestart")
+				}
+			}
+
+			_, inGracePeriod := controller.graceMap.Load(getPodGracePeriodKey(pod))
+			if tt.wantRecovery {
+				assert.True(t, inGracePeriod)
+				assertPodDeleted(t, kubeClient, startActions, pod.Name, "the restart must follow the recovery policy")
+				return
+			}
+			assert.False(t, inGracePeriod, "the Pod must not enter the recovery grace period")
+			for _, action := range kubeClient.Actions() {
+				assert.Falsef(t, action.Matches("delete", "pods"), "unexpected pod deletion: %v", action)
+			}
+			assert.Equal(t, tt.wantGroup, controller.store.GetServingGroupStatus(msKey, "test-inplace-0"))
+		})
+	}
+}
+
+func TestRestartGracePeriod(t *testing.T) {
+	controller := &ModelServingController{inPlaceRestartGracePeriod: time.Minute}
+	tests := []struct {
+		name        string
+		gracePeriod *int64
+		state       *inplace.State
+		phase       corev1.PodPhase
+		recreate    bool
+		want        time.Duration
+	}{
+		{name: "no grace period outside an update", want: 0},
+		{name: "configured grace period outside an update", gracePeriod: ptr.To[int64](30), want: 30 * time.Second},
+		{name: "configured grace period after a finished update", gracePeriod: ptr.To[int64](30), state: newInPlaceState(inplace.PhaseDone, 0), want: 30 * time.Second},
+		{name: "in-place grace period during an update", state: newInPlaceState(inplace.PhasePatched, 0), want: time.Minute},
+		{name: "shorter configured grace period during an update", gracePeriod: ptr.To[int64](30), state: newInPlaceState(inplace.PhaseDraining, 0), want: time.Minute},
+		{name: "longer configured grace period during an update", gracePeriod: ptr.To[int64](300), state: newInPlaceState(inplace.PhasePatched, 0), want: 5 * time.Minute},
+		{name: "failed pod during an update", state: newInPlaceState(inplace.PhasePatched, 0), phase: corev1.PodFailed, want: 0},
+		{name: "unfinished update after switching back to Recreate", gracePeriod: ptr.To[int64](30), state: newInPlaceState(inplace.PhasePatched, 0), recreate: true, want: 30 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := newInPlaceTestModelServing()
+			if tt.recreate {
+				ms.Spec.RolloutStrategy.UpdateMethod = workloadv1alpha1.RecreateUpdateMethod
+			}
+			ms.Spec.Template.RestartGracePeriodSeconds = tt.gracePeriod
+			pod := newInPlaceRestartPod(t, tt.state, 1)
+			if tt.phase != "" {
+				pod.Status.Phase = tt.phase
+			}
+			assert.Equal(t, tt.want, controller.restartGracePeriod(ms, pod))
+		})
+	}
+}
+
+func TestHandlePodAfterGraceTimeInPlaceUpdate(t *testing.T) {
+	ms := newInPlaceTestModelServing()
+
+	tests := []struct {
+		name        string
+		state       *inplace.State
+		phase       corev1.PodPhase
+		ready       bool
+		wantDeleted bool
+	}{
+		{
+			name:        "pod that stays down during an in-place update is recovered",
+			state:       newInPlaceState(inplace.PhasePatched, 0),
+			phase:       corev1.PodRunning,
+			wantDeleted: true,
+		},
+		{
+			name:  "pod that is ready again during an in-place update is kept",
+			state: newInPlaceState(inplace.PhasePatched, 0),
+			phase: corev1.PodRunning,
+			ready: true,
+		},
+		{
+			name:        "failed pod in an in-place update is recovered",
+			state:       newInPlaceState(inplace.PhasePatched, 0),
+			phase:       corev1.PodFailed,
+			wantDeleted: true,
+		},
+		{
+			name:        "restart after a finished update is recovered",
+			state:       newInPlaceState(inplace.PhaseDone, 0),
+			phase:       corev1.PodRunning,
+			wantDeleted: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The Pod restarted beyond the image change, and its state is unchanged when the grace period ends.
+			errPod := newInPlaceRestartPod(t, tt.state, 2)
+			errPod.Status.Phase = tt.phase
+			currentPod := errPod.DeepCopy()
+			if tt.ready {
+				currentPod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			}
+			controller, kubeClient := newGracePeriodTestController(t, currentPod)
+			controller.inPlaceRestartGracePeriod = 100 * time.Millisecond
+
+			controller.handlePodAfterGraceTime(ms, errPod)
+
+			_, err := kubeClient.CoreV1().Pods(currentPod.Namespace).Get(context.Background(), currentPod.Name, metav1.GetOptions{})
+			if tt.wantDeleted {
+				assert.True(t, apierrors.IsNotFound(err))
+				return
+			}
+			require.NoError(t, err)
+			for _, action := range kubeClient.Actions() {
+				assert.Falsef(t, action.Matches("delete", "pods"), "unexpected pod deletion: %v", action)
+			}
+		})
+	}
+}
+
+func TestInPlaceUpdateRestartEventDedup(t *testing.T) {
+	pod := newInPlaceRestartPod(t, newInPlaceState(inplace.PhasePatched, 0), 1)
+	controller, _, recorder := newInPlaceRestartController(t, pod)
+	drain := func() []string {
+		var events []string
+		for len(recorder.Events) > 0 {
+			if event := <-recorder.Events; strings.Contains(event, " InPlaceUpdateRestart ") {
+				events = append(events, event)
+			}
+		}
+		return events
+	}
+
+	controller.updatePod(nil, pod)
+	controller.updatePod(nil, pod.DeepCopy())
+	assert.Equal(t, []string{
+		"Normal InPlaceUpdateRestart Pod test-inplace-0-prefill-0-0 restarted during an in-place update: container prefill-container: image-change=1 other=0",
+	}, drain(), "an unchanged restart must be reported once")
+
+	nextState := newInPlaceState(inplace.PhasePatched, 1)
+	nextState.StartedAt = metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	next := newInPlaceRestartPod(t, nextState, 2)
+	controller.updatePod(nil, next)
+	assert.Equal(t, []string{
+		"Normal InPlaceUpdateRestart Pod test-inplace-0-prefill-0-0 restarted during an in-place update: container prefill-container: image-change=1 other=0",
+	}, drain(), "a later update with the same counts must be reported again")
+
+	crashed := next.DeepCopy()
+	crashed.Status.ContainerStatuses[0].RestartCount = 3
+	controller.updatePod(nil, crashed)
+	assert.Equal(t, []string{
+		"Warning InPlaceUpdateRestart Pod test-inplace-0-prefill-0-0 restarted during an in-place update: container prefill-container: image-change=1 other=1",
+	}, drain(), "a new restart must be reported")
+
+	controller.deletePod(crashed)
+	_, ok := controller.inPlaceRestartEvents.Load(crashed.UID)
+	assert.False(t, ok, "the reported restarts must be forgotten when the Pod is deleted")
 }

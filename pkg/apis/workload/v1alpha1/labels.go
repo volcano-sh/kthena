@@ -32,4 +32,7 @@ const (
 	RevisionLabelKey = "modelserving.volcano.sh/revision"
 	// RoleTemplateHashLabelKey is the revision label for the role, used for RoleRollingUpdate strategy.
 	RoleTemplateHashLabelKey = "modelserving.volcano.sh/role-template-hash"
+
+	// InPlaceUpdateStateAnnotationKey is the pod annotation that records in-place update state.
+	InPlaceUpdateStateAnnotationKey = "modelserving.volcano.sh/inplace-update-state"
 )

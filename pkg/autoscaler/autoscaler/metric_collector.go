@@ -47,6 +47,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/autoscaler/datastructure"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/histogram"
 	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	inferControllerUtils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -285,7 +286,8 @@ func evaluatePodsReadiness(pods []*corev1.Pod) (unreadyPods sets.Set[string], fa
 		if !inferControllerUtils.IsPodRunningAndReady(pod) {
 			unreadyPods.Insert(metricPodKey(pod))
 		}
-		if util.IsPodFailed(pod) || inferControllerUtils.ContainerRestarted(pod) {
+		// Restarts caused by an in-place update are expected and are not failures.
+		if util.IsPodFailed(pod) || inplace.ClassifyRestart(pod) == inplace.UnexpectedRestart {
 			failed = true
 		}
 	}

@@ -122,6 +122,16 @@ func GetControllerRevision(
 	return cr, nil
 }
 
+// ListControllerRevisions returns the ControllerRevisions of ms.
+func ListControllerRevisions(ctx context.Context, client kubernetes.Interface, ms *workloadv1alpha1.ModelServing) ([]appsv1.ControllerRevision, error) {
+	selector := labels.SelectorFromSet(map[string]string{ControllerRevisionLabelKey: ms.Name})
+	list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ControllerRevisions: %v", err)
+	}
+	return list.Items, nil
+}
+
 // GetRolesFromControllerRevision extracts roles template data from a ControllerRevision
 func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1alpha1.Role, error) {
 	if cr == nil || cr.Data.Raw == nil {
@@ -147,6 +157,21 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 	}
 
 	return roles, nil
+}
+
+// ModelServingAtRevision rebuilds ms with the revisioned fields recorded in cr.
+// A ControllerRevision written before v1 revision data records only the Roles.
+func ModelServingAtRevision(ms *workloadv1alpha1.ModelServing, cr *appsv1.ControllerRevision) (*workloadv1alpha1.ModelServing, error) {
+	if cr != nil && cr.Annotations[ControllerRevisionDataVersionAnnotation] == ControllerRevisionDataVersionV1 {
+		return ApplyRevision(ms, cr)
+	}
+	roles, err := GetRolesFromControllerRevision(cr)
+	if err != nil {
+		return nil, err
+	}
+	result := ms.DeepCopy()
+	result.Spec.Template.Roles = roles
+	return result, nil
 }
 
 // CleanupOldControllerRevisions deletes old ControllerRevisions that are no longer in use.
