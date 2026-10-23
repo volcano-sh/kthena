@@ -14,10 +14,12 @@ limitations under the License.
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash"
 	"hash/fnv"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apimachinery/pkg/util/rand"
 
@@ -29,6 +31,22 @@ func Revision(obj interface{}) string {
 	hasher := fnv.New32()
 	DeepHashObject(hasher, obj)
 	return rand.SafeEncodeString(fmt.Sprint(hasher.Sum32()))
+}
+
+// serializedRevision hashes the JSON representation of an API object. Kubernetes
+// ControllerRevision users hash serialized revision data instead of the Go
+// struct itself, so newly added optional fields that are nil and omitted from
+// JSON do not change the hash.
+//
+// The fallback preserves controller availability if a future API field cannot
+// be JSON encoded. Role is a Kubernetes API type and is expected to remain JSON
+// serializable, so the fallback is only a defensive guard.
+func serializedRevision(obj interface{}) string {
+	data, err := json.Marshal(obj)
+	if err != nil {
+		return Revision(obj)
+	}
+	return RevisionDataHash(data, nil)
 }
 
 // DeepHashObject writes specified object to hash using the spew library
@@ -52,8 +70,11 @@ func removeRoleReplicasForRevision(ms *workloadv1alpha1.ModelServing) *workloadv
 
 // ModelServingRevision calculates the revision of a ModelServing object.
 func ModelServingRevision(ms *workloadv1alpha1.ModelServing) string {
-	roles := removeRoleReplicasForRevision(ms).Spec.Template.Roles
-	return Revision(roles)
+	data, err := BuildRevisionData(ms)
+	if err != nil {
+		return ""
+	}
+	return RevisionDataHash(data, modelServingCollisionCount(ms))
 }
 
 // removeRoleReplicasForRoleTemplateHash removes fields that do not change rendered pods when calculating role template hash.
@@ -67,5 +88,30 @@ func removeRoleReplicasForRoleTemplateHash(role workloadv1alpha1.Role) workloadv
 // CalRoleTemplateHash calculates the revision hash for a Role template.
 func CalRoleTemplateHash(role workloadv1alpha1.Role) string {
 	copy := removeRoleReplicasForRoleTemplateHash(role)
-	return Revision(copy)
+	return serializedRevision(copy)
+}
+
+// EqualRoleTemplatesForRevision compares legacy Roles-only revision data.
+// The live controller uses EqualModelServingRevisions and EqualRoleRevisions,
+// which also account for scheduler/plugins through the shared comparator.
+func EqualRoleTemplatesForRevision(left, right []workloadv1alpha1.Role) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	leftCopy := make([]workloadv1alpha1.Role, len(left))
+	rightCopy := make([]workloadv1alpha1.Role, len(right))
+	for i := range left {
+		leftCopy[i] = removeRoleReplicasForRoleTemplateHash(*left[i].DeepCopy())
+		rightCopy[i] = removeRoleReplicasForRoleTemplateHash(*right[i].DeepCopy())
+	}
+	return apiequality.Semantic.DeepEqual(leftCopy, rightCopy)
+}
+
+// EqualRoleTemplateForRevision is the single-Role legacy compatibility helper.
+func EqualRoleTemplateForRevision(left, right workloadv1alpha1.Role) bool {
+	return apiequality.Semantic.DeepEqual(
+		removeRoleReplicasForRoleTemplateHash(*left.DeepCopy()),
+		removeRoleReplicasForRoleTemplateHash(*right.DeepCopy()),
+	)
 }

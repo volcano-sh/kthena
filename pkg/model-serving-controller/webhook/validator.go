@@ -17,6 +17,7 @@ limitations under the License.
 package webhook
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -54,6 +55,16 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Validate the ModelServing
 	allowed, reason := v.validateModelServing(modelServing)
+	if allowed && admissionReview.Request.Operation == admissionv1.Update {
+		var old workloadv1alpha1.ModelServing
+		if len(admissionReview.Request.OldObject.Raw) == 0 {
+			allowed, reason = false, "old ModelServing is required to validate an update"
+		} else if err := json.Unmarshal(admissionReview.Request.OldObject.Raw, &old); err != nil {
+			allowed, reason = false, fmt.Sprintf("decode old ModelServing: %v", err)
+		} else if errs := validateSchedulerNameUpdate(&old, modelServing); len(errs) > 0 {
+			allowed, reason = false, errs.ToAggregate().Error()
+		}
+	}
 
 	// Create the admission response
 	admissionResponse := admissionv1.AdmissionResponse{
@@ -76,6 +87,15 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("could not send response: %v", err), http.StatusInternalServerError)
 		return
 	}
+}
+
+// Changing scheduler requires migrating the shared PodGroup as well as Pods.
+// RoleRollingUpdate does not provide that migration, so keep the effective
+// scheduler immutable. API defaulting has already happened at admission; an
+// explicit empty string selects Kubernetes' default-scheduler, not volcano.
+func validateSchedulerNameUpdate(old, current *workloadv1alpha1.ModelServing) field.ErrorList {
+	return apivalidation.ValidateImmutableField(utils.EffectiveSchedulerName(current.Spec.SchedulerName),
+		utils.EffectiveSchedulerName(old.Spec.SchedulerName), field.NewPath("spec", "schedulerName"))
 }
 
 // validateModelServing validates the ModelServing resource
