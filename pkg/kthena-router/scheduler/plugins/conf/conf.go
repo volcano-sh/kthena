@@ -24,13 +24,15 @@ import (
 	"k8s.io/klog/v2"
 	yaml "sigs.k8s.io/yaml/goyaml.v3"
 
+	"github.com/volcano-sh/kthena/pkg/kthena-router/discovery"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 )
 
 type RouterConfiguration struct {
-	Scheduler     SchedulerConfiguration `yaml:"scheduler"`
-	Auth          AuthenticationConfig   `yaml:"auth"`
-	SessionSticky *SessionStickyConfig   `yaml:"sessionSticky,omitempty"`
+	Scheduler         SchedulerConfiguration `yaml:"scheduler"`
+	Auth              AuthenticationConfig   `yaml:"auth"`
+	SessionSticky     *SessionStickyConfig   `yaml:"sessionSticky,omitempty"`
+	EndpointDiscovery discovery.Config       `yaml:"endpointDiscovery,omitempty"`
 }
 
 // SessionStickyConfig selects the session affinity backing store for the router.

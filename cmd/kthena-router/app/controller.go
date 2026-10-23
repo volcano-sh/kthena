@@ -41,6 +41,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/controller"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/discovery"
 	"github.com/volcano-sh/kthena/pkg/kube"
 )
 
@@ -54,7 +55,7 @@ type aggregatedController struct {
 
 var _ Controller = &aggregatedController{}
 
-func startControllers(store datastore.Store, stop <-chan struct{}, enableGatewayAPI bool, defaultPort string, enableGatewayAPIInferenceExtension bool, kubeAPIQPS float32, kubeAPIBurst int, transportRegistry *common.TransportRegistry) Controller {
+func startControllers(store datastore.Store, stop <-chan struct{}, enableGatewayAPI bool, defaultPort string, enableGatewayAPIInferenceExtension bool, kubeAPIQPS float32, kubeAPIBurst int, transportRegistry *common.TransportRegistry, endpointDiscovery *discovery.Controller) Controller {
 	cfg, err := kube.BuildConfig("", "")
 	if err != nil {
 		klog.Fatalf("Error building kubeconfig: %s", err.Error())
@@ -88,7 +89,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	if err != nil {
 		klog.Fatalf("Error creating external model provider controller: %s", err.Error())
 	}
-	modelServerController, err := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store, transportRegistry)
+	modelServerController, err := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store, transportRegistry, controller.WithEndpointDiscovery(endpointDiscovery))
 	if err != nil {
 		klog.Fatalf("Error creating model server controller: %s", err.Error())
 	}
@@ -97,7 +98,9 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 		kthenaInformerFactory.Networking().V1alpha1().ModelRoutes().Informer().HasSynced,
 		kthenaInformerFactory.Networking().V1alpha1().ExternalModelProviders().Informer().HasSynced,
 		kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().HasSynced,
-		kubeInformerFactory.Core().V1().Pods().Informer().HasSynced,
+	}
+	if endpointDiscovery == nil {
+		cacheSyncs = append(cacheSyncs, kubeInformerFactory.Core().V1().Pods().Informer().HasSynced)
 	}
 
 	var gatewayInformerFactory gatewayinformers.SharedInformerFactory
