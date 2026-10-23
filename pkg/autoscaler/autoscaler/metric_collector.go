@@ -79,6 +79,9 @@ func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPol
 type HistogramInfo struct {
 	PodStartTime *metav1.Time
 	HistogramMap map[string]*histogram.Snapshot
+	// RestartCount is the pod's container restart count when the snapshots were
+	// taken, without the runtime sidecar (see engineRestartCount).
+	RestartCount int32
 }
 
 type Scope struct {
@@ -127,13 +130,9 @@ func (collector *MetricCollector) UpdateMetrics(
 	podGroups, externalMetrics := collector.planMetricSources(ctx, targetMetricSources)
 
 	for _, g := range podGroups {
-		values, groupUnreadyPods, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
+		values, groupUnreadyPods, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
 		if collectErr != nil {
 			klog.Warningf("collect pod metrics for target %s failed: %v", collector.Target.TargetRef.Name, collectErr)
-			continue
-		}
-		if failed {
-			klog.Warningf("collect pod metrics for target %s skipped because pod failed/restarted", collector.Target.TargetRef.Name)
 			continue
 		}
 		groupMetrics := make([]algorithm.Metrics, 0, len(values))
@@ -243,28 +242,22 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	specs []podMetricSpec,
 	pastHistograms map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
-) (values map[string]algorithm.Metrics, unreadyPods sets.Set[string], failed bool, err error) {
+) (values map[string]algorithm.Metrics, unreadyPods sets.Set[string], err error) {
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
 	}
 	if len(pods) == 0 {
-		return nil, nil, false, fmt.Errorf("pod list is empty")
+		return nil, nil, fmt.Errorf("pod list is empty")
 	}
 
-	unreadyPods, failed = evaluatePodsReadiness(pods)
-	if failed {
-		return
-	}
+	toScrape, unreadyPods := groupPodsByReadiness(pods)
 
 	// Multiple policy keys may target the same scrape metric name.
 	wanted := groupPolicyKeysByScrapeName(specs)
 
-	values = make(map[string]algorithm.Metrics, len(pods))
-	for _, pod := range pods {
-		if !inferControllerUtils.IsPodRunningAndReady(pod) {
-			continue
-		}
+	values = make(map[string]algorithm.Metrics, len(toScrape))
+	for _, pod := range toScrape {
 		podValues := make(algorithm.Metrics, len(specs))
 		if scrapeErr := collector.collectPodMetrics(ctx, pod, podSource, wanted, podValues, pastHistograms, currentHistograms); scrapeErr != nil {
 			// Keep the ready pod as an entry with no values so the algorithm counts
@@ -277,17 +270,23 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	return
 }
 
-// evaluatePodsReadiness counts pods that are not ready and reports whether any
-// pod has failed or restarted.
-func evaluatePodsReadiness(pods []*corev1.Pod) (unreadyPods sets.Set[string], failed bool) {
+// groupPodsByReadiness splits pods into the ones to scrape (running and ready)
+// and the unready ones. Failed or terminating pods are skipped and counted
+// nowhere, as in the Kubernetes HPA. A pod whose container restarted and is
+// ready again is scraped like any other ready pod.
+func groupPodsByReadiness(pods []*corev1.Pod) (toScrape []*corev1.Pod, unreadyPods sets.Set[string]) {
 	unreadyPods = sets.New[string]()
+	toScrape = make([]*corev1.Pod, 0, len(pods))
 	for _, pod := range pods {
+		if util.IsPodFailed(pod) {
+			klog.V(4).Infof("skip pod %s for metrics: failed or terminating", metricPodKey(pod))
+			continue
+		}
 		if !inferControllerUtils.IsPodRunningAndReady(pod) {
 			unreadyPods.Insert(metricPodKey(pod))
+			continue
 		}
-		if util.IsPodFailed(pod) || inferControllerUtils.ContainerRestarted(pod) {
-			failed = true
-		}
+		toScrape = append(toScrape, pod)
 	}
 	return
 }
@@ -358,15 +357,45 @@ func (collector *MetricCollector) collectPodMetrics(
 	currentHistograms[pod.Name] = HistogramInfo{
 		PodStartTime: pod.Status.StartTime,
 		HistogramMap: currentHistogramMap,
+		RestartCount: engineRestartCount(pod),
 	}
 	return nil
 }
 
+// runtimeSidecarContainerName is the name of the Kthena runtime sidecar in the
+// generated pod templates. The sidecar only relays the engine's /metrics, so its
+// restarts do not reset the engine's histograms.
+const runtimeSidecarContainerName = "runtime"
+
+// engineRestartCount sums the restart counts of the pod's containers, skipping
+// the runtime sidecar. A change means the engine restarted and its histograms
+// started again from zero.
+func engineRestartCount(pod *corev1.Pod) int32 {
+	var restarts int32
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == runtimeSidecarContainerName {
+			continue
+		}
+		restarts += status.RestartCount
+	}
+	return restarts
+}
+
+// sameEngine reports whether pod still runs the same engine as when past was
+// recorded: the pod was not recreated (same StartTime) and its engine did not
+// restart (same engineRestartCount).
+func sameEngine(pod *corev1.Pod, past HistogramInfo) bool {
+	return pod.Status.StartTime != nil && past.PodStartTime != nil &&
+		pod.Status.StartTime.Equal(past.PodStartTime) &&
+		past.RestartCount == engineRestartCount(pod)
+}
+
 // pastHistogramMapForPod returns the previous histogram snapshots for pod, but
-// only when the pod has not restarted since they were recorded.
+// only when neither the pod nor its engine container has restarted since they
+// were recorded.
 func pastHistogramMapForPod(pod *corev1.Pod, pastHistograms map[string]HistogramInfo) map[string]*histogram.Snapshot {
 	pastValue, ok := pastHistograms[pod.Name]
-	if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) {
+	if ok && sameEngine(pod, pastValue) {
 		return pastValue.HistogramMap
 	}
 	return map[string]*histogram.Snapshot{}
@@ -472,8 +501,16 @@ func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogra
 		}
 		snapshot := histogram.NewSnapshotOfHistogram(hist)
 		past := histogram.NewDefaultSnapshot()
+		// If the engine restarted without a container restart (so the pod's
+		// restart count did not change), its histogram started again from zero
+		// and the baseline cannot be subtracted from it. Compare against an
+		// empty baseline instead of returning an error or a wrong quantile.
 		if pastHistogram != nil {
-			past = pastHistogram
+			if snapshot.ResetSince(pastHistogram) {
+				klog.V(4).Infof("histogram %s was reset since the baseline, comparing against an empty baseline", mf.GetName())
+			} else {
+				past = pastHistogram
+			}
 		}
 		quantile, qErr := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
 		if qErr != nil {
