@@ -18,8 +18,11 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"reflect"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -119,6 +122,9 @@ func init() {
 
 	// Add output format flag
 	getCmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "", "Output format (yaml|json|table)")
+	getCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		return validateOutputFormat(outputFormat)
+	}
 
 	// Add namespace flags
 	getCmd.PersistentFlags().StringVarP(&getNamespace, "namespace", "n", "", "Kubernetes namespace (default: current context namespace)")
@@ -136,7 +142,7 @@ func runGetTemplates(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if outputFormat == "yaml" {
+	if isStructuredOutput() {
 		var templates []ManifestInfo
 		for _, templateName := range templateNames {
 			manifestInfo, err := GetTemplateInfo(templateName)
@@ -150,12 +156,7 @@ func runGetTemplates(cmd *cobra.Command, args []string) error {
 			templates = append(templates, manifestInfo)
 		}
 
-		data, err := yaml.Marshal(templates)
-		if err != nil {
-			return fmt.Errorf("failed to marshal to YAML: %v", err)
-		}
-		fmt.Print(string(data))
-		return nil
+		return printObject(os.Stdout, outputFormat, templates)
 	}
 
 	// Default table output
@@ -185,6 +186,11 @@ func runGetTemplates(cmd *cobra.Command, args []string) error {
 func runGetTemplate(cmd *cobra.Command, args []string) error {
 	templateName := args[0]
 
+	// The template is a Go-templated manifest, so it has no json form.
+	if outputFormat == "json" {
+		return fmt.Errorf("-o json is not supported for get template, use -o yaml to print the template")
+	}
+
 	if !TemplateExists(templateName) {
 		return fmt.Errorf("template '%s' not found", templateName)
 	}
@@ -208,6 +214,63 @@ func runGetTemplate(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(w, "NAME\tDESCRIPTION")
 	fmt.Fprintf(w, "%s\t%s\n", manifestInfo.Name, manifestInfo.Description)
 	return w.Flush()
+}
+
+// validateOutputFormat rejects -o/--output values that get cannot print.
+func validateOutputFormat(format string) error {
+	switch format {
+	case "", "table", "yaml", "json":
+		return nil
+	}
+	return fmt.Errorf("unsupported output format %q, must be one of: yaml, json, table", format)
+}
+
+// isStructuredOutput reports whether -o/--output asks for yaml or json
+// instead of the default table.
+func isStructuredOutput() bool {
+	return outputFormat == "yaml" || outputFormat == "json"
+}
+
+// printObject writes obj to w as yaml or json.
+func printObject(w io.Writer, format string, obj interface{}) error {
+	var data []byte
+	var err error
+	switch format {
+	case "yaml":
+		data, err = yaml.Marshal(obj)
+	case "json":
+		data, err = json.MarshalIndent(obj, "", "    ")
+		data = append(data, '\n')
+	default:
+		return fmt.Errorf("unsupported output format %q", format)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to marshal output to %s: %v", format, err)
+	}
+	_, err = w.Write(data)
+	return err
+}
+
+// printList writes items as a kubectl-style List, so `kthena get -o yaml`
+// has the same shape as `kubectl get -o yaml`. Like kubectl, it hides
+// managedFields.
+func printList(w io.Writer, format string, items interface{}) error {
+	if v := reflect.ValueOf(items); v.Kind() == reflect.Slice {
+		if v.IsNil() {
+			// Print an empty list as `items: []` rather than `items: null`.
+			items = []interface{}{}
+		}
+		for i := 0; i < v.Len(); i++ {
+			if obj, ok := v.Index(i).Addr().Interface().(metav1.Object); ok {
+				obj.SetManagedFields(nil)
+			}
+		}
+	}
+	return printObject(w, format, map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "List",
+		"items":      items,
+	})
 }
 
 // newKubeConfig builds the deferred client config with kubectl's precedence:
@@ -376,6 +439,10 @@ func runGetModelServings(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list ModelServings: %v", err)
 	}
 
+	if isStructuredOutput() {
+		return printList(os.Stdout, outputFormat, modelServingList.Items)
+	}
+
 	if len(modelServingList.Items) == 0 {
 		if getAllNamespaces {
 			fmt.Println("No ModelServings found across all namespaces.")
@@ -419,6 +486,10 @@ func runGetAutoscalingPolicies(cmd *cobra.Command, args []string) error {
 	policies, err := client.WorkloadV1alpha1().AutoscalingPolicies(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list AutoscalingPolicies: %v", err)
+	}
+
+	if isStructuredOutput() {
+		return printList(os.Stdout, outputFormat, policies.Items)
 	}
 
 	if len(policies.Items) == 0 {
@@ -481,6 +552,10 @@ func runGetModelRoutes(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to list ModelRoutes: %v", err)
 	}
 
+	if isStructuredOutput() {
+		return printList(os.Stdout, outputFormat, routes.Items)
+	}
+
 	if len(routes.Items) == 0 {
 		if getAllNamespaces {
 			fmt.Println("No ModelRoutes found across all namespaces.")
@@ -530,6 +605,10 @@ func runGetModelServers(cmd *cobra.Command, args []string) error {
 	servers, err := client.NetworkingV1alpha1().ModelServers(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list ModelServers: %v", err)
+	}
+
+	if isStructuredOutput() {
+		return printList(os.Stdout, outputFormat, servers.Items)
 	}
 
 	if len(servers.Items) == 0 {
