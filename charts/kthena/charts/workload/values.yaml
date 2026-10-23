@@ -46,6 +46,9 @@ controllerManager:
   # Smaller values react faster to traffic spikes but increase API server load.
   # If 0 or not specified, uses the binary default (15).
   autoscalingSyncPeriodSeconds: 0
+  # drainTimeout is the max wait for in-flight requests to drain before deleting
+  # a pod during lossless upgrade. "0"/"0s"/0 disables draining; empty uses 30s.
+  drainTimeout: ""
   # downloaderImage is the container image used for downloading models.
   downloaderImage:
     repository: ghcr.io/volcano-sh/downloader

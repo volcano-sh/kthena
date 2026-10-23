@@ -89,6 +89,7 @@ func SetupController(ctx context.Context, cc Config) {
 				if err != nil {
 					klog.Fatalf("failed to create ModelServing controller: %v", err)
 				}
+				msc.SetDrainTimeout(cc.DrainTimeout)
 				lwsc, err = modelserving.InitializeLWSController(config, kubeClient, client)
 				if err != nil {
 					klog.Errorf("Failed to initialize LWS controller: %v", err)

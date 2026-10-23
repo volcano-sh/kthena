@@ -48,6 +48,12 @@ const (
 	SomeGroupsAreUpdated     = "Updated Groups are"
 )
 
+// Pod annotations for lossless upgrade (shared contract in pkg/apis/workload/v1alpha1).
+const (
+	TrafficDrainingAnnotation = workloadv1alpha1.TrafficDrainingAnnotation
+	TrafficDrainedAnnotation  = workloadv1alpha1.TrafficDrainedAnnotation
+)
+
 func GetNamespaceName(obj metav1.Object) types.NamespacedName {
 	return types.NamespacedName{
 		Namespace: obj.GetNamespace(),

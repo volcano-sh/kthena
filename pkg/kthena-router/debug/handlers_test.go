@@ -92,6 +92,10 @@ func (m *MockStore) DeletePod(podName types.NamespacedName) error {
 	return args.Error(0)
 }
 
+func (m *MockStore) SetPodDraining(podName types.NamespacedName, draining bool) {
+	_ = m.Called(podName, draining)
+}
+
 func (m *MockStore) MatchModelTarget(modelName string, request *http.Request, gatewayKey string) (datastore.ModelTarget, bool, *aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, error) {
 	return datastore.ModelTarget{}, false, nil, nil, nil
 }

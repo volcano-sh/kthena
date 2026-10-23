@@ -6859,7 +6859,7 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 
 			startAction := len(client.Actions())
 
-			controller.DeleteRole(context.Background(), ms, groupName, roleName, roleID)
+			controller.DeleteRole(context.Background(), ms, groupName, roleName, roleID, false)
 
 			finalStatus := controller.store.GetRoleStatus(nsn, groupName, roleName, roleID)
 			assert.Equal(t, tt.expectedFinalStatus, finalStatus)
@@ -7392,7 +7392,7 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			startAction := len(client.Actions())
 			startVolcanoAction := len(volcanoClient.Actions())
 
-			err = controller.deleteServingGroup(context.Background(), ms, sgName)
+			err = controller.deleteServingGroup(context.Background(), ms, sgName, false)
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
@@ -8140,6 +8140,97 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 			assert.Equal(t, tt.expectedDeletions, deletions)
 		})
 	}
+}
+
+// TestManageRollingUpdateRoleRollingUpdateSgRevisionRebuiltToNew verifies the
+// restart-rebuild bug: when the controller restarts, the ServingGroup revision
+// is rebuilt from the first pod seen and can end up at the new revision even
+// though the group still contains old-revision roles. RoleRollingUpdate must
+// still treat such a group as outdated (by per-role template hash) and delete
+// the old roles; otherwise the old role is never drained/deleted and the
+// surge replica is never reclaimed, leaving ready replicas > spec.replicas.
+func TestManageRollingUpdateRoleRollingUpdateSgRevisionRebuiltToNew(t *testing.T) {
+	ns := "kthena-test"
+	msName := "qwen36-kthena-sglang"
+	groupName := "qwen36-kthena-sglang-0"
+	newRevision := "5d474d4564"
+	oldRevision := "647b9c7687"
+
+	kubeClient := kubefake.NewSimpleClientset()
+	modelServingClient := kthenafake.NewSimpleClientset()
+	apiextensionsClient := apiextfake.NewSimpleClientset()
+	controller, err := NewModelServingController(kubeClient, modelServingClient, nil, apiextensionsClient)
+	require.NoError(t, err)
+	controller.store = datastore.New()
+
+	role := workloadv1alpha1.Role{
+		Name:     "inference",
+		Replicas: ptr.To[int32](2),
+		RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+			MaxUnavailable: ptr.To(intstr.FromInt(0)),
+			MaxSurge:       ptr.To(intstr.FromInt(1)),
+		},
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}},
+		},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas:        ptr.To[int32](1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
+			Template:        workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{role}},
+		},
+	}
+	newHash := utils.CalRoleTemplateHash(role)
+	oldHash := "6f69d7bdd5" // differs from newHash
+
+	nsn := utils.GetNamespaceName(ms)
+	// Post-restart state: SG.Revision rebuilt to new (new-revision pod seen
+	// first), but the group still holds an old-revision role (inference-1)
+	// plus a surge replica (inference-2). The surge makes allReplicas=3 so
+	// maxUnavailable:0 leaves a deletion budget (3-2-0=1).
+	controller.store.AddServingGroup(nsn, 0, newRevision)
+	controller.store.AddRole(nsn, groupName, "inference", "inference-0", newRevision, newHash)
+	require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "inference", "inference-0", datastore.RoleRunning))
+	controller.store.AddRole(nsn, groupName, "inference", "inference-1", oldRevision, oldHash)
+	require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "inference", "inference-1", datastore.RoleRunning))
+	controller.store.AddRole(nsn, groupName, "inference", "inference-2", newRevision, newHash)
+	require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "inference", "inference-2", datastore.RoleRunning))
+
+	// All roles are Running, so the ServingGroup is Running.
+	require.NoError(t, controller.store.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupRunning))
+
+	// Pre-create the old-revision pod for DeleteRole's drain path (drainTimeout
+	// defaults to 0 on a fresh controller, so the gate falls through to deletion).
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      "qwen36-kthena-sglang-0-inference-1-0",
+			Labels: map[string]string{
+				workloadv1alpha1.GroupNameLabelKey: groupName,
+				workloadv1alpha1.RoleLabelKey:      "inference",
+				workloadv1alpha1.RoleIDKey:         "inference-1",
+			},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+	}
+	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), pod, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	err = controller.manageRollingUpdate(context.Background(), ms, newRevision)
+	require.NoError(t, err)
+
+	// The old-revision role (inference-1) must be deleted even though
+	// SG.Revision == newRevision. Without the fix, SG.Revision == revision
+	// short-circuits the group out of the outdated list and no deletion occurs.
+	deletions := 0
+	for _, action := range kubeClient.Actions() {
+		if action.Matches("delete-collection", "pods") || action.Matches("delete", "pods") {
+			deletions++
+		}
+	}
+	assert.Greater(t, deletions, 0, "old-revision role must be deleted even when SG.Revision is rebuilt to new on restart")
 }
 
 func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
@@ -8999,4 +9090,270 @@ func TestResolveRoleTemplateHash_ReturnsEmptyWhenControllerRevisionNotFound(t *t
 
 	hash := controller.resolveRoleTemplateHash(ms, roleName, pod)
 	assert.Equal(t, "", hash)
+}
+
+// TestDeleteServingGroupDrainGate verifies the lossless-upgrade drain gate:
+// drainTimeout>0 defers deletion by annotating pods and setting Draining; once
+// all pods have traffic-drained the gate lets deletion proceed; drainTimeout=0
+// skips drain and deletes immediately.
+func TestDeleteServingGroupDrainGate(t *testing.T) {
+	makeController := func(t *testing.T, drainTimeout time.Duration) (*ModelServingController, *kubefake.Clientset, *workloadv1alpha1.ModelServing, string, *corev1.Pod) {
+		client := kubefake.NewSimpleClientset()
+		kthenaClient := kthenafake.NewSimpleClientset()
+		volcanoClient := volcanofake.NewSimpleClientset()
+		apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextClient)
+		assert.NoError(t, err)
+		controller.podGroupManager = &fakePodGroupManager{deleteFunc: podgroupmanager.NewManager(client, volcanoClient, apiextClient, nil).DeletePodGroup}
+		controller.SetDrainTimeout(drainTimeout)
+
+		ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "drain-ms", Namespace: "default"},
+			Spec: workloadv1alpha1.ModelServingSpec{
+				Replicas: ptr.To(int32(1)),
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+					Type: workloadv1alpha1.ServingGroupRollingUpdate,
+					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+						MaxSurge:       ptr.To(intstr.FromInt(1)),
+						MaxUnavailable: ptr.To(intstr.FromInt(0)),
+					},
+				},
+			}}
+		sgName := "drain-ms-0"
+		nsn := utils.GetNamespaceName(ms)
+		controller.store.AddServingGroup(nsn, 0, "rev-1")
+		controller.store.UpdateServingGroupStatus(nsn, sgName, datastore.ServingGroupRunning)
+
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: "drain-pod", Namespace: "default",
+			Labels: map[string]string{workloadv1alpha1.GroupNameLabelKey: sgName},
+		}, Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		}}
+		_, err = client.CoreV1().Pods("default").Create(context.TODO(), pod, metav1.CreateOptions{})
+		assert.NoError(t, err)
+		assert.NoError(t, controller.podsInformer.GetIndexer().Add(pod))
+		drainWorkqueue(t, controller.workqueue)
+		return controller, client, ms, sgName, pod
+	}
+
+	t.Run("drain_enabled_defers_deletion_and_annotates", func(t *testing.T) {
+		controller, client, ms, sgName, _ := makeController(t, 5*time.Minute)
+		nsn := utils.GetNamespaceName(ms)
+
+		err := controller.deleteServingGroup(context.Background(), ms, sgName, false)
+		assert.NoError(t, err)
+		// Drain phase: status is Draining, not Deleting; pod still exists.
+		assert.Equal(t, datastore.ServingGroupDraining, controller.store.GetServingGroupStatus(nsn, sgName))
+		gotPod, perr := client.CoreV1().Pods("default").Get(context.TODO(), "drain-pod", metav1.GetOptions{})
+		assert.NoError(t, perr)
+		assert.NotNil(t, gotPod.Annotations[workloadv1alpha1.TrafficDrainingAnnotation],
+			"pod should be annotated traffic-draining")
+		// No DeleteCollection issued.
+		assert.NotContains(t, client.Actions()[len(client.Actions())-1].GetVerb(), "delete-collection")
+	})
+
+	t.Run("drain_completed_then_deletes", func(t *testing.T) {
+		controller, client, ms, sgName, _ := makeController(t, 5*time.Minute)
+		nsn := utils.GetNamespaceName(ms)
+
+		// Phase 1: initiate drain.
+		assert.NoError(t, controller.deleteServingGroup(context.Background(), ms, sgName, false))
+		assert.Equal(t, datastore.ServingGroupDraining, controller.store.GetServingGroupStatus(nsn, sgName))
+
+		// Simulate router writing traffic-drained onto the pod (in cache + client).
+		patched := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: "drain-pod", Namespace: "default",
+			Labels:      map[string]string{workloadv1alpha1.GroupNameLabelKey: sgName},
+			Annotations: map[string]string{workloadv1alpha1.TrafficDrainedAnnotation: "true"},
+		}}
+		_, err := client.CoreV1().Pods("default").Update(context.TODO(), patched, metav1.UpdateOptions{})
+		assert.NoError(t, err)
+		assert.NoError(t, controller.podsInformer.GetIndexer().Update(patched))
+		drainWorkqueue(t, controller.workqueue)
+
+		// Phase 2: gate sees all drained, proceeds to delete.
+		err = controller.deleteServingGroup(context.Background(), ms, sgName, false)
+		assert.NoError(t, err)
+		assert.Equal(t, datastore.ServingGroupDeleting, controller.store.GetServingGroupStatus(nsn, sgName))
+	})
+
+	t.Run("drain_disabled_deletes_immediately", func(t *testing.T) {
+		controller, _, ms, sgName, _ := makeController(t, 0)
+		nsn := utils.GetNamespaceName(ms)
+
+		err := controller.deleteServingGroup(context.Background(), ms, sgName, false)
+		assert.NoError(t, err)
+		// drainTimeout=0: goes straight to Deleting, no Draining phase.
+		assert.Equal(t, datastore.ServingGroupDeleting, controller.store.GetServingGroupStatus(nsn, sgName))
+	})
+
+	t.Run("non_maxSurge_rollout_skips_drain", func(t *testing.T) {
+		controller, client, ms, sgName, _ := makeController(t, 5*time.Minute)
+		// A maxUnavailable rollout (no surge) is not lossless: delete directly.
+		ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
+			Type: workloadv1alpha1.ServingGroupRollingUpdate,
+			RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+				MaxUnavailable: ptr.To(intstr.FromInt(2)),
+			},
+		}
+		nsn := utils.GetNamespaceName(ms)
+
+		err := controller.deleteServingGroup(context.Background(), ms, sgName, false)
+		assert.NoError(t, err)
+		// No Draining phase; the pod is never annotated traffic-draining.
+		assert.Equal(t, datastore.ServingGroupDeleting, controller.store.GetServingGroupStatus(nsn, sgName))
+		gotPod, perr := client.CoreV1().Pods("default").Get(context.TODO(), "drain-pod", metav1.GetOptions{})
+		assert.NoError(t, perr)
+		assert.Empty(t, gotPod.Annotations[workloadv1alpha1.TrafficDrainingAnnotation],
+			"non-maxSurge rollout must not annotate traffic-draining")
+	})
+
+	t.Run("drain_timeout_forces_delete_without_traffic_drained", func(t *testing.T) {
+		// drainTimeout=1ms so the gate times out immediately when no router
+		// writes traffic-drained (e.g. no ModelServer selects the pod).
+		controller, client, ms, sgName, pod := makeController(t, 1*time.Millisecond)
+		nsn := utils.GetNamespaceName(ms)
+
+		// Phase 1: annotate traffic-draining, set status to Draining.
+		require.NoError(t, controller.deleteServingGroup(context.Background(), ms, sgName, false))
+		require.Equal(t, datastore.ServingGroupDraining, controller.store.GetServingGroupStatus(nsn, sgName))
+
+		// No router writes traffic-drained (the pod is never drained). Wait
+		// past drainTimeout, then re-run the gate: it must force-delete.
+		// Sync the traffic-draining annotation into the informer cache (in a real
+		// cluster the watch does this), so drainingTimedOut can read the timestamp.
+		patched, perr := client.CoreV1().Pods("default").Get(context.TODO(), "drain-pod", metav1.GetOptions{})
+		require.NoError(t, perr)
+		require.NoError(t, controller.podsInformer.GetIndexer().Update(patched))
+		time.Sleep(20 * time.Millisecond)
+		drainWorkqueue(t, controller.workqueue)
+		err := controller.deleteServingGroup(context.Background(), ms, sgName, false)
+		assert.NoError(t, err)
+		assert.Equal(t, datastore.ServingGroupDeleting, controller.store.GetServingGroupStatus(nsn, sgName),
+			"drain gate must force-delete once drainTimeout elapses without traffic-drained")
+		_ = pod
+	})
+}
+
+// TestDrainingStatusNotFlippedToRunning verifies the state-machine fix for the
+// review bug where UpdateModelServingStatus (reconcile step 5) flipped a
+// Draining/Deleting ServingGroup back to Running, causing drain Phase 1 to
+// re-enter forever and never reach Phase 2. It calls the real aggregation with a
+// ready group so the buggy branch (checkServingGroupReady -> Running) would
+// fire without the fix.
+func TestDrainingStatusNotFlippedToRunning(t *testing.T) {
+	ms := createStandardModelServing("ms-drain-statemachine", 1, 1)
+	// A lossless (maxSurge) rollout so the drain gate reaches the Deleting guard.
+	ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
+		Type: workloadv1alpha1.ServingGroupRollingUpdate,
+		RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+			MaxSurge:       ptr.To(intstr.FromInt(1)),
+			MaxUnavailable: ptr.To(intstr.FromInt(0)),
+		},
+	}
+	h := newTestController(t, ms)
+	controller := h.controller
+	drainWorkqueue(t, controller.workqueue)
+	nsn := utils.GetNamespaceName(ms)
+	sgName := ms.Name + "-0"
+	roleID := utils.GenerateRoleID("prefill", 0)
+	controller.SetDrainTimeout(5 * time.Minute)
+
+	// Build a Running group with a Running role so checkServingGroupReady is true.
+	controller.store.AddServingGroup(nsn, 0, "rev-1")
+	controller.store.UpdateServingGroupStatus(nsn, sgName, datastore.ServingGroupRunning)
+	controller.store.AddRole(nsn, sgName, "prefill", roleID, "rev-1", "hash")
+	controller.store.UpdateRoleStatus(nsn, sgName, "prefill", roleID, datastore.RoleRunning)
+
+	// Simulate drain Phase 1: the group is now Draining (role still Running).
+	require.NoError(t, controller.store.UpdateServingGroupStatus(nsn, sgName, datastore.ServingGroupDraining))
+	require.Equal(t, datastore.ServingGroupDraining, controller.store.GetServingGroupStatus(nsn, sgName))
+
+	// Re-run the status aggregation (reconcile step 5). Before the fix this
+	// flipped the group back to Running because checkServingGroupReady was true.
+	require.NoError(t, controller.UpdateModelServingStatus(ms, "rev-1"))
+	require.Equal(t, datastore.ServingGroupDraining, controller.store.GetServingGroupStatus(nsn, sgName),
+		"UpdateModelServingStatus must not flip a Draining group back to Running")
+
+	// Deleting must also be preserved by the aggregation.
+	require.NoError(t, controller.store.UpdateServingGroupStatus(nsn, sgName, datastore.ServingGroupDeleting))
+	require.NoError(t, controller.UpdateModelServingStatus(ms, "rev-1"))
+	require.Equal(t, datastore.ServingGroupDeleting, controller.store.GetServingGroupStatus(nsn, sgName),
+		"UpdateModelServingStatus must not flip a Deleting group back to Running")
+
+	// drainServingGroupGate must not flip a Deleting group back to Draining
+	// (the reverse-direction oscillation fix).
+	handled, err := controller.drainServingGroupGate(context.Background(), ms, sgName, datastore.ServingGroupDeleting)
+	require.NoError(t, err)
+	require.False(t, handled, "drain gate must let a Deleting group proceed (handled=false)")
+	require.Equal(t, datastore.ServingGroupDeleting, controller.store.GetServingGroupStatus(nsn, sgName),
+		"drain gate must not flip a Deleting group back to Draining")
+}
+
+// traffic-draining fails after retries, the pod is force-deleted (so the router
+// drops its traffic via DeletionTimestamp) instead of being left to time out.
+func TestPatchTrafficDrainingRetriesThenForceDeletes(t *testing.T) {
+	client := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+	controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextClient)
+	assert.NoError(t, err)
+	controller.podGroupManager = &fakePodGroupManager{deleteFunc: podgroupmanager.NewManager(client, volcanoClient, apiextClient, nil).DeletePodGroup}
+	controller.SetDrainTimeout(5 * time.Minute)
+
+	// Make every patch on this pod fail (apiserver unavailable).
+	client.PrependReactor("patch", "pods", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("apiserver unavailable")
+	})
+
+	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To(int32(1)),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					MaxSurge:       ptr.To(intstr.FromInt(1)),
+					MaxUnavailable: ptr.To(intstr.FromInt(0)),
+				},
+			},
+		}}
+	sgName := "ms-0"
+	controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "rev-1")
+	controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), sgName, datastore.ServingGroupRunning)
+
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "p", Namespace: "default",
+		Labels: map[string]string{workloadv1alpha1.GroupNameLabelKey: sgName},
+	}, Status: corev1.PodStatus{
+		Phase:      corev1.PodRunning,
+		Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+	}}
+	_, err = client.CoreV1().Pods("default").Create(context.TODO(), pod, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	assert.NoError(t, controller.podsInformer.GetIndexer().Add(pod))
+	drainWorkqueue(t, controller.workqueue)
+
+	// Phase 1: patch fails 3x -> force-delete the pod.
+	err = controller.deleteServingGroup(context.Background(), ms, sgName, false)
+	assert.NoError(t, err)
+
+	// A delete should have been issued for the pod (force-delete on patch failure).
+	deleteCount := 0
+	patchCount := 0
+	for _, a := range client.Actions() {
+		switch a.GetVerb() {
+		case "delete":
+			deleteCount++
+		case "patch":
+			patchCount++
+		}
+	}
+	assert.Equal(t, 1, deleteCount, "pod should be force-deleted when drain annotation patch fails")
+
+	// The patch is retried with client-go's retry backoff (retry.DefaultRetry,
+	// 5 steps) before force-delete; assert it was attempted more than once
+	// rather than a hardcoded count, since the backoff is the library default.
+	assert.GreaterOrEqual(t, patchCount, 2, "patch should be retried before force-delete")
 }

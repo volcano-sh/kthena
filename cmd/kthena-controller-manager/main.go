@@ -93,6 +93,9 @@ func main() {
 	pflag.IntVar(&cc.DebugPort, "debug-port", 0, "Port for debug server to dump internal cache. If 0, debug server is disabled.")
 	pflag.IntVar(&cc.AutoscalingSyncPeriodSeconds, "autoscaling-sync-period-seconds", util.AutoscalingSyncPeriodSeconds,
 		"Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 falls back to the default (15).")
+	pflag.DurationVar(&cc.DrainTimeout, "drain-timeout", 30*time.Second,
+		"Max wait for in-flight requests to drain before deleting a pod during lossless upgrade. "+
+			"0 disables draining and falls back to immediate deletion. Default is 30s.")
 	pflag.Parse()
 
 	cc.Controllers = parseControllers(controllers)
