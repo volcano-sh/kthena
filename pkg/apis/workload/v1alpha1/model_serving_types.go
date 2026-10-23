@@ -156,6 +156,24 @@ type RolloutStrategy struct {
 	// +kubebuilder:validation:Enum={ServingGroupRollingUpdate,RoleRollingUpdate}
 	Type RolloutStrategyType `json:"type"`
 
+	// UpdateMethod selects how outdated ServingGroups or Roles are moved to the desired revision.
+	// Supported values are Recreate (default) and InPlace.
+	//
+	// InPlace patches container images on existing Pods when only regular-container images change.
+	// Otherwise the ServingGroup, or the Role instance under RoleRollingUpdate, is recreated, and an InPlaceUpdateFallback event reports why.
+	//
+	// +kubebuilder:default=Recreate
+	// +kubebuilder:validation:Enum={Recreate,InPlace}
+	// +optional
+	UpdateMethod UpdateMethod `json:"updateMethod,omitempty"`
+
+	// ProgressDeadlineSeconds is the maximum time for a ServingGroup or Role instance updated in place to become ready on the target image.
+	// After it passes, Pods that are not ready follow the RecoveryPolicy.
+	// It only applies to in-place updates, and defaults to 1800 seconds.
+	// +kubebuilder:validation:Minimum=60
+	// +optional
+	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty"`
+
 	// RollingUpdateConfiguration configures ServingGroupRollingUpdate.
 	// It must not be set when type is RoleRollingUpdate; configure maxUnavailable
 	// maxSurge, and partition on each Role instead.
@@ -212,6 +230,17 @@ const (
 
 	// `RoleRollingUpdate` indicates that Role replicas will be updated one by one.
 	RoleRollingUpdate RolloutStrategyType = "RoleRollingUpdate"
+)
+
+// UpdateMethod defines how outdated Pods are moved to the desired revision.
+type UpdateMethod string
+
+const (
+	// RecreateUpdateMethod deletes outdated Pods and creates new ones.
+	RecreateUpdateMethod UpdateMethod = "Recreate"
+
+	// InPlaceUpdateMethod patches container images on existing Pods when possible, and recreates them otherwise.
+	InPlaceUpdateMethod UpdateMethod = "InPlace"
 )
 
 // RollingUpdateConfiguration defines availability and partition settings for

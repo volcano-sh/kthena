@@ -39,6 +39,16 @@ type RolloutStrategyApplyConfiguration struct {
 	// Kthena performs RoleRollingUpdate across all ServingGroups at the same time.
 	// Therefore, we recommend using it only in scenarios with a single ServingGroup.
 	Type *workloadv1alpha1.RolloutStrategyType `json:"type,omitempty"`
+	// UpdateMethod selects how outdated ServingGroups or Roles are moved to the desired revision.
+	// Supported values are Recreate (default) and InPlace.
+	//
+	// InPlace patches container images on existing Pods when only regular-container images change.
+	// Otherwise the ServingGroup, or the Role instance under RoleRollingUpdate, is recreated, and an InPlaceUpdateFallback event reports why.
+	UpdateMethod *workloadv1alpha1.UpdateMethod `json:"updateMethod,omitempty"`
+	// ProgressDeadlineSeconds is the maximum time for a ServingGroup or Role instance updated in place to become ready on the target image.
+	// After it passes, Pods that are not ready follow the RecoveryPolicy.
+	// It only applies to in-place updates, and defaults to 1800 seconds.
+	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty"`
 	// RollingUpdateConfiguration configures ServingGroupRollingUpdate.
 	// It must not be set when type is RoleRollingUpdate; configure maxUnavailable
 	// maxSurge, and partition on each Role instead.
@@ -58,6 +68,22 @@ func RolloutStrategy() *RolloutStrategyApplyConfiguration {
 // If called multiple times, the Type field is set to the value of the last call.
 func (b *RolloutStrategyApplyConfiguration) WithType(value workloadv1alpha1.RolloutStrategyType) *RolloutStrategyApplyConfiguration {
 	b.Type = &value
+	return b
+}
+
+// WithUpdateMethod sets the UpdateMethod field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the UpdateMethod field is set to the value of the last call.
+func (b *RolloutStrategyApplyConfiguration) WithUpdateMethod(value workloadv1alpha1.UpdateMethod) *RolloutStrategyApplyConfiguration {
+	b.UpdateMethod = &value
+	return b
+}
+
+// WithProgressDeadlineSeconds sets the ProgressDeadlineSeconds field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ProgressDeadlineSeconds field is set to the value of the last call.
+func (b *RolloutStrategyApplyConfiguration) WithProgressDeadlineSeconds(value int32) *RolloutStrategyApplyConfiguration {
+	b.ProgressDeadlineSeconds = &value
 	return b
 }
 
