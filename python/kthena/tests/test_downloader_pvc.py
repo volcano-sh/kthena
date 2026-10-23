@@ -139,6 +139,8 @@ class TestDownloadModel(unittest.TestCase):
         cmd_args = mock_popen.call_args[0][0]
         self.assertIn("rsync", cmd_args[0])
         self.assertIn("--progress", cmd_args)
+        # stderr must be merged, not a second pipe and not discarded
+        self.assertIs(mock_popen.call_args.kwargs["stderr"], subprocess.STDOUT)
 
     @patch("subprocess.Popen")
     @patch("os.path.exists")
@@ -155,11 +157,12 @@ class TestDownloadModel(unittest.TestCase):
         mock_process = MagicMock()
         mock_process.stdout.readline.side_effect = ["Starting transfer", ""]
         mock_process.wait.return_value = 1
-        mock_process.stderr.read.return_value = "Error: Permission denied"
         mock_popen.return_value = mock_process
 
-        with self.assertRaises(subprocess.SubprocessError):
+        with self.assertRaises(subprocess.SubprocessError) as ctx:
             PVCDownloader._copy_from_pvc("/fake/source", "/fake/dest")
+
+        self.assertIn("Starting transfer", str(ctx.exception))
 
     @patch("os.path.exists")
     @patch("pathlib.Path.exists")
