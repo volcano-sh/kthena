@@ -206,7 +206,9 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	mux := http.NewServeMux()
 
 	modelServingValidator := modelservingwebhook.NewModelServingValidator()
+	lwsMutator := modelservingwebhook.NewLWSMutator()
 	mux.HandleFunc("/validate-workload-ai-v1alpha1-modelserving", modelServingValidator.Handle)
+	mux.HandleFunc("/mutate/leaderworkerset", lwsMutator.Handle)
 
 	if wc.enableEviction {
 		evictionHandler := modelservingwebhook.NewEvictionHandler(kubeClient, kthenaClient, podInformer.Lister(), msInformer.Lister(), wc.evictionTrackerTTL)
