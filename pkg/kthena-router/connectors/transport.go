@@ -206,13 +206,13 @@ func preparePrefillBody(reqBody map[string]interface{}, path string) {
 	}
 }
 
-func buildPrefillRequest(c *gin.Context, req *http.Request, modelRequest map[string]interface{}) *http.Request {
+func buildPrefillRequest(c *gin.Context, req *http.Request, modelRequest map[string]interface{}) (*http.Request, error) {
 	// In PD disaggregated mode, we need to send a prefill request to the prefill pod with non stream mode.
 	preparePrefillBody(modelRequest, responsesPrefillPath(c, req))
 
 	body, err := json.Marshal(modelRequest)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("failed to marshal prefill request body: %w", err)
 	}
 
 	// build request
@@ -221,10 +221,10 @@ func buildPrefillRequest(c *gin.Context, req *http.Request, modelRequest map[str
 	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
 	reqCopy.ContentLength = int64(len(body))
 
-	return reqCopy
+	return reqCopy, nil
 }
 
-func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[string]interface{}) *http.Request {
+func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[string]interface{}) (*http.Request, error) {
 	var body []byte
 	if isResponsesRequest(c, req) {
 		// Chat Completions can opt into usage reporting via stream_options.include_usage.
@@ -235,14 +235,14 @@ func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[stri
 		// re-marshalling it preserves all Responses fields, including opaque ones.
 		marshaled, err := json.Marshal(modelRequest)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("failed to marshal decode request body: %w", err)
 		}
 		body = marshaled
 	} else {
 		modelRequest = AddTokenUsage(c, modelRequest)
 		marshaled, err := json.Marshal(modelRequest)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("failed to marshal decode request body: %w", err)
 		}
 		body = marshaled
 	}
@@ -252,7 +252,7 @@ func BuildDecodeRequest(c *gin.Context, req *http.Request, modelRequest map[stri
 	reqCopy.Body = io.NopCloser(bytes.NewBuffer(body))
 	reqCopy.ContentLength = int64(len(body))
 
-	return reqCopy
+	return reqCopy, nil
 }
 
 // isResponsesPath reports whether p targets the OpenAI Responses API endpoint.

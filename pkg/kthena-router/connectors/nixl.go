@@ -65,7 +65,11 @@ func (n *NIXLConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 
 	req := c.Request
 	prefillBody := cloneReqBody(reqBody)
-	n.prefillRequest = n.buildPrefillRequest(c, req, prefillBody)
+	var buildErr error
+	n.prefillRequest, buildErr = n.buildPrefillRequest(c, req, prefillBody)
+	if buildErr != nil {
+		return 0, fmt.Errorf("failed to build prefill request: %w", buildErr)
+	}
 	decodeBody := cloneReqBody(reqBody)
 	n.decodeRequestBody = AddTokenUsage(c, decodeBody)
 
@@ -199,7 +203,7 @@ func cloneReqBody(reqBody map[string]interface{}) map[string]interface{} {
 	return clone
 }
 
-func (n *NIXLConnector) buildPrefillRequest(c *gin.Context, req *http.Request, reqBody map[string]interface{}) *http.Request {
+func (n *NIXLConnector) buildPrefillRequest(c *gin.Context, req *http.Request, reqBody map[string]interface{}) (*http.Request, error) {
 	// Prepare the body for a generic prefill request.
 	preparePrefillBody(reqBody, responsesPrefillPath(c, req))
 
@@ -211,8 +215,7 @@ func (n *NIXLConnector) buildPrefillRequest(c *gin.Context, req *http.Request, r
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		klog.Errorf("Failed to marshal prefill request body: %v", err)
-		return nil
+		return nil, fmt.Errorf("failed to marshal prefill request body: %w", err)
 	}
 
 	prefillReq := req.Clone(req.Context())
@@ -220,5 +223,5 @@ func (n *NIXLConnector) buildPrefillRequest(c *gin.Context, req *http.Request, r
 	prefillReq.Body = io.NopCloser(bytes.NewBuffer(body))
 	prefillReq.ContentLength = int64(len(body))
 
-	return prefillReq
+	return prefillReq, nil
 }

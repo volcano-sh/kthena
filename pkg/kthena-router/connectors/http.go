@@ -17,6 +17,7 @@ limitations under the License.
 package connectors
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -73,10 +74,17 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 	}
 
 	decodeBody := cloneReqBody(reqBody)
-	h.decodeRequest = BuildDecodeRequest(c, c.Request, decodeBody)
+	var err error
+	h.decodeRequest, err = BuildDecodeRequest(c, c.Request, decodeBody)
+	if err != nil {
+		return 0, fmt.Errorf("failed to build decode request: %w", err)
+	}
 
 	prefillBody := cloneReqBody(reqBody)
-	h.prefillRequest = buildPrefillRequest(c, c.Request, prefillBody)
+	h.prefillRequest, err = buildPrefillRequest(c, c.Request, prefillBody)
+	if err != nil {
+		return 0, fmt.Errorf("failed to build prefill request: %w", err)
+	}
 
 	// --- Prefill phase ---
 	if metricsRecorder != nil {
@@ -87,7 +95,7 @@ func (h *HTTPConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, pr
 		hooks.IncrPrefill()
 	}
 
-	err := h.prefill(h.prefillRequest, prefillAddr, timeout, rt)
+	err = h.prefill(h.prefillRequest, prefillAddr, timeout, rt)
 
 	if hooks != nil && hooks.DecrPrefill != nil {
 		hooks.DecrPrefill()

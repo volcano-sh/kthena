@@ -429,7 +429,10 @@ func TestNIXLBuildPrefillRequestResponsesAPIURLRewrite(t *testing.T) {
 			reqBody := map[string]interface{}{"model": "m", "stream": true}
 
 			connector := NewNIXLConnector().(*NIXLConnector)
-			result := connector.buildPrefillRequest(c, req, reqBody)
+			result, err := connector.buildPrefillRequest(c, req, reqBody)
+			if err != nil {
+				t.Fatalf("buildPrefillRequest returned error: %v", err)
+			}
 			if result == nil {
 				t.Fatal("buildPrefillRequest returned nil")
 			}
