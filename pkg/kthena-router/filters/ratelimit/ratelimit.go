@@ -111,15 +111,14 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 	outputLimiter, hasOutputLimit := r.outputLimiter[model]
 	r.mutex.RUnlock()
 
-	// Check input token rate limit
-	if hasInputLimit && !inputLimiter.AllowN(time.Now(), tokens) {
-		return &InputRateLimitExceededError{}
-	}
-
 	// Check output token rate limit - we conservatively check if there's at least 1 token available
 	// This prevents starting requests that likely won't be able to complete
 	if hasOutputLimit && outputLimiter.Tokens() < 1.0 {
 		return &OutputRateLimitExceededError{}
+	}
+
+	if hasInputLimit && !inputLimiter.AllowN(time.Now(), tokens) {
+		return &InputRateLimitExceededError{}
 	}
 
 	return nil

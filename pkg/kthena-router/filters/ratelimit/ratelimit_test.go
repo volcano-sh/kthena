@@ -227,6 +227,30 @@ func TestTokenRateLimiter_OutputRateLimit(t *testing.T) {
 	}
 }
 
+func TestTokenRateLimiter_OutputRejectionKeepsInputQuota(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model"
+	inputTokens := uint32(10)
+	outputTokens := uint32(5)
+
+	// A minute-based unit keeps refill negligible during the test.
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit:  &inputTokens,
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                networkingv1alpha1.Minute,
+	})
+	rl.RecordOutputTokens(model, 5)
+
+	before := rl.inputLimiter[model].Tokens()
+	err := rl.RateLimit(model, "hello world")
+	if _, ok := err.(*OutputRateLimitExceededError); !ok {
+		t.Fatalf("expected OutputRateLimitExceededError, got %T: %v", err, err)
+	}
+	if after := rl.inputLimiter[model].Tokens(); after < before {
+		t.Fatalf("input quota consumed by rejected request: before=%v after=%v", before, after)
+	}
+}
+
 func TestTokenRateLimiter_InputAndOutputErrors(t *testing.T) {
 	rl := NewTokenRateLimiter()
 	model := "test-model"

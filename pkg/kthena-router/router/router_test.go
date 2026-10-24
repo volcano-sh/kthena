@@ -53,6 +53,8 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/ratelimit"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/tokenizer"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/providers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
@@ -2800,6 +2802,159 @@ func TestRouter_HandlerFunc_AllZeroHTTPRouteBackendWeights(t *testing.T) {
 	)-requestsBefore)
 }
 
+// setExactInputRateLimit configures an input token limit that admits exactly one request with the given prompt.
+func setExactInputRateLimit(t *testing.T, router *Router, model, prompt string) {
+	t.Helper()
+	tokens, err := tokenizer.NewSimpleEstimateTokenizer().CalculateTokenNum(prompt)
+	require.NoError(t, err)
+	inputLimit := uint32(tokens)
+	// A minute-based unit keeps refill negligible during the test.
+	require.NoError(t, router.loadRateLimiter.AddOrUpdateLimiter(model, &aiv1alpha1.RateLimit{
+		InputTokensPerUnit: &inputLimit,
+		Unit:               aiv1alpha1.Minute,
+	}))
+}
+
+func TestRouter_HandlerFunc_RateLimitQuotaOnlyChargedForSelectedBackend(t *testing.T) {
+	const (
+		model  = "quota-model"
+		prompt = "hello quota"
+	)
+	tests := []struct {
+		name           string
+		addModelServer bool
+		addPod         bool
+		podWaitingNum  int
+		exhaustQuota   bool
+		expectedStatus int
+		expectedReason string
+		// wantQuotaLeft reports whether one request's worth of input quota remains afterwards.
+		wantQuotaLeft bool
+		wantBackend   bool
+	}{
+		{
+			name:           "missing model server keeps quota",
+			expectedStatus: http.StatusNotFound,
+			expectedReason: "pod_discovery",
+			wantQuotaLeft:  true,
+		},
+		{
+			name:           "model server without pods keeps quota",
+			addModelServer: true,
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedReason: "pod_discovery",
+			wantQuotaLeft:  true,
+		},
+		{
+			name:           "schedule failure keeps quota",
+			addModelServer: true,
+			addPod:         true,
+			podWaitingNum:  20,
+			expectedStatus: http.StatusBadRequest,
+			wantQuotaLeft:  true,
+		},
+		{
+			name:           "proxied request consumes quota",
+			addModelServer: true,
+			addPod:         true,
+			expectedStatus: http.StatusOK,
+			expectedReason: "successful_request",
+			wantQuotaLeft:  false,
+			wantBackend:    true,
+		},
+		{
+			name:           "exhausted quota rejects before upstream",
+			addModelServer: true,
+			addPod:         true,
+			exhaustQuota:   true,
+			expectedStatus: http.StatusTooManyRequests,
+			expectedReason: "rate_limit",
+			wantQuotaLeft:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var backendCalls atomic.Int32
+			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				backendCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, `{"id":"quota-ok"}`)
+			})
+			router, store, backend := setupTestRouter(t, backendHandler)
+			defer backend.Close()
+
+			backendURL, err := url.Parse(backend.URL)
+			require.NoError(t, err)
+			backendPort, err := strconv.Atoi(backendURL.Port())
+			require.NoError(t, err)
+
+			modelServer := &aiv1alpha1.ModelServer{
+				ObjectMeta: v1.ObjectMeta{Name: "ms-quota", Namespace: "default"},
+				Spec: aiv1alpha1.ModelServerSpec{
+					Model:           func(s string) *string { return &s }("quota-model-base"),
+					WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+					InferenceEngine: "vLLM",
+				},
+			}
+			modelRoute := &aiv1alpha1.ModelRoute{
+				ObjectMeta: v1.ObjectMeta{Name: "mr-quota", Namespace: "default"},
+				Spec: aiv1alpha1.ModelRouteSpec{
+					ModelName: model,
+					Rules: []*aiv1alpha1.Rule{
+						{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: modelServer.Name}}},
+					},
+				},
+			}
+			if tt.addModelServer {
+				podNames := sets.New[types.NamespacedName]()
+				podName := types.NamespacedName{Name: "pod-quota", Namespace: "default"}
+				if tt.addPod {
+					podNames.Insert(podName)
+				}
+				store.AddOrUpdateModelServer(modelServer, podNames)
+				if tt.addPod {
+					store.AddOrUpdatePod(&corev1.Pod{
+						ObjectMeta: v1.ObjectMeta{Name: podName.Name, Namespace: podName.Namespace},
+						Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+					}, []*aiv1alpha1.ModelServer{modelServer})
+					podInfo := store.GetPodInfo(podName)
+					require.NotNil(t, podInfo)
+					podInfo.RequestWaitingNum = float64(tt.podWaitingNum)
+				}
+			}
+			store.AddOrUpdateModelRoute(modelRoute)
+
+			setExactInputRateLimit(t, router, model, prompt)
+			if tt.exhaustQuota {
+				require.NoError(t, router.loadRateLimiter.RateLimit(model, prompt))
+			}
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			requestBody := fmt.Sprintf(`{"model":%q,"prompt":%q}`, model, prompt)
+			c.Request, err = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(requestBody))
+			require.NoError(t, err)
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			router.HandlerFunc()(c)
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			if tt.expectedReason != "" {
+				assert.Equal(t, tt.expectedReason, requestFinishReason(c))
+			}
+			assert.Equal(t, tt.wantBackend, backendCalls.Load() > 0)
+
+			err = router.loadRateLimiter.RateLimit(model, prompt)
+			if tt.wantQuotaLeft {
+				assert.NoError(t, err, "failed request must not consume input token quota")
+			} else {
+				assert.IsType(t, &ratelimit.InputRateLimitExceededError{}, err)
+			}
+		})
+	}
+}
+
 func TestRouter_GetPodsAndServer_ModelServerDeletedDuringPodLookup(t *testing.T) {
 	modelServerName := types.NamespacedName{Name: "deleted", Namespace: "default"}
 	modelServer := &aiv1alpha1.ModelServer{
@@ -3529,6 +3684,91 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			assert.Equal(t, tt.wantHTTPStatus, w.Code)
 			if tt.wantBodyContains != "" {
 				assert.Contains(t, w.Body.String(), tt.wantBodyContains)
+			}
+		})
+	}
+}
+
+func TestRouter_HandlerFunc_FairnessSchedulingRateLimitQuota(t *testing.T) {
+	const prompt = "hello fairness"
+	tests := []struct {
+		name           string
+		storeWrapper   func(real datastore.Store) datastore.Store
+		exhaustQuota   bool
+		wantHTTPStatus int
+		wantBackend    bool
+		// wantQuotaLeft reports whether one request's worth of input quota remains afterwards.
+		wantQuotaLeft bool
+	}{
+		{
+			name:           "queue timeout keeps quota",
+			storeWrapper:   func(real datastore.Store) datastore.Store { return &blockingEnqueueStore{Store: real} },
+			wantHTTPStatus: http.StatusGatewayTimeout,
+			wantQuotaLeft:  true,
+		},
+		{
+			name:           "dequeued request consumes quota",
+			wantHTTPStatus: http.StatusOK,
+			wantBackend:    true,
+			wantQuotaLeft:  false,
+		},
+		{
+			name:           "dequeued request over quota is rejected before upstream",
+			exhaustQuota:   true,
+			wantHTTPStatus: http.StatusTooManyRequests,
+			wantQuotaLeft:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var backendCalls atomic.Int32
+			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				backendCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, `{"id":"fair-ok"}`)
+			})
+			router, store, backend := setupFairnessTestRouter(t, backendHandler)
+			defer backend.Close()
+
+			router.queueTimeout = 100 * time.Millisecond
+			prevEnableFairnessScheduling := EnableFairnessScheduling
+			prevEnableSessionBoost := EnableSessionBoost
+			EnableFairnessScheduling = true
+			EnableSessionBoost = false
+			defer func() {
+				EnableFairnessScheduling = prevEnableFairnessScheduling
+				EnableSessionBoost = prevEnableSessionBoost
+			}()
+			if tt.storeWrapper != nil {
+				router.store = tt.storeWrapper(store)
+			}
+
+			setExactInputRateLimit(t, router, "fair-model", prompt)
+			if tt.exhaustQuota {
+				require.NoError(t, router.loadRateLimiter.RateLimit("fair-model", prompt))
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			router.store.Run(ctx)
+			defer cancel()
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			reqBody := fmt.Sprintf(`{"model":"fair-model","prompt":%q}`, prompt)
+			c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(reqBody))
+			c.Request.Header.Set("Content-Type", "application/json")
+			c.Set(common.UserIdKey, "user-test")
+
+			router.HandlerFunc()(c)
+
+			assert.Equal(t, tt.wantHTTPStatus, w.Code)
+			assert.Equal(t, tt.wantBackend, backendCalls.Load() > 0)
+			err := router.loadRateLimiter.RateLimit("fair-model", prompt)
+			if tt.wantQuotaLeft {
+				assert.NoError(t, err, "request that never left the queue must not consume input token quota")
+			} else {
+				assert.IsType(t, &ratelimit.InputRateLimitExceededError{}, err)
 			}
 		})
 	}
