@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"golang.org/x/time/rate"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/klog/v2"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
@@ -65,6 +66,9 @@ type TokenRateLimiter struct {
 	inputLimiter  map[string]Limiter
 	outputLimiter map[string]Limiter
 
+	// appliedLimits records the configuration each model's limiters were built from
+	appliedLimits map[string]*networkingv1alpha1.RateLimit
+
 	// Redis client for global rate limiting
 	redisClient *redis.Client
 
@@ -93,6 +97,7 @@ func NewTokenRateLimiter() *TokenRateLimiter {
 	return &TokenRateLimiter{
 		inputLimiter:  make(map[string]Limiter),
 		outputLimiter: make(map[string]Limiter),
+		appliedLimits: make(map[string]*networkingv1alpha1.RateLimit),
 		tokenizer:     tokenizer.NewSimpleEstimateTokenizer(),
 	}
 }
@@ -141,6 +146,12 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
+	if applied, ok := r.appliedLimits[model]; ok && equality.Semantic.DeepEqual(applied, ratelimit) {
+		return nil
+	}
+
+	var inputLimiter, outputLimiter Limiter
+
 	// Determine if we should use global or local rate limiting
 	useGlobal := ratelimit.Global != nil && ratelimit.Global.Redis != nil
 
@@ -161,7 +172,7 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 
 		// Create global rate limiters
 		if ratelimit.InputTokensPerUnit != nil {
-			r.inputLimiter[model] = NewGlobalRateLimiter(
+			inputLimiter = NewGlobalRateLimiter(
 				r.redisClient,
 				"kthena:ratelimit",
 				model,
@@ -172,7 +183,7 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 		}
 
 		if ratelimit.OutputTokensPerUnit != nil {
-			r.outputLimiter[model] = NewGlobalRateLimiter(
+			outputLimiter = NewGlobalRateLimiter(
 				r.redisClient,
 				"kthena:ratelimit",
 				model,
@@ -186,21 +197,34 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 		duration := getTimeUnitDuration(ratelimit.Unit)
 
 		if ratelimit.InputTokensPerUnit != nil {
-			r.inputLimiter[model] = NewLocalLimiter(
+			inputLimiter = NewLocalLimiter(
 				rate.Limit(float64(*ratelimit.InputTokensPerUnit)/duration.Seconds()),
 				int(*ratelimit.InputTokensPerUnit),
 			)
 		}
 
 		if ratelimit.OutputTokensPerUnit != nil {
-			r.outputLimiter[model] = NewLocalLimiter(
+			outputLimiter = NewLocalLimiter(
 				rate.Limit(float64(*ratelimit.OutputTokensPerUnit)/duration.Seconds()),
 				int(*ratelimit.OutputTokensPerUnit),
 			)
 		}
 	}
 
+	// Remove limiters for token types that the new configuration no longer limits.
+	setOrDeleteLimiter(r.inputLimiter, model, inputLimiter)
+	setOrDeleteLimiter(r.outputLimiter, model, outputLimiter)
+	r.appliedLimits[model] = ratelimit.DeepCopy()
+
 	return nil
+}
+
+func setOrDeleteLimiter(limiters map[string]Limiter, model string, limiter Limiter) {
+	if limiter == nil {
+		delete(limiters, model)
+		return
+	}
+	limiters[model] = limiter
 }
 
 // DeleteLimiter deletes rate limiter for a model
@@ -210,6 +234,7 @@ func (r *TokenRateLimiter) DeleteLimiter(model string) {
 
 	delete(r.inputLimiter, model)
 	delete(r.outputLimiter, model)
+	delete(r.appliedLimits, model)
 }
 
 func getTimeUnitDuration(unit networkingv1alpha1.RateLimitUnit) time.Duration {
