@@ -4,42 +4,112 @@ metadata:
   name: sample
   namespace: default
 spec:
+  replicas: 2
   schedulerName: volcano
-  replicas: 1  # inferGroup replicas
+  recoveryPolicy: RoleRecreate
+  revisionHistoryLimit: 10
+  # Optional plugin chain that mutates serving pods, executed in list order.
+  plugins:
+    - name: demo-pod
+      type: BuiltIn
+      config:
+        annotations:
+          example.com/custom: "value"
+        env:
+          - name: CUSTOM_VAR
+            value: "custom-value"
+      # Optional scope. Empty roles means all roles, and target can be All (default), Entry or Worker.
+      scope:
+        roles: ["prefill", "decode"]
+        target: All
+  rolloutStrategy:
+    type: ServingGroupRollingUpdate
+    rollingUpdateConfiguration:
+      maxUnavailable: 1
+      maxSurge: 0
+      partition: 0
+    evictionStrategy:
+      protectionLevel: ServingGroup
+      minAvailable: 1
   template:
     restartGracePeriodSeconds: 60
+    gangPolicy:
+      minRoleReplicas:
+        prefill: 1
+        decode: 1
+    networkTopology:
+      groupPolicy:
+        mode: soft
+        highestTierAllowed: 2
+      rolePolicy:
+        mode: soft
+        highestTierAllowed: 1
     roles:
       - name: prefill
-        replicas: 1       # role replicas, for example, 1P1D
+        replicas: 1
         entryTemplate:
+          metadata:
+            labels:
+              example.com/component: prefill-entry
+            annotations:
+              example.com/description: "prefill entry pod"
           spec:
             containers:
               - name: leader
                 image: nginx
                 ports:
                   - containerPort: 8080
-        workerReplicas: 3
+                resources:
+                  limits:
+                    cpu: "0.1"
+                  requests:
+                    cpu: "0.1"
+        workerReplicas: 1
         workerTemplate:
+          metadata:
+            labels:
+              example.com/component: prefill-worker
           spec:
             containers:
               - name: worker
                 image: nginx
                 ports:
                   - containerPort: 8080
+                resources:
+                  limits:
+                    cpu: "0.1"
+                  requests:
+                    cpu: "0.1"
       - name: decode
-        replicas: 1  # role replicas, for example, 1P1D
+        replicas: 1
         entryTemplate:
+          metadata:
+            labels:
+              example.com/component: decode-entry
           spec:
             containers:
               - name: leader
                 image: nginx
                 ports:
                   - containerPort: 8080
-        workerReplicas: 3
+                resources:
+                  limits:
+                    cpu: "0.1"
+                  requests:
+                    cpu: "0.1"
+        workerReplicas: 1
         workerTemplate:
+          metadata:
+            labels:
+              example.com/component: decode-worker
           spec:
             containers:
               - name: worker
                 image: nginx
                 ports:
                   - containerPort: 8080
+                resources:
+                  limits:
+                    cpu: "0.1"
+                  requests:
+                    cpu: "0.1"
