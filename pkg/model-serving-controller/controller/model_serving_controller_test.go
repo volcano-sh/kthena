@@ -7753,6 +7753,106 @@ func TestManageRollingUpdateIncludesSurgeStatusInMaxScaleDown(t *testing.T) {
 	}
 }
 
+func TestManageRollingUpdateReplacesServingGroupsOnGroupPolicyChange(t *testing.T) {
+	tests := []struct {
+		name          string
+		oldTopology   *workloadv1alpha1.NetworkTopology
+		newTopology   *workloadv1alpha1.NetworkTopology
+		oldGangPolicy *workloadv1alpha1.GangPolicy
+		newGangPolicy *workloadv1alpha1.GangPolicy
+		wantDeleted   int
+	}{
+		{
+			name:        "adding network topology rolls outdated group",
+			newTopology: &workloadv1alpha1.NetworkTopology{GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{Mode: schedulingv1beta1.HardNetworkTopologyMode, HighestTierAllowed: ptr.To(1)}},
+			wantDeleted: 1,
+		},
+		{
+			name:        "changing network topology rolls outdated group",
+			oldTopology: &workloadv1alpha1.NetworkTopology{GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{Mode: schedulingv1beta1.HardNetworkTopologyMode, HighestTierAllowed: ptr.To(1)}},
+			newTopology: &workloadv1alpha1.NetworkTopology{GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{Mode: schedulingv1beta1.HardNetworkTopologyMode, HighestTierAllowed: ptr.To(2)}},
+			wantDeleted: 1,
+		},
+		{
+			name:        "removing network topology rolls outdated group",
+			oldTopology: &workloadv1alpha1.NetworkTopology{RolePolicy: &schedulingv1beta1.NetworkTopologySpec{Mode: schedulingv1beta1.SoftNetworkTopologyMode}},
+			wantDeleted: 1,
+		},
+		{
+			name:        "empty network topology does not roll group",
+			newTopology: &workloadv1alpha1.NetworkTopology{},
+			wantDeleted: 0,
+		},
+		{
+			name:          "adding gang policy rolls outdated group",
+			newGangPolicy: &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 1}},
+			wantDeleted:   1,
+		},
+		{
+			name:          "removing gang policy rolls outdated group",
+			oldGangPolicy: &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 1}},
+			wantDeleted:   1,
+		},
+		{
+			name:          "empty gang policy does not roll group",
+			newGangPolicy: &workloadv1alpha1.GangPolicy{},
+			wantDeleted:   0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, err := NewModelServingController(
+				kubefake.NewSimpleClientset(),
+				kthenafake.NewSimpleClientset(),
+				nil,
+				apiextfake.NewSimpleClientset(),
+			)
+			require.NoError(t, err)
+
+			maxUnavailable := intstr.FromInt(1)
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{Name: "topology", Namespace: "default"},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](2),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: workloadv1alpha1.ServingGroupRollingUpdate,
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: &maxUnavailable,
+						},
+					},
+					Template: workloadv1alpha1.ServingGroup{
+						NetworkTopology: tt.oldTopology,
+						GangPolicy:      tt.oldGangPolicy,
+						Roles: []workloadv1alpha1.Role{{
+							Name:     "prefill",
+							Replicas: ptr.To[int32](1),
+							EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+								Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "nginx"}}},
+							},
+						}},
+					},
+				},
+			}
+			oldRevision := utils.ModelServingRevision(ms)
+			key := utils.GetNamespaceName(ms)
+			for ordinal := 0; ordinal < 2; ordinal++ {
+				controller.store.AddServingGroup(key, ordinal, oldRevision)
+				require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
+			}
+
+			ms.Spec.Template.NetworkTopology = tt.newTopology
+			ms.Spec.Template.GangPolicy = tt.newGangPolicy
+			require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, utils.ModelServingRevision(ms)))
+
+			// The fake cluster has no pods, so a replaced ServingGroup is removed from the store immediately.
+			groups, err := controller.store.GetServingGroupByModelServing(key)
+			require.NoError(t, err)
+			assert.Len(t, groups, 2-tt.wantDeleted)
+		})
+	}
+}
+
 func TestManageRollingUpdateTreatsServingGroupNotFoundAsEmpty(t *testing.T) {
 	controller, err := NewModelServingController(
 		kubefake.NewSimpleClientset(),

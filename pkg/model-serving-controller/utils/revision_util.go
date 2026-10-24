@@ -50,10 +50,34 @@ func removeRoleReplicasForRevision(ms *workloadv1alpha1.ModelServing) *workloadv
 	return copy
 }
 
+type modelServingRevisionInput struct {
+	Roles           []workloadv1alpha1.Role
+	NetworkTopology *workloadv1alpha1.NetworkTopology
+	GangPolicy      *workloadv1alpha1.GangPolicy
+}
+
 // ModelServingRevision calculates the revision of a ModelServing object.
 func ModelServingRevision(ms *workloadv1alpha1.ModelServing) string {
-	roles := removeRoleReplicasForRevision(ms).Spec.Template.Roles
-	return Revision(roles)
+	template := removeRoleReplicasForRevision(ms).Spec.Template
+	if !hasNetworkTopology(template.NetworkTopology) && !hasGangPolicy(template.GangPolicy) {
+		return Revision(template.Roles)
+	}
+	input := modelServingRevisionInput{Roles: template.Roles}
+	if hasNetworkTopology(template.NetworkTopology) {
+		input.NetworkTopology = template.NetworkTopology
+	}
+	if hasGangPolicy(template.GangPolicy) {
+		input.GangPolicy = template.GangPolicy
+	}
+	return Revision(input)
+}
+
+func hasNetworkTopology(topology *workloadv1alpha1.NetworkTopology) bool {
+	return topology != nil && (topology.GroupPolicy != nil || topology.RolePolicy != nil)
+}
+
+func hasGangPolicy(policy *workloadv1alpha1.GangPolicy) bool {
+	return policy != nil && len(policy.MinRoleReplicas) > 0
 }
 
 // removeRoleReplicasForRoleTemplateHash removes fields that do not change rendered pods when calculating role template hash.

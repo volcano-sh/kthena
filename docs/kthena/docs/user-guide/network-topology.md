@@ -195,6 +195,8 @@ sample-0-prefill-0-0   1/1     Running   0          2d23h   10.244.1.46   kthena
 sample-0-prefill-0-1   1/1     Running   0          2d23h   10.244.1.47   kthena-worker
 ```
 
+Adding, changing, or removing `spec.template.networkTopology`, or adding or removing `spec.template.gangPolicy.minRoleReplicas`, creates a new revision of the ModelServing. With the `ServingGroupRollingUpdate` rollout strategy (the default), outdated ServingGroups are recreated according to `maxUnavailable`, `maxSurge`, and `partition`, so their pods are rescheduled under the new policy. With `RoleRollingUpdate`, a network topology or gang policy change alone does not recreate any Role. The PodGroups are updated in place, and the new policy applies only to pods created afterwards.
+
 **NOTE:** When using Network Topology Aware Scheduling with your own configuration, ensure that `resources` are specified in `role.entryTemplate` and `role.workerTemplate`.
 
 ## Clean up

@@ -19,6 +19,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
+	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
@@ -170,6 +172,125 @@ func TestModelServingRevision(t *testing.T) {
 				t.Errorf("ModelServingRevision() equality = %v, want %v (a=%s, b=%s)", gotA == gotB, tt.wantEqual, gotA, gotB)
 			}
 		})
+	}
+}
+
+func newModelServingWithGroupPolicies(topology *workloadv1alpha1.NetworkTopology, gangPolicy *workloadv1alpha1.GangPolicy) *workloadv1alpha1.ModelServing {
+	ms := newModelServing([]workloadv1alpha1.Role{newRole("prefill", int32Ptr(1), 0)})
+	ms.Spec.Template.NetworkTopology = topology
+	ms.Spec.Template.GangPolicy = gangPolicy
+	return ms
+}
+
+func TestModelServingRevisionWithGroupPolicies(t *testing.T) {
+	groupPolicy := func(tier int) *workloadv1alpha1.NetworkTopology {
+		return &workloadv1alpha1.NetworkTopology{
+			GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{
+				Mode:               schedulingv1beta1.HardNetworkTopologyMode,
+				HighestTierAllowed: ptr.To(tier),
+			},
+		}
+	}
+	rolePolicy := &workloadv1alpha1.NetworkTopology{
+		RolePolicy: &schedulingv1beta1.NetworkTopologySpec{
+			Mode:               schedulingv1beta1.HardNetworkTopologyMode,
+			HighestTierAllowed: ptr.To(1),
+		},
+	}
+	gangPolicy := &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 1}}
+
+	tests := []struct {
+		name      string
+		a         *workloadv1alpha1.ModelServing
+		b         *workloadv1alpha1.ModelServing
+		wantEqual bool
+	}{
+		{
+			name:      "empty network topology equals unset network topology",
+			a:         newModelServingWithGroupPolicies(nil, nil),
+			b:         newModelServingWithGroupPolicies(&workloadv1alpha1.NetworkTopology{}, nil),
+			wantEqual: true,
+		},
+		{
+			name:      "adding network topology produces different revision",
+			a:         newModelServingWithGroupPolicies(nil, nil),
+			b:         newModelServingWithGroupPolicies(groupPolicy(1), nil),
+			wantEqual: false,
+		},
+		{
+			name:      "changing group policy produces different revision",
+			a:         newModelServingWithGroupPolicies(groupPolicy(1), nil),
+			b:         newModelServingWithGroupPolicies(groupPolicy(2), nil),
+			wantEqual: false,
+		},
+		{
+			name:      "group policy and role policy produce different revisions",
+			a:         newModelServingWithGroupPolicies(groupPolicy(1), nil),
+			b:         newModelServingWithGroupPolicies(rolePolicy, nil),
+			wantEqual: false,
+		},
+		{
+			name:      "identical network topology produces equal revision",
+			a:         newModelServingWithGroupPolicies(groupPolicy(1), nil),
+			b:         newModelServingWithGroupPolicies(groupPolicy(1), nil),
+			wantEqual: true,
+		},
+		{
+			name:      "empty gang policy equals unset gang policy",
+			a:         newModelServingWithGroupPolicies(nil, nil),
+			b:         newModelServingWithGroupPolicies(nil, &workloadv1alpha1.GangPolicy{}),
+			wantEqual: true,
+		},
+		{
+			name:      "empty minRoleReplicas equals unset gang policy",
+			a:         newModelServingWithGroupPolicies(nil, nil),
+			b:         newModelServingWithGroupPolicies(nil, &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{}}),
+			wantEqual: true,
+		},
+		{
+			name:      "adding gang policy produces different revision",
+			a:         newModelServingWithGroupPolicies(nil, nil),
+			b:         newModelServingWithGroupPolicies(nil, gangPolicy),
+			wantEqual: false,
+		},
+		{
+			name:      "removing gang policy produces different revision",
+			a:         newModelServingWithGroupPolicies(nil, gangPolicy),
+			b:         newModelServingWithGroupPolicies(nil, &workloadv1alpha1.GangPolicy{}),
+			wantEqual: false,
+		},
+		{
+			name:      "adding gang policy alongside network topology produces different revision",
+			a:         newModelServingWithGroupPolicies(groupPolicy(1), nil),
+			b:         newModelServingWithGroupPolicies(groupPolicy(1), gangPolicy),
+			wantEqual: false,
+		},
+		{
+			name:      "identical gang policy and network topology produce equal revision",
+			a:         newModelServingWithGroupPolicies(groupPolicy(1), gangPolicy),
+			b:         newModelServingWithGroupPolicies(groupPolicy(1), gangPolicy),
+			wantEqual: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotA := ModelServingRevision(tt.a)
+			gotB := ModelServingRevision(tt.b)
+			if (gotA == gotB) != tt.wantEqual {
+				t.Errorf("ModelServingRevision() equality = %v, want %v (a=%s, b=%s)", gotA == gotB, tt.wantEqual, gotA, gotB)
+			}
+		})
+	}
+}
+
+func TestModelServingRevisionWithoutGroupPoliciesHashesOnlyRoles(t *testing.T) {
+	ms := newModelServingWithGroupPolicies(&workloadv1alpha1.NetworkTopology{}, &workloadv1alpha1.GangPolicy{})
+	ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](30)
+
+	want := Revision(removeRoleReplicasForRevision(ms).Spec.Template.Roles)
+	if got := ModelServingRevision(ms); got != want {
+		t.Errorf("ModelServingRevision() = %s, want roles-only revision %s", got, want)
 	}
 }
 
