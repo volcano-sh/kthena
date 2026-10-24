@@ -53,6 +53,8 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/connectors"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/ratelimit"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/tokenizer"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/providers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
@@ -2800,6 +2802,236 @@ func TestRouter_HandlerFunc_AllZeroHTTPRouteBackendWeights(t *testing.T) {
 	)-requestsBefore)
 }
 
+// setExactInputRateLimit configures an input token limit that admits exactly one request with the given prompt.
+func setExactInputRateLimit(t *testing.T, router *Router, model, prompt string) {
+	t.Helper()
+	tokens, err := tokenizer.NewSimpleEstimateTokenizer().CalculateTokenNum(prompt)
+	require.NoError(t, err)
+	inputLimit := uint32(tokens)
+	// A minute-based unit keeps refill negligible during the test.
+	require.NoError(t, router.loadRateLimiter.AddOrUpdateLimiter(model, &aiv1alpha1.RateLimit{
+		InputTokensPerUnit: &inputLimit,
+		Unit:               aiv1alpha1.Minute,
+	}))
+}
+
+// closedLocalPort returns a loopback port with no listener, so connecting to it is refused.
+func closedLocalPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+	return port
+}
+
+// quotaBackend describes how the backend pod handles a request in rate limit quota tests.
+type quotaBackend int
+
+const (
+	quotaBackendOK quotaBackend = iota
+	// quotaBackendUnreachable refuses the connection, so the request never reaches the pod.
+	quotaBackendUnreachable
+	// quotaBackendError receives the request and answers with an error status.
+	quotaBackendError
+	// quotaBackendDropConnection receives the request and closes the connection without answering.
+	quotaBackendDropConnection
+)
+
+func TestRouter_HandlerFunc_RateLimitQuotaOnlyChargedForSelectedBackend(t *testing.T) {
+	const (
+		model  = "quota-model"
+		prompt = "hello quota"
+	)
+	tests := []struct {
+		name           string
+		addModelServer bool
+		addPod         bool
+		podWaitingNum  int
+		exhaustQuota   bool
+		backend        quotaBackend
+		expectedStatus int
+		expectedReason string
+		// wantQuotaLeft reports whether one request's worth of input quota remains afterwards.
+		wantQuotaLeft bool
+		wantBackend   bool
+	}{
+		{
+			name:           "missing model server keeps quota",
+			expectedStatus: http.StatusNotFound,
+			expectedReason: "pod_discovery",
+			wantQuotaLeft:  true,
+		},
+		{
+			name:           "model server without pods keeps quota",
+			addModelServer: true,
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedReason: "pod_discovery",
+			wantQuotaLeft:  true,
+		},
+		{
+			name:           "schedule failure keeps quota",
+			addModelServer: true,
+			addPod:         true,
+			podWaitingNum:  20,
+			expectedStatus: http.StatusBadRequest,
+			wantQuotaLeft:  true,
+		},
+		{
+			name:           "proxied request consumes quota",
+			addModelServer: true,
+			addPod:         true,
+			expectedStatus: http.StatusOK,
+			expectedReason: "successful_request",
+			wantQuotaLeft:  false,
+			wantBackend:    true,
+		},
+		{
+			name:           "unreachable pod refunds quota",
+			addModelServer: true,
+			addPod:         true,
+			backend:        quotaBackendUnreachable,
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedReason: "proxy",
+			wantQuotaLeft:  true,
+		},
+		{
+			name:           "pod error response keeps quota charged",
+			addModelServer: true,
+			addPod:         true,
+			backend:        quotaBackendError,
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedReason: "proxy",
+			wantQuotaLeft:  false,
+			wantBackend:    true,
+		},
+		{
+			name:           "connection dropped after the pod received the request keeps quota charged",
+			addModelServer: true,
+			addPod:         true,
+			backend:        quotaBackendDropConnection,
+			expectedStatus: http.StatusServiceUnavailable,
+			expectedReason: "proxy",
+			wantQuotaLeft:  false,
+			wantBackend:    true,
+		},
+		{
+			name:           "exhausted quota rejects before upstream",
+			addModelServer: true,
+			addPod:         true,
+			exhaustQuota:   true,
+			expectedStatus: http.StatusTooManyRequests,
+			expectedReason: "rate_limit",
+			wantQuotaLeft:  false,
+		},
+		{
+			name:           "exhausted quota rejects before scheduling",
+			addModelServer: true,
+			addPod:         true,
+			podWaitingNum:  20,
+			exhaustQuota:   true,
+			expectedStatus: http.StatusTooManyRequests,
+			expectedReason: "rate_limit",
+			wantQuotaLeft:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var backendCalls atomic.Int32
+			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				backendCalls.Add(1)
+				switch tt.backend {
+				case quotaBackendError:
+					w.WriteHeader(http.StatusInternalServerError)
+				case quotaBackendDropConnection:
+					_, _ = io.Copy(io.Discard, r.Body)
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if assert.NoError(t, err) {
+						conn.Close()
+					}
+				default:
+					w.WriteHeader(http.StatusOK)
+					fmt.Fprint(w, `{"id":"quota-ok"}`)
+				}
+			})
+			router, store, backend := setupTestRouter(t, backendHandler)
+			defer backend.Close()
+
+			backendURL, err := url.Parse(backend.URL)
+			require.NoError(t, err)
+			backendPort, err := strconv.Atoi(backendURL.Port())
+			require.NoError(t, err)
+			if tt.backend == quotaBackendUnreachable {
+				backendPort = closedLocalPort(t)
+			}
+
+			modelServer := &aiv1alpha1.ModelServer{
+				ObjectMeta: v1.ObjectMeta{Name: "ms-quota", Namespace: "default"},
+				Spec: aiv1alpha1.ModelServerSpec{
+					Model:           func(s string) *string { return &s }("quota-model-base"),
+					WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+					InferenceEngine: "vLLM",
+				},
+			}
+			modelRoute := &aiv1alpha1.ModelRoute{
+				ObjectMeta: v1.ObjectMeta{Name: "mr-quota", Namespace: "default"},
+				Spec: aiv1alpha1.ModelRouteSpec{
+					ModelName: model,
+					Rules: []*aiv1alpha1.Rule{
+						{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: modelServer.Name}}},
+					},
+				},
+			}
+			if tt.addModelServer {
+				podNames := sets.New[types.NamespacedName]()
+				podName := types.NamespacedName{Name: "pod-quota", Namespace: "default"}
+				if tt.addPod {
+					podNames.Insert(podName)
+				}
+				store.AddOrUpdateModelServer(modelServer, podNames)
+				if tt.addPod {
+					store.AddOrUpdatePod(&corev1.Pod{
+						ObjectMeta: v1.ObjectMeta{Name: podName.Name, Namespace: podName.Namespace},
+						Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+					}, []*aiv1alpha1.ModelServer{modelServer})
+					podInfo := store.GetPodInfo(podName)
+					require.NotNil(t, podInfo)
+					podInfo.RequestWaitingNum = float64(tt.podWaitingNum)
+				}
+			}
+			store.AddOrUpdateModelRoute(modelRoute)
+
+			setExactInputRateLimit(t, router, model, prompt)
+			if tt.exhaustQuota {
+				require.NoError(t, router.loadRateLimiter.RateLimit(model, prompt))
+			}
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			requestBody := fmt.Sprintf(`{"model":%q,"prompt":%q}`, model, prompt)
+			c.Request, err = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(requestBody))
+			require.NoError(t, err)
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			router.HandlerFunc()(c)
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			if tt.expectedReason != "" {
+				assert.Equal(t, tt.expectedReason, requestFinishReason(c))
+			}
+			assert.Equal(t, tt.wantBackend, backendCalls.Load() > 0)
+
+			err = router.loadRateLimiter.RateLimit(model, prompt)
+			if tt.wantQuotaLeft {
+				assert.NoError(t, err, "failed request must not consume input token quota")
+			} else {
+				assert.IsType(t, &ratelimit.InputRateLimitExceededError{}, err)
+			}
+		})
+	}
+}
+
 func TestRouter_GetPodsAndServer_ModelServerDeletedDuringPodLookup(t *testing.T) {
 	modelServerName := types.NamespacedName{Name: "deleted", Namespace: "default"}
 	modelServer := &aiv1alpha1.ModelServer{
@@ -3534,6 +3766,93 @@ func TestHandleFairnessScheduling(t *testing.T) {
 	}
 }
 
+func TestRouter_HandlerFunc_FairnessSchedulingRateLimitQuota(t *testing.T) {
+	const prompt = "hello fairness"
+	tests := []struct {
+		name           string
+		storeWrapper   func(real datastore.Store) datastore.Store
+		exhaustQuota   bool
+		wantHTTPStatus int
+		wantBackend    bool
+		// wantQuotaLeft reports whether one request's worth of input quota remains afterwards.
+		wantQuotaLeft bool
+	}{
+		{
+			name:           "queue timeout keeps quota",
+			storeWrapper:   func(real datastore.Store) datastore.Store { return &blockingEnqueueStore{Store: real} },
+			wantHTTPStatus: http.StatusGatewayTimeout,
+			wantQuotaLeft:  true,
+		},
+		{
+			name:           "dequeued request consumes quota",
+			wantHTTPStatus: http.StatusOK,
+			wantBackend:    true,
+			wantQuotaLeft:  false,
+		},
+		{
+			// The blocking store would time out with 504 if the request reached the queue.
+			name:           "over quota request is rejected before enqueue",
+			storeWrapper:   func(real datastore.Store) datastore.Store { return &blockingEnqueueStore{Store: real} },
+			exhaustQuota:   true,
+			wantHTTPStatus: http.StatusTooManyRequests,
+			wantQuotaLeft:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var backendCalls atomic.Int32
+			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				backendCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, `{"id":"fair-ok"}`)
+			})
+			router, store, backend := setupFairnessTestRouter(t, backendHandler)
+			defer backend.Close()
+
+			router.queueTimeout = 100 * time.Millisecond
+			prevEnableFairnessScheduling := EnableFairnessScheduling
+			prevEnableSessionBoost := EnableSessionBoost
+			EnableFairnessScheduling = true
+			EnableSessionBoost = false
+			defer func() {
+				EnableFairnessScheduling = prevEnableFairnessScheduling
+				EnableSessionBoost = prevEnableSessionBoost
+			}()
+			if tt.storeWrapper != nil {
+				router.store = tt.storeWrapper(store)
+			}
+
+			setExactInputRateLimit(t, router, "fair-model", prompt)
+			if tt.exhaustQuota {
+				require.NoError(t, router.loadRateLimiter.RateLimit("fair-model", prompt))
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			router.store.Run(ctx)
+			defer cancel()
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			reqBody := fmt.Sprintf(`{"model":"fair-model","prompt":%q}`, prompt)
+			c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(reqBody))
+			c.Request.Header.Set("Content-Type", "application/json")
+			c.Set(common.UserIdKey, "user-test")
+
+			router.HandlerFunc()(c)
+
+			assert.Equal(t, tt.wantHTTPStatus, w.Code)
+			assert.Equal(t, tt.wantBackend, backendCalls.Load() > 0)
+			err := router.loadRateLimiter.RateLimit("fair-model", prompt)
+			if tt.wantQuotaLeft {
+				assert.NoError(t, err, "request that never left the queue must not consume input token quota")
+			} else {
+				assert.IsType(t, &ratelimit.InputRateLimitExceededError{}, err)
+			}
+		})
+	}
+}
+
 // --- Test helper: store wrapper that accepts Enqueue but never notifies ---
 
 // blockingEnqueueStore wraps a real Store but overrides Enqueue so the
@@ -4089,4 +4408,112 @@ func TestRouter_ProxyToPDDisaggregated_NonRetryableError(t *testing.T) {
 		assert.Error(t, err)
 		assert.Equal(t, int32(2), mockConnector.calls.Load(), "transient errors must still be retried across all pod pairs")
 	})
+}
+
+func TestRouter_HandlerFunc_ExternalProviderRateLimitQuotaRefund(t *testing.T) {
+	const (
+		model  = "external-quota-model"
+		prompt = "hello quota"
+	)
+	tests := []struct {
+		name           string
+		backend        quotaBackend
+		expectedStatus int
+		// wantQuotaLeft reports whether one request's worth of input quota remains afterwards.
+		wantQuotaLeft bool
+		wantBackend   bool
+	}{
+		{
+			name:           "successful request consumes quota",
+			backend:        quotaBackendOK,
+			expectedStatus: http.StatusOK,
+			wantBackend:    true,
+		},
+		{
+			name:           "unreachable provider refunds quota",
+			backend:        quotaBackendUnreachable,
+			expectedStatus: http.StatusBadGateway,
+			wantQuotaLeft:  true,
+		},
+		{
+			name:           "provider error response keeps quota charged",
+			backend:        quotaBackendError,
+			expectedStatus: http.StatusInternalServerError,
+			wantBackend:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var backendCalls atomic.Int32
+			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				backendCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				if tt.backend == quotaBackendError {
+					w.WriteHeader(http.StatusInternalServerError)
+					fmt.Fprint(w, `{"error":{"message":"provider failed"}}`)
+					return
+				}
+				fmt.Fprint(w, `{"id":"external-response","usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}`)
+			}))
+			defer upstream.Close()
+			baseURL := upstream.URL
+			if tt.backend == quotaBackendUnreachable {
+				baseURL = fmt.Sprintf("https://127.0.0.1:%d", closedLocalPort(t))
+			}
+
+			store := datastore.New()
+			router := NewRouter(store, "../scheduler/testdata/configmap.yaml", common.NewTransportRegistry())
+			providerModel := "gpt-4o-mini"
+			require.NoError(t, store.AddOrUpdateExternalModelProvider(&aiv1alpha1.ExternalModelProvider{
+				ObjectMeta: v1.ObjectMeta{Name: "quota-provider", Namespace: "default"},
+				Spec: aiv1alpha1.ExternalModelProviderSpec{
+					ProviderType:       aiv1alpha1.OpenAI,
+					BaseURL:            baseURL,
+					Model:              &providerModel,
+					InsecureSkipVerify: true,
+					Auth: &aiv1alpha1.ProviderAuth{
+						SecretRef: corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "quota-provider-secret"},
+							Key:                  "api-key",
+						},
+					},
+				},
+			}))
+			require.NoError(t, store.AddOrUpdateSecret(&corev1.Secret{
+				ObjectMeta: v1.ObjectMeta{Name: "quota-provider-secret", Namespace: "default"},
+				Data:       map[string][]byte{"api-key": []byte("provider-key")},
+			}))
+			require.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+				ObjectMeta: v1.ObjectMeta{Name: "mr-external-quota", Namespace: "default"},
+				Spec: aiv1alpha1.ModelRouteSpec{
+					ModelName: model,
+					Rules: []*aiv1alpha1.Rule{
+						{TargetModels: []*aiv1alpha1.TargetModel{{ExternalModelProviderName: "quota-provider"}}},
+					},
+				},
+			}))
+			setExactInputRateLimit(t, router, model, prompt)
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			requestBody := fmt.Sprintf(`{"model":%q,"prompt":%q}`, model, prompt)
+			var err error
+			c.Request, err = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(requestBody))
+			require.NoError(t, err)
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			router.HandlerFunc()(c)
+
+			assert.Equal(t, tt.expectedStatus, w.Code, w.Body.String())
+			assert.Equal(t, tt.wantBackend, backendCalls.Load() > 0)
+
+			err = router.loadRateLimiter.RateLimit(model, prompt)
+			if tt.wantQuotaLeft {
+				assert.NoError(t, err, "request that never reached the provider must not consume input token quota")
+			} else {
+				assert.IsType(t, &ratelimit.InputRateLimitExceededError{}, err)
+			}
+		})
+	}
 }
