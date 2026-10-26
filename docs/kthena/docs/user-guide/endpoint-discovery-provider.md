@@ -5,6 +5,9 @@ It uses the existing file loader for ModelServer/ModelRoute configuration,
 and HTTP snapshots for instance membership. Kubernetes, a GPU and Redis are
 not required.
 
+`discovery.Source` is protocol-independent. A provider may use a registry SDK or
+a watch-backed cache instead of an HTTP service.
+
 ## Implement and register
 
 The complete source is in
@@ -18,7 +21,8 @@ The complete source is in
 | `resources/model.yaml` | Declare ModelServer `demo` and the request model route |
 | `demo/main.go`, `endpoints.json` | Local registry and mock inference backend |
 
-The registry returns existing API `Endpoint` objects:
+The registry returns a full snapshot of existing API `Endpoint` objects for one
+ModelServer. These sample values come from `endpoints.json`, not provider code:
 
 ```json
 [{"name":"instance-a","address":"127.0.0.1","port":18081}]
@@ -31,6 +35,19 @@ construct Pods or modify Store. This polling example owns no background worker
 or connection pool, so `Close` is a no-op. A watch-based provider can call the
 factory's `notify` callback and must release its subscription in `Close`.
 
+## Configure the example
+
+All files below are under `examples/kthena-router/endpoint-discovery/`.
+
+| Setting | Where to change it | When it takes effect |
+| --- | --- | --- |
+| Instance `name`, `address` and `port` | `endpoints.json` | The fixture rereads the file on each lookup; Router applies the next valid snapshot without restarting |
+| Registry URL | `router.yaml`: `endpointDiscovery.mappings[].parameters.url` | Restart Router after editing |
+
+The registry URL supplies discovery data; endpoint addresses are inference
+destinations. Editing them does not move a server's listener. The local fixture
+serves both roles at `127.0.0.1:18081`; use reachable model addresses for real instances.
+
 ## Build and run
 
 Use the Go version from `go.mod`, and run all commands from the repository root.
@@ -41,10 +58,10 @@ go build -o bin/kthena-http-router ./examples/kthena-router/endpoint-discovery
 go build -o bin/kthena-discovery-demo ./examples/kthena-router/endpoint-discovery/demo
 ```
 
-In terminal 1, start the fixture:
+In terminal 1, start the fixture (`--snapshot` selects the endpoint data file):
 
 ```bash
-bin/kthena-discovery-demo
+bin/kthena-discovery-demo --snapshot examples/kthena-router/endpoint-discovery/endpoints.json
 ```
 
 In terminal 2, start the custom Router:
@@ -54,9 +71,10 @@ bin/kthena-http-router
 ```
 
 The example uses ports 18080 (Router), 18081 (fixture), 19090 (metrics) and
-15000 (debug); keep these free. Router settings and resource paths default to
-the files in the example directory. This local smoke test has no authentication;
-run it only in a trusted development environment.
+15000 (debug); these listeners are fixed in the example binaries, so keep them
+free. Router defaults to the example's `router.yaml` and `resources/`; select
+other paths with `--router-config` and `--config-dir`. This local smoke test has
+no authentication; run it only in a trusted development environment.
 
 In terminal 3, wait for `/readyz` to return HTTP 200, then send a non-streaming
 request:
@@ -73,8 +91,9 @@ canned content and Usage; this verifies discovery and forwarding, not inference.
 
 ## Verify refresh
 
-Edit `endpoints.json` without restarting either process. Save `[]` to remove the
-instance, then restore the original array to add it back. Observe
+Edit `examples/kthena-router/endpoint-discovery/endpoints.json` without restarting
+either process. Save `[]` to remove the instance, then restore the original array
+to add it back. Observe
 `kthena_router_discovery_endpoints{model_server="default/demo"}` change from 1 to
 0 and back after background refreshes:
 

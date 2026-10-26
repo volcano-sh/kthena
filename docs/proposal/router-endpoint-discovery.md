@@ -13,15 +13,17 @@ creation-date: 2026-10-10
 
 ### Summary
 
-For [issue #1864](https://github.com/volcano-sh/kthena/issues/1864), add an
-in-process discovery extension point. Providers return existing networking
-`Endpoint` objects; a shared controller maintains synthetic Pods in
+Model instances managed by external platforms may span multiple Kubernetes
+clusters or run outside Kubernetes. Add an in-process discovery extension point
+so Router can consume their registry membership. Providers return existing
+networking `Endpoint` objects; a shared controller maintains synthetic Pods in
 `datastore.Store`, without adding discovery I/O to inference requests.
 
 ### Motivation
 
-Model instances may be registered outside the router's Kubernetes cluster.
-Integrations need to discover them without changing scheduling or proxying.
+Integrations need to follow registry changes without watching every backing
+cluster or repeatedly editing static endpoints in ModelServer manifests.
+They should reuse the existing scheduler, proxy and Store.
 
 #### Goals
 
@@ -39,6 +41,11 @@ Integrations need to discover them without changing scheduling or proxying.
 
 Select one compiled-in provider and map ModelServers to its parameters.
 External mode disables the Pod informer, not resource configuration loading.
+
+- **Mapped:** the ModelServer's `namespace/name` has an entry in
+  `endpointDiscovery.mappings`; **unmapped:** it has no entry.
+- **Snapshot:** the provider's complete current endpoint list for one ModelServer,
+  not a list of changes. A successful empty snapshot means no instances.
 
 | ModelServer in external mode | Membership owner |
 | --- | --- |
@@ -59,11 +66,11 @@ flowchart LR
     S --> R[Scheduler / proxy]
 ```
 
-Resource loading and instance discovery are independent. Kubernetes watches or
-the existing file loader supply ModelServer configuration. Native mode retains
-Pod/static reconciliation; external mode disables the Pod informer and assigns
-mapped models exclusively to the new controller. Unmapped static models still
-work. Both paths use the existing Store; the request path is unchanged.
+Resource loading and instance discovery are independent.
+`--config-source=kubernetes` still requires Kubernetes API access to load resource
+configuration, even with external discovery. With `--config-source=file` and an
+external provider, Router can run standalone without a Kubernetes cluster.
+Both paths use the existing Store; the request path is unchanged.
 
 #### User Stories
 
@@ -100,6 +107,10 @@ type Source interface {
 type Factory func(types.NamespacedName, map[string]interface{}, func()) (Source, error)
 type Registry map[string]Factory
 ```
+
+`Source` does not prescribe a transport or registry protocol. An implementation
+may query a registry SDK or read a cache maintained by a watch subscription;
+HTTP/JSON is only an example, not a required client/server architecture.
 
 The factory receives the ModelServer name, read-only parameters and a refresh
 hint callback. It must avoid blocking I/O; Source must honor cancellation, return
