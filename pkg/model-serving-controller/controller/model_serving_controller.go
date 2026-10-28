@@ -854,7 +854,12 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 			revision = group.Revision
 			roles, err = c.revisionHistory(ctx, ms).roles(ctx, revision)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("resolve applied ServingGroup %s: %w", group.Name, err))
+				// The cached history error is returned after safe reconciliation.
+				// This unit cannot prove readiness or authorize its own rollout,
+				// but must not block independent units with sufficient budget.
+				if group.Status == datastore.ServingGroupRunning {
+					errs = append(errs, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), group.Name, datastore.ServingGroupCreating))
+				}
 				// Keep the existing safe nested count-decrease path. Role surge is
 				// inactive in SG mode; do not reclaim whole-group surge on this error.
 				partition, _, partitionErr := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
@@ -1151,6 +1156,12 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 		roleToApply, revisionToUse, hashToUse, err := c.appliedRoleTemplate(ctx, ms, groupName, targetRole.Name, roleObj)
 		if err != nil {
 			klog.Warningf("manageRoleReplicasPerGroup: cannot resolve template for role %s/%s: %v", targetRole.Name, roleObj.Name, err)
+			c.revisionHistory(ctx, ms).recordComparisonError(groupName+"/"+roleObj.Name, err)
+			if roleObj.Status == datastore.RoleRunning {
+				if statusErr := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleObj.Name, datastore.RoleCreating); statusErr != nil {
+					klog.Warningf("cannot invalidate readiness of Role %s/%s: %v", targetRole.Name, roleObj.Name, statusErr)
+				}
+			}
 			continue
 		}
 		if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate {

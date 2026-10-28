@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -317,7 +318,7 @@ func TestAppliedHistoryUnavailableBlocksLocalRepair(t *testing.T) {
 				recordTestRevision(t, c.kubeClientSet, current, "new")
 				uids := seedAppliedRole(t, c, old, old.Spec.Template.Roles[0], 0, 0, "old", 1)
 				ctx := c.withRevisionHistory(context.Background(), current)
-				_ = c.syncRoleReplicas(ctx, current, "new")
+				require.NoError(t, c.syncRoleReplicas(ctx, current, "new"), "unit-local history errors are deferred so other units can reconcile")
 				require.Error(t, c.revisionHistory(ctx, current).errors(), "untrusted applied history must stay visible as an error")
 				pods, err := c.kubeClientSet.CoreV1().Pods(current.Namespace).List(ctx, metav1.ListOptions{})
 				require.NoError(t, err)
@@ -422,6 +423,8 @@ func TestAppliedHistoryErrorDoesNotShrinkReadySurge(t *testing.T) {
 		require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(current), group, "decode", "decode-0", datastore.RoleRunning))
 		require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(current), group, datastore.ServingGroupRunning))
 	}
+	_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(current.Namespace).Create(context.Background(), current, metav1.CreateOptions{})
+	require.NoError(t, err)
 	require.NoError(t, c.modelServingsInformer.GetIndexer().Add(current))
 	surgeGroup := utils.GenerateServingGroupName(current.Name, 2)
 	surgeStatus := c.store.GetServingGroupStatus(utils.GetNamespaceName(current), surgeGroup)
@@ -430,13 +433,26 @@ func TestAppliedHistoryErrorDoesNotShrinkReadySurge(t *testing.T) {
 	client := c.kubeClientSet.(*kubefake.Clientset)
 	client.ClearActions()
 	err = c.syncModelServing(context.Background(), namespacedKey(current.Namespace, current.Name))
-	require.Error(t, err, "unknown protected history still requires retry")
+	require.ErrorContains(t, err, "ControllerRevision is missing", "unknown protected history still requires retry after safe progress")
+	oldGroup := utils.GenerateServingGroupName(current.Name, 1)
+	protectedGroup := utils.GenerateServingGroupName(current.Name, 0)
+	deletions := 0
 	for _, action := range client.Actions() {
 		if action.GetResource().Resource == "pods" {
-			require.NotEqual(t, "delete", action.GetVerb(), "history resolution failure is not a replica scale-down request")
-			require.NotEqual(t, "delete-collection", action.GetVerb(), "fake DeleteCollection does not remove tracker objects, so Pod count alone cannot detect deletion")
+			require.NotEqual(t, "delete", action.GetVerb(), "rollout must use scoped unit deletion")
+			if action.GetVerb() == "delete-collection" {
+				// Fake DeleteCollection keeps tracker objects, so inspect the
+				// actual selector as well as the surge's datastore state.
+				selector := action.(kubetesting.DeleteCollectionAction).GetListRestrictions().Labels
+				require.False(t, selector.Matches(labels.Set{workloadv1alpha1.GroupNameLabelKey: surgeGroup}), "history failure must not reclaim target surge as ordinary scale-down")
+				require.False(t, selector.Matches(labels.Set{workloadv1alpha1.GroupNameLabelKey: protectedGroup}), "unknown protected history never authorizes deletion")
+				require.True(t, selector.Matches(labels.Set{workloadv1alpha1.GroupNameLabelKey: oldGroup}), "the eligible old group may roll out using the ready surge's availability")
+				deletions++
+			}
 		}
 	}
+	require.Equal(t, 1, deletions, "independent rollout can progress without discarding its ready surge")
+	require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(utils.GetNamespaceName(current), oldGroup))
 	require.Equal(t, datastore.ServingGroupRunning, surgeStatus)
 	require.Equal(t, surgeStatus, c.store.GetServingGroupStatus(utils.GetNamespaceName(current), surgeGroup), "target surge must not enter Deleting")
 	afterRoles, err := c.store.GetRoleList(utils.GetNamespaceName(current), surgeGroup, "decode")
@@ -450,6 +466,99 @@ func TestAppliedHistoryErrorDoesNotShrinkReadySurge(t *testing.T) {
 	require.Len(t, pods.Items, 3, "target surge must survive while the old eligible group still needs rollout")
 	for i := range pods.Items {
 		require.Equal(t, uids[pods.Items[i].Name], pods.Items[i].UID)
+	}
+}
+
+func TestAppliedHistoryUnavailableDoesNotBlockIndependentRollout(t *testing.T) {
+	for _, strategy := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
+		for _, maxUnavailable := range []int32{2, 1} {
+			t.Run(fmt.Sprintf("%s/maxUnavailable-%d", strategy, maxUnavailable), func(t *testing.T) {
+				c := newAppliedHistoryController(t)
+				old := appliedHistoryWorkload(strategy, "image:v1", 0)
+				current := appliedHistoryWorkload(strategy, "image:v2", 0)
+				configuration := workloadv1alpha1.RollingUpdateConfiguration{
+					Partition: ptr.To(intstr.FromInt32(0)), MaxSurge: ptr.To(intstr.FromInt32(0)), MaxUnavailable: ptr.To(intstr.FromInt32(maxUnavailable)),
+				}
+				unknownGroup := utils.GenerateServingGroupName(current.Name, 0)
+				knownGroup, knownRole := utils.GenerateServingGroupName(current.Name, 1), "decode-0"
+				if strategy == workloadv1alpha1.ServingGroupRollingUpdate {
+					old.Spec.Replicas, current.Spec.Replicas = ptr.To[int32](2), ptr.To[int32](2)
+					current.Spec.RolloutStrategy.RollingUpdateConfiguration = &configuration
+				} else {
+					old.Spec.Template.Roles[0].Replicas, current.Spec.Template.Roles[0].Replicas = ptr.To[int32](2), ptr.To[int32](2)
+					current.Spec.Template.Roles[0].RollingUpdateConfiguration = configuration
+					knownGroup, knownRole = unknownGroup, "decode-1"
+					// The SG history is valid; only one contained Role's history is
+					// unavailable, so its peer can still be compared independently.
+					c.store.AddServingGroup(utils.GetNamespaceName(current), 0, "old")
+				}
+				current.Status.CurrentRevision = "old"
+				recordTestRevision(t, c.kubeClientSet, old, "old")
+				recordTestRevision(t, c.kubeClientSet, current, "new")
+				for ordinal, revision := range []string{"unknown", "old"} {
+					groupOrdinal, roleOrdinal := ordinal, 0
+					if strategy == workloadv1alpha1.RoleRollingUpdate {
+						groupOrdinal, roleOrdinal = 0, ordinal
+					}
+					seedAppliedRole(t, c, old, old.Spec.Template.Roles[0], groupOrdinal, roleOrdinal, revision, -1)
+					group := utils.GenerateServingGroupName(current.Name, groupOrdinal)
+					require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(current), group, "decode", utils.GenerateRoleID("decode", roleOrdinal), datastore.RoleRunning))
+					require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(current), group, datastore.ServingGroupRunning))
+				}
+				_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(current.Namespace).Create(context.Background(), current, metav1.CreateOptions{})
+				require.NoError(t, err)
+				require.NoError(t, c.modelServingsInformer.GetIndexer().Add(current))
+				client := c.kubeClientSet.(*kubefake.Clientset)
+				client.ClearActions()
+
+				err = c.syncModelServing(context.Background(), namespacedKey(current.Namespace, current.Name))
+				require.ErrorContains(t, err, "ControllerRevision is missing", "safe independent progress must still return the history error for retry")
+				unknownLabels := labels.Set{
+					workloadv1alpha1.GroupNameLabelKey: unknownGroup,
+					workloadv1alpha1.RoleLabelKey:      "decode",
+					workloadv1alpha1.RoleIDKey:         "decode-0",
+				}
+				knownLabels := labels.Set{
+					workloadv1alpha1.GroupNameLabelKey: knownGroup,
+					workloadv1alpha1.RoleLabelKey:      "decode",
+					workloadv1alpha1.RoleIDKey:         knownRole,
+				}
+				deletions := 0
+				for _, action := range client.Actions() {
+					if action.GetResource().Resource != "pods" {
+						continue
+					}
+					require.NotEqual(t, "delete", action.GetVerb(), "rollout must use scoped unit deletion")
+					if action.GetVerb() != "delete-collection" {
+						continue
+					}
+					selector := action.(kubetesting.DeleteCollectionAction).GetListRestrictions().Labels
+					require.False(t, selector.Matches(unknownLabels), "unknown history never authorizes deletion of that unit")
+					require.True(t, selector.Matches(knownLabels), "only the independently verified old unit can roll out")
+					deletions++
+				}
+				wantDeletions := 0
+				if maxUnavailable == 2 {
+					wantDeletions = 1
+				}
+				require.Equal(t, wantDeletions, deletions, "minAvailable=0 permits the known unit to progress; minAvailable=1 requires keeping it")
+				require.Equal(t, datastore.ServingGroupCreating, c.store.GetServingGroupStatus(utils.GetNamespaceName(current), unknownGroup), "unknown applied history cannot retain Running availability credit")
+				if strategy == workloadv1alpha1.ServingGroupRollingUpdate {
+					wantStatus := datastore.ServingGroupRunning
+					if wantDeletions > 0 {
+						wantStatus = datastore.ServingGroupDeleting
+					}
+					require.Equal(t, wantStatus, c.store.GetServingGroupStatus(utils.GetNamespaceName(current), knownGroup))
+				} else {
+					require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(utils.GetNamespaceName(current), unknownGroup, "decode", "decode-0"))
+					wantStatus := datastore.RoleRunning
+					if wantDeletions > 0 {
+						wantStatus = datastore.RoleDeleting
+					}
+					require.Equal(t, wantStatus, c.store.GetRoleStatus(utils.GetNamespaceName(current), knownGroup, "decode", knownRole))
+				}
+			})
+		}
 	}
 }
 
