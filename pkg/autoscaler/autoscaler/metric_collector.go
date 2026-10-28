@@ -79,9 +79,6 @@ func NewMetricCollector(target *v1alpha1.Target, policy *v1alpha1.AutoscalingPol
 type HistogramInfo struct {
 	PodStartTime *metav1.Time
 	HistogramMap map[string]*histogram.Snapshot
-	// RestartCount is the pod's container restart count when the snapshots were
-	// taken, without the runtime sidecar (see engineRestartCount).
-	RestartCount int32
 }
 
 type Scope struct {
@@ -117,10 +114,10 @@ func (collector *MetricCollector) UpdateMetrics(
 	unreadyInstancesCountByMetric = make(map[string]int32)
 	readyInstancesMetrics = make(map[string][]algorithm.Metrics)
 
-	pastHistograms, ok := collector.PastHistograms.GetLastUnfreshSnapshot()
-	if !ok {
-		pastHistograms = make(map[string]HistogramInfo)
-	}
+	// pastHistograms are the stored snapshots, oldest first. The oldest one is
+	// the baseline, just over 60 seconds old. The list is empty until a snapshot
+	// is that old, and histograms are then compared with an empty baseline.
+	pastHistograms := collector.PastHistograms.GetSnapshotsSinceLastUnfresh()
 	currentHistograms := make(map[string]HistogramInfo)
 
 	// Group pod metrics by identical PodMetricSource (uri/port/selector) so we
@@ -240,7 +237,7 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	podLister listerv1.PodLister,
 	podSource *v1alpha1.PodMetricSource,
 	specs []podMetricSpec,
-	pastHistograms map[string]HistogramInfo,
+	pastHistograms []map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
 ) (values map[string]algorithm.Metrics, unreadyPods sets.Set[string], err error) {
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
@@ -315,10 +312,10 @@ func (collector *MetricCollector) collectPodMetrics(
 	podSource *v1alpha1.PodMetricSource,
 	wanted map[string][]string,
 	values map[string]float64,
-	pastHistograms map[string]HistogramInfo,
+	pastHistograms []map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
 ) error {
-	pastHistogramMap := pastHistogramMapForPod(pod, pastHistograms)
+	pastHistogramChains := pastHistogramChainsForPod(pod, pastHistograms)
 
 	currentHistogramMap := currentHistograms[pod.Name].HistogramMap
 	if currentHistogramMap == nil {
@@ -341,7 +338,7 @@ func (collector *MetricCollector) collectPodMetrics(
 			continue
 		}
 		for _, policyKey := range policyKeys {
-			v, snapshot, gotValue, extractErr := extractMetricFromFamily(mf, pastHistogramMap[policyKey])
+			v, snapshot, gotValue, extractErr := extractMetricFromFamily(mf, pastHistogramChains[policyKey])
 			if extractErr != nil {
 				return extractErr
 			}
@@ -357,48 +354,35 @@ func (collector *MetricCollector) collectPodMetrics(
 	currentHistograms[pod.Name] = HistogramInfo{
 		PodStartTime: pod.Status.StartTime,
 		HistogramMap: currentHistogramMap,
-		RestartCount: engineRestartCount(pod),
 	}
 	return nil
 }
 
-// runtimeSidecarContainerName is the name of the Kthena runtime sidecar in the
-// generated pod templates. The sidecar only relays the engine's /metrics, so its
-// restarts do not reset the engine's histograms.
-const runtimeSidecarContainerName = "runtime"
+// samePod reports whether past was recorded for this same pod. A pod that was
+// deleted and created again with the same name has a different start time.
+func samePod(pod *corev1.Pod, past HistogramInfo) bool {
+	return pod.Status.StartTime != nil && past.PodStartTime != nil &&
+		pod.Status.StartTime.Equal(past.PodStartTime)
+}
 
-// engineRestartCount sums the restart counts of the pod's containers, skipping
-// the runtime sidecar. A change means the engine restarted and its histograms
-// started again from zero.
-func engineRestartCount(pod *corev1.Pod) int32 {
-	var restarts int32
-	for _, status := range pod.Status.ContainerStatuses {
-		if status.Name == runtimeSidecarContainerName {
+// pastHistogramChainsForPod returns this pod's earlier histograms for each
+// metric, oldest first. The oldest one is the baseline that the current
+// histogram is compared with. A snapshot is skipped when this pod is not in
+// it (for example, because the pod's scrape failed) or when it was taken from
+// an earlier pod with the same name, which had a different start time. If a
+// snapshot is missing only one metric, it is skipped for that metric only.
+func pastHistogramChainsForPod(pod *corev1.Pod, pastHistograms []map[string]HistogramInfo) map[string][]*histogram.Snapshot {
+	chains := map[string][]*histogram.Snapshot{}
+	for _, histograms := range pastHistograms {
+		info, ok := histograms[pod.Name]
+		if !ok || !samePod(pod, info) {
 			continue
 		}
-		restarts += status.RestartCount
+		for policyKey, snapshot := range info.HistogramMap {
+			chains[policyKey] = append(chains[policyKey], snapshot)
+		}
 	}
-	return restarts
-}
-
-// sameEngine reports whether pod still runs the same engine as when past was
-// recorded: the pod was not recreated (same StartTime) and its engine did not
-// restart (same engineRestartCount).
-func sameEngine(pod *corev1.Pod, past HistogramInfo) bool {
-	return pod.Status.StartTime != nil && past.PodStartTime != nil &&
-		pod.Status.StartTime.Equal(past.PodStartTime) &&
-		past.RestartCount == engineRestartCount(pod)
-}
-
-// pastHistogramMapForPod returns the previous histogram snapshots for pod, but
-// only when neither the pod nor its engine container has restarted since they
-// were recorded.
-func pastHistogramMapForPod(pod *corev1.Pod, pastHistograms map[string]HistogramInfo) map[string]*histogram.Snapshot {
-	pastValue, ok := pastHistograms[pod.Name]
-	if ok && sameEngine(pod, pastValue) {
-		return pastValue.HistogramMap
-	}
-	return map[string]*histogram.Snapshot{}
+	return chains
 }
 
 func (collector *MetricCollector) scrapePod(ctx context.Context, pod *corev1.Pod, podSource *v1alpha1.PodMetricSource) (string, error) {
@@ -462,8 +446,9 @@ func parsePrometheusFamilies(body string, wanted map[string][]string) (map[strin
 
 // extractMetricFromFamily returns the scalar value (and histogram snapshot, when
 // applicable) for mf. Counter and gauge families may contain multiple labeled
-// samples, so their values are summed.
-func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogram *histogram.Snapshot) (value float64, histSnapshot *histogram.Snapshot, found bool, err error) {
+// samples, so their values are summed. pastHistograms are this pod's earlier
+// snapshots of the metric, oldest first. The first one is the baseline.
+func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistograms []*histogram.Snapshot) (value float64, histSnapshot *histogram.Snapshot, found bool, err error) {
 	if len(mf.Metric) < 1 {
 		return 0, nil, false, nil
 	}
@@ -501,15 +486,14 @@ func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogra
 		}
 		snapshot := histogram.NewSnapshotOfHistogram(hist)
 		past := histogram.NewDefaultSnapshot()
-		// If the engine restarted without a container restart (so the pod's
-		// restart count did not change), its histogram started again from zero
-		// and the baseline cannot be subtracted from it. Compare against an
-		// empty baseline instead of returning an error or a wrong quantile.
-		if pastHistogram != nil {
-			if snapshot.ResetSince(pastHistogram) {
+		// If the engine restarted since the baseline, its histogram started again
+		// from zero and the baseline cannot be subtracted from it. Compare against
+		// an empty baseline instead of returning an error or a wrong quantile.
+		if len(pastHistograms) > 0 {
+			if resetInChain(pastHistograms, snapshot) {
 				klog.V(4).Infof("histogram %s was reset since the baseline, comparing against an empty baseline", mf.GetName())
 			} else {
-				past = pastHistogram
+				past = pastHistograms[0]
 			}
 		}
 		quantile, qErr := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
@@ -520,6 +504,21 @@ func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogra
 	default:
 		return 0, nil, false, fmt.Errorf("unsupported metric type %v", mf.GetType())
 	}
+}
+
+// resetInChain reports whether the histogram was reset anywhere between the
+// first snapshot in past and current. It checks every pair of neighbouring
+// snapshots, so it finds a reset even if the counts have since grown back
+// above the first snapshot.
+func resetInChain(past []*histogram.Snapshot, current *histogram.Snapshot) bool {
+	// Copy past so that appending current cannot change the caller's slice.
+	chain := append(slices.Clone(past), current)
+	for i := 1; i < len(chain); i++ {
+		if chain[i].ResetSince(chain[i-1]) {
+			return true
+		}
+	}
+	return false
 }
 
 func (collector *MetricCollector) fetchPrometheusMetric(ctx context.Context, src *v1alpha1.PrometheusMetricSource) (float64, error) {

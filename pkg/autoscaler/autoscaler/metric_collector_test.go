@@ -354,16 +354,17 @@ time_to_first_token_seconds_count %d
 		return families[metricName]
 	}
 
-	// Without a reset, the p95 is computed from the requests made between the
-	// two scrapes (after - before). In the other cases the engine restarted
-	// between the two scrapes without a container restart, so the histogram
-	// started again from zero and the p95 must be computed from the after
-	// histogram alone (an empty baseline).
+	// Each case lists scrapes in time order: the baseline (before), optional
+	// scrapes in the middle (between) and the current scrape (after). Without a
+	// reset, the p95 covers the requests made since the baseline. If the engine
+	// restarted anywhere in the list, its histogram started again from zero, so
+	// the p95 covers the current scrape alone (an empty baseline).
 	tests := []struct {
-		name   string
-		before [3]int
-		after  [3]int
-		want   float64
+		name    string
+		before  [3]int
+		between [][3]int
+		after   [3]int
+		want    float64
 	}{
 		{
 			// 5 new requests (3, 4, 5 cumulative), so the p95 is in the le="2"
@@ -397,13 +398,42 @@ time_to_first_token_seconds_count %d
 			after:  [3]int{60, 110, 120},
 			want:   1.4,
 		},
+		{
+			// The engine restarted after the baseline, so the middle scrape shows
+			// the counts dropped to [3, 4, 5]. By the current scrape they grew
+			// back above the baseline. Comparing only the current scrape with the
+			// baseline finds no reset; the baseline -> middle pair does.
+			name:    "reset between two snapshots, counts grew back",
+			before:  [3]int{57, 76, 85},
+			between: [][3]int{{3, 4, 5}},
+			after:   [3]int{60, 80, 90},
+			want:    1.6,
+		},
+		{
+			// No pair shows a reset, so the baseline is kept and the p95 covers
+			// all 5 requests since it, as in the first case. Measuring from the
+			// middle scrape instead would cover only the last 4 requests and
+			// give 1.
+			name:    "no reset between snapshots keeps the baseline",
+			before:  [3]int{57, 76, 85},
+			between: [][3]int{{57, 76, 86}},
+			after:   [3]int{60, 80, 90},
+			want:    2,
+		},
+	}
+	snapshotOf := func(cumulative [3]int) *histogram.Snapshot {
+		_, snapshot, _, err := extractMetricFromFamily(family(cumulative), nil)
+		require.NoError(t, err)
+		return snapshot
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, baseline, _, err := extractMetricFromFamily(family(tc.before), nil)
-			require.NoError(t, err)
+			past := []*histogram.Snapshot{snapshotOf(tc.before)}
+			for _, cumulative := range tc.between {
+				past = append(past, snapshotOf(cumulative))
+			}
 
-			got, _, found, err := extractMetricFromFamily(family(tc.after), baseline)
+			got, _, found, err := extractMetricFromFamily(family(tc.after), past)
 			require.NoError(t, err)
 			require.True(t, found)
 			assert.InDelta(t, tc.want, got, 1e-9)
@@ -411,39 +441,104 @@ time_to_first_token_seconds_count %d
 	}
 }
 
-func TestPastHistogramMapForPodDropsBaselineAfterEngineRestart(t *testing.T) {
+func TestPastHistogramChainsForPod(t *testing.T) {
 	started := metav1.NewTime(time.Unix(1000, 0))
-	baseline := map[string]*histogram.Snapshot{"ttft": histogram.NewDefaultSnapshot()}
-	past := map[string]HistogramInfo{
-		"pod-a": {PodStartTime: &started, RestartCount: 0, HistogramMap: baseline},
+	earlierPod := metav1.NewTime(time.Unix(500, 0))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-a"},
+		Status:     corev1.PodStatus{StartTime: &started},
 	}
-	podWith := func(startedAt metav1.Time, sidecarRestarts, engineRestarts int32) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "pod-a"},
-			Status: corev1.PodStatus{
-				StartTime: &startedAt,
-				ContainerStatuses: []corev1.ContainerStatus{
-					{Name: runtimeSidecarContainerName, RestartCount: sidecarRestarts},
-					{Name: "vllm", RestartCount: engineRestarts},
-				},
-			},
-		}
+	// t0, t30 and t45 stand for the pod's histograms 0 s, 30 s and 45 s into the window.
+	t0, t30, t45 := histogram.NewDefaultSnapshot(), histogram.NewDefaultSnapshot(), histogram.NewDefaultSnapshot()
+	// entry builds one stored snapshot that contains pod-a.
+	entry := func(startedAt *metav1.Time, snapshots map[string]*histogram.Snapshot) map[string]HistogramInfo {
+		return map[string]HistogramInfo{"pod-a": {PodStartTime: startedAt, HistogramMap: snapshots}}
 	}
-	empty := map[string]*histogram.Snapshot{}
+	// missing is a stored snapshot without pod-a, for example after a failed scrape.
+	missing := map[string]HistogramInfo{}
 
 	tests := []struct {
-		name string
-		pod  *corev1.Pod
-		want map[string]*histogram.Snapshot
+		name           string
+		pastHistograms []map[string]HistogramInfo
+		want           map[string][]*histogram.Snapshot
 	}{
-		{name: "no restart keeps the baseline", pod: podWith(started, 0, 0), want: baseline},
-		{name: "engine restart drops the baseline", pod: podWith(started, 0, 1), want: empty},
-		{name: "sidecar-only restart keeps the baseline", pod: podWith(started, 1, 0), want: baseline},
-		{name: "recreated pod drops the baseline", pod: podWith(metav1.NewTime(time.Unix(2000, 0)), 0, 0), want: empty},
+		{
+			name:           "no history",
+			pastHistograms: nil,
+			want:           map[string][]*histogram.Snapshot{},
+		},
+		{
+			name: "baseline and newer snapshots, oldest first",
+			pastHistograms: []map[string]HistogramInfo{
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t0}),
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t30}),
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t45}),
+			},
+			want: map[string][]*histogram.Snapshot{"ttft": {t0, t30, t45}},
+		},
+		{
+			name: "newer snapshot missing the pod is skipped",
+			pastHistograms: []map[string]HistogramInfo{
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t0}),
+				missing,
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t45}),
+			},
+			want: map[string][]*histogram.Snapshot{"ttft": {t0, t45}},
+		},
+		{
+			name: "newer snapshot missing the metric is skipped",
+			pastHistograms: []map[string]HistogramInfo{
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t0}),
+				entry(&started, map[string]*histogram.Snapshot{}),
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t45}),
+			},
+			want: map[string][]*histogram.Snapshot{"ttft": {t0, t45}},
+		},
+		{
+			name: "pod missing from the baseline starts at the next snapshot",
+			pastHistograms: []map[string]HistogramInfo{
+				missing,
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t30}),
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t45}),
+			},
+			want: map[string][]*histogram.Snapshot{"ttft": {t30, t45}},
+		},
+		{
+			name: "metric missing from the baseline starts at the next snapshot",
+			pastHistograms: []map[string]HistogramInfo{
+				entry(&started, map[string]*histogram.Snapshot{}),
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t30}),
+			},
+			want: map[string][]*histogram.Snapshot{"ttft": {t30}},
+		},
+		{
+			name: "pod missing from every snapshot has no chain",
+			pastHistograms: []map[string]HistogramInfo{
+				missing,
+				missing,
+			},
+			want: map[string][]*histogram.Snapshot{},
+		},
+		{
+			name: "snapshots of an earlier pod with the same name are skipped",
+			pastHistograms: []map[string]HistogramInfo{
+				entry(&earlierPod, map[string]*histogram.Snapshot{"ttft": t0}),
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t30}),
+				entry(&started, map[string]*histogram.Snapshot{"ttft": t45}),
+			},
+			want: map[string][]*histogram.Snapshot{"ttft": {t30, t45}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, pastHistogramMapForPod(tt.pod, past))
+			got := pastHistogramChainsForPod(pod, tt.pastHistograms)
+			require.Len(t, got, len(tt.want))
+			for metric, wantChain := range tt.want {
+				require.Len(t, got[metric], len(wantChain))
+				for i := range wantChain {
+					assert.Same(t, wantChain[i], got[metric][i], "%s[%d]", metric, i)
+				}
+			}
 		})
 	}
 }
