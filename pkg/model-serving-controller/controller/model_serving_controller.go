@@ -1379,14 +1379,19 @@ func (c *ModelServingController) manageRollingUpdate(ctx context.Context, ms *wo
 	var notRunningOutdatedGroups []datastore.ServingGroup
 	var runningOutdatedGroups []datastore.ServingGroup
 	var groupsAfterPartition []datastore.ServingGroup
+	newServingGroupUnavailableCount := 0
 	for _, group := range servingGroupList {
 		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
 		if ordinal >= partition {
 			groupsAfterPartition = append(groupsAfterPartition, group)
+		} else if (ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate) &&
+			group.Status != datastore.ServingGroupRunning && c.compareServingGroupTemplate(ctx, ms, group, revision) == templateUnknown {
+			// Independent progress after a protected history error must not
+			// treat the unverified group as spare availability outside partition.
+			newServingGroupUnavailableCount++
 		}
 	}
 
-	newServingGroupUnavailableCount := 0
 	for _, sg := range groupsAfterPartition {
 		comparison := c.compareServingGroupTemplate(ctx, ms, sg, revision)
 		if sg.Status != datastore.ServingGroupRunning {
