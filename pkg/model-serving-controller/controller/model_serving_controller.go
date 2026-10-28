@@ -703,7 +703,17 @@ func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, m
 	}
 	for _, servingGroup := range servingGroupList {
 		if servingGroup.Status != datastore.ServingGroupDeleting {
-			if err := c.createOrUpdatePodGroupByServingGroup(ctx, ms, servingGroup.Name); err != nil {
+			workload := ms
+			if isServingGroupRollingUpdate && c.podGroupManager.HasPodGroupCRD() {
+				workload, err = c.revisionHistory(ctx, ms).workload(ctx, servingGroup.Revision)
+				if err != nil {
+					// Do not overwrite the applied gang requirements with a target
+					// layout when history is unavailable. Reconcile returns this
+					// cached error after processing independent safe actions.
+					continue
+				}
+			}
+			if err := c.createOrUpdatePodGroupByServingGroup(ctx, workload, servingGroup.Name); err != nil {
 				return fmt.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroup.Name, err)
 			}
 		}
@@ -892,6 +902,12 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 					workload, historyErr := c.revisionHistory(ctx, ms).workload(ctx, recreatedRevision)
 					if historyErr != nil {
 						errs = append(errs, historyErr)
+						continue
+					}
+					// The whole unit may select a different worker layout. Align
+					// its gang requirements before creating the replacement Pods.
+					if err := c.createOrUpdatePodGroupByServingGroup(ctx, workload, group.Name); err != nil {
+						errs = append(errs, err)
 						continue
 					}
 					// No live member (including terminating Pods) remains. Reset

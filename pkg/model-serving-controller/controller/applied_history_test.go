@@ -20,10 +20,12 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -700,4 +702,122 @@ func TestAppliedHistoryReadinessSharesSnapshotAcrossInstances(t *testing.T) {
 	}
 	require.Positive(t, reads, "readiness must establish the applied history")
 	require.LessOrEqual(t, reads, 2, "shared history lookup must stay bounded instead of performing one GET per instance")
+}
+
+func TestAppliedHistoryPodGroupUsesAppliedLayoutAndCurrentRoleCount(t *testing.T) {
+	for _, layout := range [][2]int32{{1, 2}, {2, 1}} {
+		t.Run(fmt.Sprintf("workers-%d-to-%d", layout[0], layout[1]), func(t *testing.T) {
+			c := newAppliedHistoryController(t)
+			old := appliedHistoryWorkload(workloadv1alpha1.ServingGroupRollingUpdate, "image:v1", layout[0])
+			current := appliedHistoryWorkload(workloadv1alpha1.ServingGroupRollingUpdate, "image:v2", layout[1])
+			old.Spec.SchedulerName, current.Spec.SchedulerName = "volcano", "volcano"
+			old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}
+			old.Spec.Template.Roles[0].WorkerTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}
+			current.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("8")}
+			current.Spec.Template.Roles[0].WorkerTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("16")}
+			current.Spec.Template.Roles[0].Replicas = ptr.To[int32](3)
+			recordTestRevision(t, c.kubeClientSet, old, "old")
+			recordTestRevision(t, c.kubeClientSet, current, "new")
+			seedAppliedRole(t, c, old, old.Spec.Template.Roles[0], 0, 0, "old", 1)
+			group := utils.GenerateServingGroupName(old.Name, 0)
+			var inputs []*workloadv1alpha1.ModelServing
+			c.podGroupManager = &fakePodGroupManager{
+				hasCRD: true,
+				createOrUpdateFunc: func(_ context.Context, ms *workloadv1alpha1.ModelServing, pgName string) (error, time.Duration) {
+					require.Equal(t, group, pgName)
+					inputs = append(inputs, ms.DeepCopy())
+					return nil, 0
+				},
+			}
+			ctx := c.withRevisionHistory(context.Background(), current)
+			require.NoError(t, c.syncServingGroupReplicas(ctx, current, "new"))
+			require.Len(t, inputs, 1)
+			role := inputs[0].Spec.Template.Roles[0]
+			require.Equal(t, layout[0], role.WorkerReplicas, "PodGroup minMember must follow the applied Pod layout")
+			require.Equal(t, int32(3), *role.Replicas, "replica count remains the current operational control")
+			expected := old.Spec.Template.Roles[0].DeepCopy()
+			// Persisted Pod templates include the effective ModelServing scheduler.
+			expected.EntryTemplate.Spec.SchedulerName = "volcano"
+			expected.WorkerTemplate.Spec.SchedulerName = "volcano"
+			require.Equal(t, expected.EntryTemplate, role.EntryTemplate, "entry image and resources must come from applied history")
+			require.Equal(t, expected.WorkerTemplate, role.WorkerTemplate, "worker image and minResources inputs must come from applied history")
+			require.Equal(t, "volcano", inputs[0].Spec.SchedulerName)
+			require.Equal(t, current.Spec.Template.GangPolicy, inputs[0].Spec.Template.GangPolicy, "do not loosen gang requirements to hide a layout mismatch")
+			require.NoError(t, c.syncRoleReplicas(ctx, current, "new"))
+			pods, err := c.kubeClientSet.CoreV1().Pods(current.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, pods.Items, 3*(1+int(layout[0])), "PodGroup input and repaired/scaled members must describe the same layout")
+			for i := range pods.Items {
+				require.Equal(t, "old", utils.ObjectRevision(&pods.Items[i]))
+			}
+		})
+	}
+}
+
+func TestAppliedHistoryPodGroupUnknownHistoryDoesNotUseTarget(t *testing.T) {
+	c := newAppliedHistoryController(t)
+	old := appliedHistoryWorkload(workloadv1alpha1.ServingGroupRollingUpdate, "image:v1", 1)
+	current := appliedHistoryWorkload(workloadv1alpha1.ServingGroupRollingUpdate, "image:v2", 2)
+	old.Spec.SchedulerName, current.Spec.SchedulerName = "volcano", "volcano"
+	recordTestRevision(t, c.kubeClientSet, current, "new")
+	seedAppliedRole(t, c, old, old.Spec.Template.Roles[0], 0, 0, "unknown", 1)
+	calls := 0
+	c.podGroupManager = &fakePodGroupManager{
+		hasCRD: true,
+		createOrUpdateFunc: func(_ context.Context, _ *workloadv1alpha1.ModelServing, _ string) (error, time.Duration) {
+			calls++
+			return nil, 0
+		},
+	}
+	ctx := c.withRevisionHistory(context.Background(), current)
+	require.NoError(t, c.syncServingGroupReplicas(ctx, current, "new"))
+	require.Zero(t, calls, "unknown applied history cannot authorize target PodGroup requirements")
+	require.ErrorContains(t, c.revisionHistory(ctx, current).errors(), "ControllerRevision is missing", "unresolved history must remain retryable")
+}
+
+func TestAppliedHistoryPodGroupUpdatedBeforeWholeServingGroupRecreation(t *testing.T) {
+	c := newAppliedHistoryController(t)
+	old := appliedHistoryWorkload(workloadv1alpha1.ServingGroupRollingUpdate, "image:v1", 1)
+	current := appliedHistoryWorkload(workloadv1alpha1.ServingGroupRollingUpdate, "image:v2", 2)
+	old.Spec.SchedulerName, current.Spec.SchedulerName = "volcano", "volcano"
+	current.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+	recordTestRevision(t, c.kubeClientSet, old, "old")
+	recordTestRevision(t, c.kubeClientSet, current, "new")
+	group := utils.GenerateServingGroupName(current.Name, 0)
+	hash, err := utils.RoleRevisionHash(old, "decode")
+	require.NoError(t, err)
+	// All old members are gone, while the datastore still records the old unit.
+	c.store.AddServingGroup(utils.GetNamespaceName(current), 0, "old")
+	c.store.AddRole(utils.GetNamespaceName(current), group, "decode", "decode-0", "old", hash)
+	var inputs []*workloadv1alpha1.ModelServing
+	var operations []string
+	c.podGroupManager = &fakePodGroupManager{
+		hasCRD: true,
+		createOrUpdateFunc: func(_ context.Context, ms *workloadv1alpha1.ModelServing, pgName string) (error, time.Duration) {
+			require.Equal(t, group, pgName)
+			inputs = append(inputs, ms.DeepCopy())
+			operations = append(operations, "podgroup")
+			return nil, 0
+		},
+	}
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	client.PrependReactor("create", "pods", func(kubetesting.Action) (bool, runtime.Object, error) {
+		operations = append(operations, "pod")
+		return false, nil, nil
+	})
+	ctx := c.withRevisionHistory(context.Background(), current)
+	require.NoError(t, c.syncRoleReplicas(ctx, current, "new"))
+	require.Len(t, inputs, 1, "whole-unit version selection must update PodGroup requirements in the same reconciliation")
+	expected := current.DeepCopy()
+	expected.Spec.Template.Roles[0].EntryTemplate.Spec.SchedulerName = "volcano"
+	expected.Spec.Template.Roles[0].WorkerTemplate.Spec.SchedulerName = "volcano"
+	require.Equal(t, expected.Spec.Template.Roles, inputs[0].Spec.Template.Roles)
+	require.Equal(t, "podgroup", operations[0], "new layout requirements must be synchronized before creating its Pods")
+	require.Len(t, operations, 7, "one PodGroup update must precede the six target Pods")
+	pods, err := client.CoreV1().Pods(current.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 6)
+	for i := range pods.Items {
+		require.Equal(t, "new", utils.ObjectRevision(&pods.Items[i]))
+	}
 }
