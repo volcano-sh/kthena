@@ -53,10 +53,10 @@ a rollout, and matching hashes do not conceal different data.
 
 | Input | Effect on rolling updates |
 | --- | --- |
-| Role names, entry templates, worker replica count | Included. Role list order is normalized. |
+| Role names, entry templates, worker replica count | Included. The Role name set is immutable after creation; list order is normalized. Templates and worker counts may change. |
 | Worker templates | Included when workers exist; retained in snapshots even when unused. |
 | Pod-template labels, annotations and PodSpec | Included, except inputs overwritten by the controller as described below. |
-| Ordered plugins, their type, config and effective Entry/Worker scope | Included for Roles to which they apply. Adding another Role to a plugin whitelist does not roll existing targets. Worker-only plugins do not roll entry-only Roles. |
+| Ordered plugins, their type, config and effective Entry/Worker scope | Stored in snapshots and included in each applicable Role's comparison. Substantive plugin updates are rejected by admission. Historical comparison remains necessary for recovery and older persisted objects. |
 | Top-level `schedulerName` | Stored in snapshots, but changing the effective scheduler is rejected by the update webhook. Omitting it defaults to `volcano` at admission; an explicit empty string uses Kubernetes `default-scheduler`. |
 | ModelServing/Role `replicas` and rollout controls (`partition`, `maxSurge`, `maxUnavailable`, rollout strategy) | Not template identity; applied as current scaling/rollout controls. |
 | `recoveryPolicy`, `revisionHistoryLimit`, ModelServing metadata/status, ServingGroup `restartGracePeriodSeconds`, `gangPolicy`, `networkTopology` | Not template identity. |
@@ -66,13 +66,26 @@ Plugins are compared as ordered configuration inputs, not by executing hooks and
 comparing their output. Kubernetes Pod admission defaults are not broadly removed
 from templates: plugins may observe those inputs before Pod admission.
 
+The update webhook rejects adding, removing or changing plugins, including their
+order, config and scope, even at zero replicas. Equivalent representations remain
+allowed: omitted and empty lists, effective BuiltIn/All defaults, reordered or
+duplicated `scope.roles`, and JSON object key order or whitespace. JSON arrays
+retain their order; omitted config is not equivalent to an empty object. Changing
+plugins together with an image or replica count rejects the entire request. Use a
+new ModelServing when a different plugin configuration is required. Existing Role
+names may be reordered but cannot be added, removed or renamed, including Roles
+with zero replicas.
+
 Older Roles-only revisions do not contain scheduler/plugin snapshots. On the first
 upgrade, the controller creates a durable compatibility baseline from historical
 Roles and the current scheduler/plugins, retaining running Pods and their revision
 identities. The original revision data is not rewritten; a metadata annotation
-records its baseline. **Plugin edits simultaneous with this first migration cannot
-be detected**, because the old snapshot lacks the previous plugin configuration.
-Later plugin edits are compared with the stored baseline, including after restart.
+records its baseline. **Plugin changes persisted before the first migration cannot
+be reconstructed**, because the old snapshot lacks the previous plugin
+configuration. The immutable update webhook prevents new substantive plugin edits;
+historical comparison still detects differences from the stored baseline in older
+or admission-bypassed objects, including after restart. It does not repair a mixed
+workload that existed before enforcement.
 
 Missing, malformed, foreign-owned or unsupported history pauses affected
 template-driven creation/deletion and is retried; it is never evidence that a

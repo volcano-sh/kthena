@@ -153,6 +153,80 @@ func (h *revisionHistory) workload(ctx context.Context, revision string) (*workl
 	return h.snapshots[revision].workload.DeepCopy(), nil
 }
 
+// appliedRoleTemplate resolves an existing rollout unit, independently of its
+// eligibility for a future rollout. Current replica counts and controls are
+// overlaid by the history decoder; only the applied template comes from history.
+func (c *ModelServingController) appliedRoleTemplate(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName string, instance datastore.Role) (workloadv1alpha1.Role, string, string, error) {
+	revision := instance.Revision
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type != workloadv1alpha1.RoleRollingUpdate {
+		revision, _ = c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), groupName)
+	}
+	workload, err := c.revisionHistory(ctx, ms).workload(ctx, revision)
+	if err != nil {
+		return workloadv1alpha1.Role{}, revision, "", err
+	}
+	for _, role := range workload.Spec.Template.Roles {
+		if role.Name == roleName {
+			hash, err := utils.RoleRevisionHash(workload, roleName)
+			return role, revision, hash, err
+		}
+	}
+	return workloadv1alpha1.Role{}, revision, "", fmt.Errorf("Role %s is absent from applied revision %s", roleName, revision)
+}
+
+// rolePodsComplete checks each required identity rather than counting arbitrary
+// same-label Pods. Terminating members still occupy their names, but never
+// supply readiness. A foreign or extra worker cannot stand in for a missing one.
+func rolePodsComplete(ms *workloadv1alpha1.ModelServing, groupName, roleID string, role workloadv1alpha1.Role, revision string, pods []*corev1.Pod, requireReady bool) bool {
+	members := make(map[string]*corev1.Pod, len(pods))
+	for _, pod := range pods {
+		if pod.Namespace == ms.Namespace && utils.IsOwnedByModelServingWithUID(pod, ms.UID) &&
+			pod.Labels[workloadv1alpha1.GroupNameLabelKey] == groupName &&
+			pod.Labels[workloadv1alpha1.RoleLabelKey] == role.Name &&
+			pod.Labels[workloadv1alpha1.RoleIDKey] == roleID && utils.ObjectRevision(pod) == revision {
+			members[pod.Name] = pod
+		}
+	}
+	for ordinal := 0; ordinal <= int(role.WorkerReplicas); ordinal++ {
+		pod := members[utils.GeneratePodName(groupName, roleID, ordinal)]
+		if pod == nil || (requireReady && (pod.DeletionTimestamp != nil || !utils.IsPodRunningAndReady(pod))) {
+			return false
+		}
+	}
+	return true
+}
+
+// unitHasPods includes terminating members. Confirm absence against the API to
+// avoid treating an informer observation gap after CREATE as whole-unit loss.
+func (c *ModelServingController) unitHasPods(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleID string) (bool, error) {
+	index, key := GroupNameKey, ms.Namespace+"/"+groupName
+	selector := labels.Set{workloadv1alpha1.GroupNameLabelKey: groupName}
+	if roleID != "" {
+		roleName, _ := utils.GetParentNameAndOrdinal(roleID)
+		index, key = RoleIDKey, ms.Namespace+"/"+groupName+"/"+roleName+"/"+roleID
+		selector[workloadv1alpha1.RoleIDKey] = roleID
+	}
+	pods, err := c.getPodsByIndex(index, key)
+	if err != nil {
+		return false, err
+	}
+	for _, pod := range pods {
+		if utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			return true, nil
+		}
+	}
+	actual, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return false, err
+	}
+	for i := range actual.Items {
+		if utils.IsOwnedByModelServingWithUID(&actual.Items[i], ms.UID) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (h *revisionHistory) roleHash(roleName string) (string, error) {
 	if hash, ok := h.roleHashes[roleName]; ok {
 		return hash, nil

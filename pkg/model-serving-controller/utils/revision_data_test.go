@@ -97,6 +97,47 @@ func TestBuildRevisionDataCanonicalSemantics(t *testing.T) {
 	}
 }
 
+func TestCanonicalPluginsPreservesInputAndFullScope(t *testing.T) {
+	input := []workloadv1alpha1.PluginSpec{{
+		Name:   "worker-plugin",
+		Config: &apiextensionsv1.JSON{Raw: []byte(`{"z":9007199254740993,"a":[2,1]}`)},
+		Scope: &workloadv1alpha1.PluginScope{
+			Target: workloadv1alpha1.PluginTargetWorker,
+			Roles:  []string{"prefill", "decode", "prefill"},
+		},
+	}}
+	before, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := CanonicalPlugins(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(canonical) != 1 || canonical[0].Scope.Target != workloadv1alpha1.PluginTargetWorker || len(canonical[0].Scope.Roles) != 2 {
+		t.Fatalf("canonicalization lost the complete inactive scope: %#v", canonical)
+	}
+	if got := string(canonical[0].Config.Raw); got != `{"a":[2,1],"z":9007199254740993}` {
+		t.Fatalf("canonical config changed array order or numeric precision: %s", got)
+	}
+	// Callers may retain or alter the canonical result; no nested storage may
+	// alias the admission or historical object that was compared.
+	canonical[0].Scope.Roles[0] = "changed"
+	canonical[0].Config.Raw[0] = ' '
+	after, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("canonicalization or its result mutated input: before=%s after=%s", before, after)
+	}
+	for _, raw := range []string{`{"unterminated":`, `{} {}`} {
+		if _, err := CanonicalPlugins([]workloadv1alpha1.PluginSpec{{Name: "invalid", Config: &apiextensionsv1.JSON{Raw: []byte(raw)}}}); err == nil {
+			t.Fatalf("invalid plugin config %q was accepted", raw)
+		}
+	}
+}
+
 func TestBuildRevisionDataDeduplicatesPluginScopeRoles(t *testing.T) {
 	base := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"))
 	base.Spec.Plugins = []workloadv1alpha1.PluginSpec{{
@@ -284,6 +325,8 @@ func TestBuildRevisionDataPreservesPluginConfigNumberPrecision(t *testing.T) {
 }
 
 func TestBuildRevisionDataIsStrategicMergePatchWithReplaceMembership(t *testing.T) {
+	// Defensive history coverage: current admission rejects changes to plugins
+	// and Role membership, but older or admission-bypassed snapshots can differ.
 	current := revisionTestModelServing(
 		revisionTestRole("kept", "kept:current"),
 		revisionTestRole("removed", "removed:current"),
@@ -324,6 +367,8 @@ func TestBuildRevisionDataIsStrategicMergePatchWithReplaceMembership(t *testing.
 }
 
 func TestApplyRevisionPreservesOperationalFields(t *testing.T) {
+	// Restoring persisted history must remain safe even when its identities and
+	// plugin inputs predate the immutable update rules.
 	current := revisionTestModelServing(
 		revisionTestRole("decode", "decode:current"),
 		revisionTestRole("prefill", "prefill:current"),

@@ -57,17 +57,6 @@ func DeepHashObject(hasher hash.Hash, objectToWrite interface{}) {
 	fmt.Fprintf(hasher, "%v", dump.ForHash(objectToWrite))
 }
 
-// removeRoleReplicasForRevision removes fields that do not change rendered pods when calculating modelServing revision hash.
-func removeRoleReplicasForRevision(ms *workloadv1alpha1.ModelServing) *workloadv1alpha1.ModelServing {
-	copy := ms.DeepCopy()
-	for i := range copy.Spec.Template.Roles {
-		copy.Spec.Template.Roles[i].Replicas = nil
-		copy.Spec.Template.Roles[i].RollingUpdateConfiguration = workloadv1alpha1.RollingUpdateConfiguration{}
-	}
-
-	return copy
-}
-
 // ModelServingRevision calculates the revision of a ModelServing object.
 func ModelServingRevision(ms *workloadv1alpha1.ModelServing) string {
 	data, err := BuildRevisionData(ms)

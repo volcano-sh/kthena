@@ -65,10 +65,10 @@ func TestReadyPodWithMissingHistoryRemainsObserved(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, roles, 1)
 	require.Equal(t, "missing", roles[0].Revision)
-	require.Equal(t, datastore.RoleRunning, roles[0].Status)
+	require.Equal(t, datastore.RoleCreating, roles[0].Status)
 	ctx := c.withRevisionHistory(context.Background(), ms)
 	require.NoError(t, c.manageRollingUpdate(ctx, ms, "desired"))
-	require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName))
+	require.Equal(t, datastore.ServingGroupCreating, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName))
 	for _, action := range client.Actions() {
 		if action.GetResource().Resource == "events" {
 			continue // RevisionUnresolved warnings are expected, workload writes are not.

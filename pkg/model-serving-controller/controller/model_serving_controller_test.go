@@ -558,9 +558,11 @@ func TestCheckServingGroupReady(t *testing.T) {
 					for j := 0; j < 2; j++ {
 						pod := &corev1.Pod{
 							ObjectMeta: metav1.ObjectMeta{
-								Namespace: ns,
-								Name:      fmt.Sprintf("prefill-entry-%d", i*2+j),
+								Namespace:       ns,
+								Name:            utils.GeneratePodName(groupName, fmt.Sprintf("prefill-%d", i), j),
+								OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
 								Labels: map[string]string{
+									workloadv1alpha1.RevisionLabelKey:  newHash,
 									workloadv1alpha1.GroupNameLabelKey: groupName,
 									workloadv1alpha1.RoleLabelKey:      "prefill",
 									workloadv1alpha1.RoleIDKey:         fmt.Sprintf("prefill-%d", i),
@@ -588,9 +590,11 @@ func TestCheckServingGroupReady(t *testing.T) {
 					for j := 0; j < 2; j++ {
 						pod := &corev1.Pod{
 							ObjectMeta: metav1.ObjectMeta{
-								Namespace: ns,
-								Name:      fmt.Sprintf("decode-entry-%d", i*2+j),
+								Namespace:       ns,
+								Name:            utils.GeneratePodName(groupName, fmt.Sprintf("decode-%d", i), j),
+								OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
 								Labels: map[string]string{
+									workloadv1alpha1.RevisionLabelKey:  newHash,
 									workloadv1alpha1.GroupNameLabelKey: groupName,
 									workloadv1alpha1.RoleLabelKey:      "decode",
 									workloadv1alpha1.RoleIDKey:         fmt.Sprintf("decode-%d", i),
@@ -629,6 +633,7 @@ func TestCheckServingGroupReady(t *testing.T) {
 						Namespace: ns,
 						Name:      "prefill-entry-0",
 						Labels: map[string]string{
+							workloadv1alpha1.RevisionLabelKey:  newHash,
 							workloadv1alpha1.GroupNameLabelKey: groupName,
 							workloadv1alpha1.RoleLabelKey:      "prefill",
 							workloadv1alpha1.RoleIDKey:         "prefill-0",
@@ -690,6 +695,7 @@ func TestCheckServingGroupReady(t *testing.T) {
 						Namespace: ns,
 						Name:      "prefill-entry-0",
 						Labels: map[string]string{
+							workloadv1alpha1.RevisionLabelKey:  newHash,
 							workloadv1alpha1.GroupNameLabelKey: groupName,
 							workloadv1alpha1.RoleLabelKey:      "prefill",
 							workloadv1alpha1.RoleIDKey:         "prefill-0",
@@ -736,9 +742,10 @@ func TestCheckServingGroupReady(t *testing.T) {
 
 			store := datastore.New()
 			controller := &ModelServingController{
-				podsInformer: podInformer.Informer(),
-				podsLister:   podInformer.Lister(),
-				store:        store,
+				kubeClientSet: kubeClient,
+				podsInformer:  podInformer.Informer(),
+				podsLister:    podInformer.Lister(),
+				store:         store,
 			}
 
 			stop := make(chan struct{})
@@ -752,6 +759,7 @@ func TestCheckServingGroupReady(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: ns,
 					Name:      "test-ms",
+					UID:       "test-ms-uid",
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Template: workloadv1alpha1.ServingGroup{
@@ -770,6 +778,8 @@ func TestCheckServingGroupReady(t *testing.T) {
 					},
 				},
 			}
+
+			recordTestRevision(t, kubeClient, ms, "hash123")
 
 			// Run setup function
 			tt.setupFunc(t, controller, ms, groupName)
@@ -3427,7 +3437,7 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 }
 
 // TestScaleDownServingGroupsWithPartition tests the scaleDownServingGroups function with partition protection.
-// Partition protects the first N existing ServingGroups in ordinal order.
+// Partition uses absolute ordinals; the preexisting scale-down priority buckets remain.
 func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 	tests := []struct {
 		name                   string
@@ -3478,20 +3488,20 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			description:            "Partition-protected replicas should never be deleted even if not ready",
 		},
 		{
-			name:            "partition=1 protects first existing group with sparse ordinals",
+			name:            "partition=1 does not protect sparse ordinals 2 and 5",
 			partition:       ptr.To(intstr.FromInt32(1)),
 			existingIndices: []int{2, 5},
 			expectedCount:   1,
 			podDeletionCosts: map[int]int{
-				2: 0,   // Lowest cost but protected as the first existing group.
+				2: 0,   // Lowest cost and outside the absolute partition.
 				5: 100, // Higher cost but not protected.
 			},
 			groupStatuses: map[int]datastore.ServingGroupStatus{
 				2: datastore.ServingGroupRunning,
 				5: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"2"},
-			description:            "Sparse ordinals do not change the partition-protected prefix",
+			expectedRemainingNames: []string{"5"},
+			description:            "Both sparse ordinals are unprotected; the lower deletion cost is selected",
 		},
 		{
 			name:            "no partition, all replicas can be deleted",
@@ -3694,8 +3704,10 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			// Verify partition protection: protected groups should only be deleted after all non-protected groups are deleted.
 			if tt.partition != nil && tt.partition.IntValue() > 0 {
 				protectedOrdinals := make(map[int]struct{})
-				for i := 0; i < tt.partition.IntValue() && i < len(tt.existingIndices); i++ {
-					protectedOrdinals[tt.existingIndices[i]] = struct{}{}
+				for _, ordinal := range tt.existingIndices {
+					if ordinal < tt.partition.IntValue() {
+						protectedOrdinals[ordinal] = struct{}{}
+					}
 				}
 				// Count how many non-protected groups remain
 				remainingNonProtectedCount := 0
@@ -5489,6 +5501,7 @@ func TestCheckRoleReady(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-model-serving",
 			Namespace: "default",
+			UID:       "test-model-serving-uid",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
@@ -5568,14 +5581,19 @@ func TestCheckRoleReady(t *testing.T) {
 
 			groupName := utils.GenerateServingGroupName(ms.Name, 0)
 
+			recordTestRevision(t, kubeClient, ms, "ready-revision")
+			controller.store.AddRole(utils.GetNamespaceName(ms), groupName, tt.roleName, tt.roleID, "ready-revision", "role-hash")
+
 			// Create pods for the role
 			podIndexer := controller.podsInformer.GetIndexer()
 			for i := 0; i < tt.podCount; i++ {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: ms.Namespace,
-						Name:      fmt.Sprintf("%s-%s-%d", tt.roleID, tt.roleName, i),
+						Namespace:       ms.Namespace,
+						Name:            utils.GeneratePodName(groupName, tt.roleID, i),
+						OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
 						Labels: map[string]string{
+							workloadv1alpha1.RevisionLabelKey:         "ready-revision",
 							workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
 							workloadv1alpha1.RoleLabelKey:             tt.roleName,
@@ -7168,7 +7186,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: ns,
-						Name:      existingPod.name,
+						Name:      utils.GeneratePodName(groupName, roleID, existingPod.workerID),
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: msName,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -7225,9 +7243,9 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			// Create the new pod that triggers handleReadyPod
 			var newPodName string
 			if tt.newPodIsEntry {
-				newPodName = groupName + "-" + roleName + "-0"
+				newPodName = utils.GeneratePodName(groupName, roleID, 0)
 			} else {
-				newPodName = fmt.Sprintf("%s-%s-%d", groupName, roleName, tt.newPodWorkerID)
+				newPodName = utils.GeneratePodName(groupName, roleID, tt.newPodWorkerID)
 			}
 
 			newPod := &corev1.Pod{
@@ -7881,16 +7899,16 @@ func TestHasUpdateableOutdatedServingGroup(t *testing.T) {
 			want:      false,
 		},
 		{
-			name: "partition protects first existing group with sparse ordinals",
+			name: "partition does not protect sparse ordinal beyond threshold",
 			groups: []datastore.ServingGroup{
 				{Name: "recovery-2", Revision: "old", Status: datastore.ServingGroupRunning},
 				{Name: "recovery-5", Revision: "new", Status: datastore.ServingGroupRunning},
 			},
 			partition: 1,
-			want:      false,
+			want:      true,
 		},
 		{
-			name: "outdated group after sparse partition prefix requires surge",
+			name: "outdated sparse group outside partition requires surge",
 			groups: []datastore.ServingGroup{
 				{Name: "recovery-2", Revision: "old", Status: datastore.ServingGroupRunning},
 				{Name: "recovery-5", Revision: "old", Status: datastore.ServingGroupRunning},
@@ -8078,42 +8096,29 @@ func TestSyncServingGroupReplicasHonorsReducedMaxSurge(t *testing.T) {
 	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 2), groups[1].Name)
 }
 
-func TestPartitionProtectedServingGroupReadinessUsesCurrentReplicaControlsForEquivalentTemplate(t *testing.T) {
-	kubeClient := kubefake.NewSimpleClientset()
-	controller, err := NewModelServingController(kubeClient, kthenafake.NewSimpleClientset(), nil, apiextfake.NewSimpleClientset())
-	require.NoError(t, err)
-
-	partition := intstr.FromInt(1)
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{Name: "partition-ready", Namespace: "default", UID: types.UID("partition-ready-uid")},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Replicas: ptr.To[int32](1),
-			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
-				Type:                       workloadv1alpha1.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{Partition: &partition},
-			},
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{Name: "decode", Replicas: ptr.To[int32](2)}}},
-		},
+func TestHistoricalServingGroupReadinessUsesCurrentReplicaControlsForEquivalentTemplate(t *testing.T) {
+	for _, ordinal := range []int{0, 2} {
+		t.Run(fmt.Sprintf("group-%d", ordinal), func(t *testing.T) {
+			controller := newAppliedHistoryController(t)
+			old := appliedHistoryWorkload(workloadv1alpha1.ServingGroupRollingUpdate, "image:v1", 0)
+			current := old.DeepCopy()
+			current.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+			current.Spec.RolloutStrategy.RollingUpdateConfiguration = &workloadv1alpha1.RollingUpdateConfiguration{Partition: ptr.To(intstr.FromInt32(1))}
+			_, err := utils.CreateControllerRevision(context.Background(), controller.kubeClientSet, old, "old-revision", old.Spec.Template.Roles)
+			require.NoError(t, err)
+			groupName := utils.GenerateServingGroupName(current.Name, ordinal)
+			seedAppliedRole(t, controller, old, old.Spec.Template.Roles[0], ordinal, 0, "old-revision", -1)
+			require.NoError(t, controller.store.UpdateRoleStatus(utils.GetNamespaceName(current), groupName, "decode", "decode-0", datastore.RoleRunning))
+			ready, err := controller.checkServingGroupReady(current, groupName)
+			require.NoError(t, err)
+			require.False(t, ready, "one historical instance cannot satisfy the current requested count of two")
+			seedAppliedRole(t, controller, old, old.Spec.Template.Roles[0], ordinal, 1, "old-revision", -1)
+			require.NoError(t, controller.store.UpdateRoleStatus(utils.GetNamespaceName(current), groupName, "decode", "decode-1", datastore.RoleRunning))
+			ready, err = controller.checkServingGroupReady(current, groupName)
+			require.NoError(t, err)
+			require.True(t, ready, "both protected and unprotected groups use current counts over historical layouts")
+		})
 	}
-	oldRoles := []workloadv1alpha1.Role{{Name: "decode", Replicas: ptr.To[int32](1)}}
-	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, "old-revision", oldRoles)
-	require.NoError(t, err)
-
-	key := utils.GetNamespaceName(ms)
-	groupName := utils.GenerateServingGroupName(ms.Name, 2)
-	controller.store.AddServingGroup(key, 2, "old-revision")
-	controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", 0), "old-revision", utils.CalRoleTemplateHash(oldRoles[0]))
-	require.NoError(t, controller.store.UpdateRoleStatus(key, groupName, "decode", utils.GenerateRoleID("decode", 0), datastore.RoleRunning))
-
-	ready, err := controller.checkServingGroupReady(ms, groupName)
-	require.NoError(t, err)
-	assert.False(t, ready, "replica-only changes must use the current controls for an equivalent historical template")
-
-	controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", 1), "old-revision", utils.CalRoleTemplateHash(oldRoles[0]))
-	require.NoError(t, controller.store.UpdateRoleStatus(key, groupName, "decode", utils.GenerateRoleID("decode", 1), datastore.RoleRunning))
-	ready, err = controller.checkServingGroupReady(ms, groupName)
-	require.NoError(t, err)
-	assert.True(t, ready, "protected group should become ready after the requested replica-only scale-up")
 }
 
 func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T) {
@@ -8428,7 +8433,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			},
 		},
 		{
-			name: "partition protects first outdated roles with non-continuous ordinals",
+			name: "partition protects only ordinals below threshold in sparse Roles",
 			roles: []workloadv1alpha1.Role{
 				func() workloadv1alpha1.Role {
 					role := newRole("prefill", "nginx:latest", 4, nil)
@@ -8446,6 +8451,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			expected: []roleToDelete{
 				{roleName: "prefill", roleID: "prefill-8"},
 				{roleName: "prefill", roleID: "prefill-5"},
+				{roleName: "prefill", roleID: "prefill-3"},
 			},
 			expectedOutdated: true,
 		},

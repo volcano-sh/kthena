@@ -56,6 +56,8 @@ func TestEqualRevisionHashAndSemantic(t *testing.T) {
 }
 
 func TestRevisionProjectionsTrackApplicablePluginsWithoutMutatingSpec(t *testing.T) {
+	// These are defensive comparisons of historical or admission-bypassed
+	// objects, not examples of permitted plugin or scheduler updates.
 	ms := revisionTestModelServing(revisionTestRole("prefill", "image"), revisionTestRole("decode", "image"))
 	ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{{
 		Name: "demo", Type: workloadv1alpha1.PluginTypeBuiltIn,
@@ -104,6 +106,8 @@ func TestRevisionProjectionsTrackApplicablePluginsWithoutMutatingSpec(t *testing
 }
 
 func TestInactivePluginChangeReusesModelServingHistory(t *testing.T) {
+	// Admission rejects this plugin edit even without workers. The historical
+	// comparator still describes effective Pod inputs rather than API mutability.
 	ms := revisionTestModelServing(revisionTestRole("decode", "image"))
 	ms.Spec.Template.Roles[0].WorkerReplicas = 0
 	ms.Spec.Template.Roles[0].WorkerTemplate = nil
@@ -164,6 +168,7 @@ func TestLegacyRevisionBaselineIsDurableAndImmutable(t *testing.T) {
 	require.Equal(t, "legacy", baseline.Labels[ControllerRevisionRevisionLabelKey])
 
 	ms.Spec.Plugins[0].Name = "changed-after-migration"
+	// Simulate an older or admission-bypassed edit; normal updates are immutable.
 	reloaded, err := EnsureRevisionBaseline(ctx, client, ms, source)
 	require.NoError(t, err)
 	require.Equal(t, baseline, reloaded, "a restart must not redefine the compatibility baseline")

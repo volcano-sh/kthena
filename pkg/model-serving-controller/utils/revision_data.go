@@ -183,38 +183,9 @@ func buildRevisionPatch(ms *workloadv1alpha1.ModelServing) (*modelServingRevisio
 	normalized := ms.DeepCopy()
 	normalized.Spec.SchedulerName = EffectiveSchedulerName(normalized.Spec.SchedulerName)
 
-	plugins := normalized.Spec.Plugins
-	if plugins == nil {
-		plugins = []workloadv1alpha1.PluginSpec{}
-	}
-	for i := range plugins {
-		plugin := &plugins[i]
-		if plugin.Type == "" {
-			plugin.Type = workloadv1alpha1.PluginTypeBuiltIn
-		}
-		if plugin.Config != nil {
-			trimmedConfig := bytes.TrimSpace(plugin.Config.Raw)
-			if len(trimmedConfig) == 0 || bytes.Equal(trimmedConfig, []byte("null")) {
-				plugin.Config = nil
-			} else {
-				canonicalConfig, err := canonicalJSON(plugin.Config.Raw)
-				if err != nil {
-					return nil, fmt.Errorf("canonicalize plugin %q config: %w", plugin.Name, err)
-				}
-				plugin.Config = &apiextensionsv1.JSON{Raw: canonicalConfig}
-			}
-		}
-		if plugin.Scope == nil {
-			continue
-		}
-		sort.Strings(plugin.Scope.Roles)
-		plugin.Scope.Roles = slices.Compact(plugin.Scope.Roles)
-		if plugin.Scope.Target == "" {
-			plugin.Scope.Target = workloadv1alpha1.PluginTargetAll
-		}
-		if len(plugin.Scope.Roles) == 0 && plugin.Scope.Target == workloadv1alpha1.PluginTargetAll {
-			plugin.Scope = nil
-		}
+	plugins, err := CanonicalPlugins(normalized.Spec.Plugins)
+	if err != nil {
+		return nil, err
 	}
 
 	roles := make([]modelServingRevisionRole, len(normalized.Spec.Template.Roles))
@@ -242,6 +213,50 @@ func buildRevisionPatch(ms *workloadv1alpha1.ModelServing) (*modelServingRevisio
 			},
 		},
 	}, nil
+}
+
+// CanonicalPlugins returns a copy of the complete ordered plugin configuration
+// with equivalent default values, Role sets and JSON object representations
+// normalized. It does not filter plugins by current Role membership or worker
+// counts: admission compares the entire immutable declaration, including hooks
+// that do not currently render any Pods.
+func CanonicalPlugins(input []workloadv1alpha1.PluginSpec) ([]workloadv1alpha1.PluginSpec, error) {
+	plugins := make([]workloadv1alpha1.PluginSpec, len(input))
+	for i := range input {
+		input[i].DeepCopyInto(&plugins[i])
+		plugin := &plugins[i]
+		if plugin.Type == "" {
+			plugin.Type = workloadv1alpha1.PluginTypeBuiltIn
+		}
+		if plugin.Config != nil {
+			trimmedConfig := bytes.TrimSpace(plugin.Config.Raw)
+			if len(trimmedConfig) == 0 || bytes.Equal(trimmedConfig, []byte("null")) {
+				plugin.Config = nil
+			} else {
+				canonicalConfig, err := canonicalJSON(plugin.Config.Raw)
+				if err != nil {
+					return nil, fmt.Errorf("canonicalize plugin %q config: %w", plugin.Name, err)
+				}
+				plugin.Config = &apiextensionsv1.JSON{Raw: canonicalConfig}
+			}
+		}
+		if plugin.Scope == nil {
+			continue
+		}
+		sort.Strings(plugin.Scope.Roles)
+		plugin.Scope.Roles = slices.Compact(plugin.Scope.Roles)
+		if len(plugin.Scope.Roles) == 0 {
+			plugin.Scope.Roles = nil
+		}
+		if plugin.Scope.Target == "" {
+			plugin.Scope.Target = workloadv1alpha1.PluginTargetAll
+		}
+		if len(plugin.Scope.Roles) == 0 && plugin.Scope.Target == workloadv1alpha1.PluginTargetAll {
+			plugin.Scope = nil
+		}
+	}
+
+	return plugins, nil
 }
 
 // normalizePodTemplate removes only differences that ModelServing itself

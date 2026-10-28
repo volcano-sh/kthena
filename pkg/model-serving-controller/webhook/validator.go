@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -56,12 +57,14 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 	// Validate the ModelServing
 	allowed, reason := v.validateModelServing(modelServing)
 	if allowed && admissionReview.Request.Operation == admissionv1.Update {
-		var old workloadv1alpha1.ModelServing
+		var old *workloadv1alpha1.ModelServing
 		if len(admissionReview.Request.OldObject.Raw) == 0 {
 			allowed, reason = false, "old ModelServing is required to validate an update"
 		} else if err := json.Unmarshal(admissionReview.Request.OldObject.Raw, &old); err != nil {
 			allowed, reason = false, fmt.Sprintf("decode old ModelServing: %v", err)
-		} else if errs := validateSchedulerNameUpdate(&old, modelServing); len(errs) > 0 {
+		} else if old == nil {
+			allowed, reason = false, "old ModelServing is required to validate an update"
+		} else if errs := validateModelServingUpdate(old, modelServing); len(errs) > 0 {
 			allowed, reason = false, errs.ToAggregate().Error()
 		}
 	}
@@ -87,6 +90,36 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("could not send response: %v", err), http.StatusInternalServerError)
 		return
 	}
+}
+
+func validateModelServingUpdate(old, current *workloadv1alpha1.ModelServing) field.ErrorList {
+	allErrs := validateSchedulerNameUpdate(old, current)
+	allErrs = append(allErrs, validatePluginsUpdate(old, current)...)
+	allErrs = append(allErrs, apivalidation.ValidateImmutableField(
+		roleNameSet(current), roleNameSet(old), field.NewPath("spec", "template", "roles"))...)
+	return allErrs
+}
+
+func roleNameSet(ms *workloadv1alpha1.ModelServing) []string {
+	names := make([]string, 0, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		names = append(names, role.Name)
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+func validatePluginsUpdate(old, current *workloadv1alpha1.ModelServing) field.ErrorList {
+	path := field.NewPath("spec", "plugins")
+	previous, err := utils.CanonicalPlugins(old.Spec.Plugins)
+	if err != nil {
+		return field.ErrorList{field.Invalid(path, nil, fmt.Sprintf("cannot compare previous plugins: %v", err))}
+	}
+	next, err := utils.CanonicalPlugins(current.Spec.Plugins)
+	if err != nil {
+		return field.ErrorList{field.Invalid(path, nil, fmt.Sprintf("cannot compare plugins: %v", err))}
+	}
+	return apivalidation.ValidateImmutableField(next, previous, path)
 }
 
 // Changing scheduler requires migrating the shared PodGroup as well as Pods.

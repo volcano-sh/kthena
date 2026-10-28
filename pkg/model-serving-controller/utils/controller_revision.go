@@ -175,7 +175,6 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 }
 
 func decodeLegacyRevisionRoles(data []byte) ([]workloadv1alpha1.Role, error) {
-
 	// Try to unmarshal as wrapped data first.
 	var wrapper map[string]json.RawMessage
 	if err := json.Unmarshal(data, &wrapper); err == nil {
