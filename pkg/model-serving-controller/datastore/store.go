@@ -84,6 +84,7 @@ const (
 	ServingGroupCreating ServingGroupStatus = "Creating"
 	ServingGroupDeleting ServingGroupStatus = "Deleting"
 	ServingGroupScaling  ServingGroupStatus = "Scaling"
+	ServingGroupDraining ServingGroupStatus = "Draining"
 	ServingGroupNotFound ServingGroupStatus = "NotFound"
 )
 
@@ -93,6 +94,7 @@ const (
 	RoleCreating RoleStatus = "Creating"
 	RoleRunning  RoleStatus = "Running"
 	RoleDeleting RoleStatus = "Deleting"
+	RoleDraining RoleStatus = "Draining"
 	RoleNotFound RoleStatus = "NotFound"
 )
 

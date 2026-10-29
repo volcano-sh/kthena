@@ -32,4 +32,13 @@ const (
 	RevisionLabelKey = "modelserving.volcano.sh/revision"
 	// RoleTemplateHashLabelKey is the revision label for the role, used for RoleRollingUpdate strategy.
 	RoleTemplateHashLabelKey = "modelserving.volcano.sh/role-template-hash"
+
+	// TrafficDrainingAnnotation marks a pod as draining (lossless upgrade): the
+	// model-serving-controller sets it to an RFC3339 timestamp when it starts
+	// draining, signalling the router to stop scheduling new requests to the pod.
+	TrafficDrainingAnnotation = "modelserving.volcano.sh/traffic-draining"
+	// TrafficDrainedAnnotation marks a pod as drained (lossless upgrade): the
+	// router sets it to "true" once the pod's in-flight requests reach zero,
+	// signalling the controller it is safe to delete the pod.
+	TrafficDrainedAnnotation = "modelserving.volcano.sh/traffic-drained"
 )

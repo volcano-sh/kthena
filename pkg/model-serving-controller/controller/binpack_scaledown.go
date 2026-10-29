@@ -79,6 +79,9 @@ func getServingGroupStatusPriority(status datastore.ServingGroupStatus) int {
 		return PriorityServingGroupDeleting
 	case datastore.ServingGroupScaling:
 		return PriorityServingGroupScaling
+	case datastore.ServingGroupDraining:
+		// Draining groups are mid-deletion; treat like Deleting (clean up first).
+		return PriorityServingGroupDeleting
 	case datastore.ServingGroupNotFound:
 		return PriorityServingGroupNotFound
 	default:
@@ -96,6 +99,9 @@ func getRoleStatusPriority(status datastore.RoleStatus) int {
 	case datastore.RoleCreating:
 		return PriorityRoleCreating
 	case datastore.RoleDeleting:
+		return PriorityRoleDeleting
+	case datastore.RoleDraining:
+		// Draining roles are mid-deletion; treat like Deleting (clean up first).
 		return PriorityRoleDeleting
 	case datastore.RoleNotFound:
 		return PriorityRoleNotFound

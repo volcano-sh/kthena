@@ -38,6 +38,7 @@ import (
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/networking/v1alpha1"
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
@@ -278,7 +279,16 @@ func (c *ModelServerController) syncPodHandler(key string) error {
 		return nil
 	}
 
-	return c.addOrUpdatePod(pod)
+	if err := c.addOrUpdatePod(pod); err != nil {
+		return err
+	}
+
+	// Lossless upgrade: mark the pod draining if it carries the traffic-draining
+	// annotation. The pod stays in the store (in-flight still tracked) but is
+	// excluded from scheduling candidates.
+	c.store.SetPodDraining(types.NamespacedName{Namespace: namespace, Name: name},
+		pod.Annotations[workloadv1alpha1.TrafficDrainingAnnotation] != "")
+	return nil
 }
 
 // addOrUpdatePod finds all ModelServers that match the given pod

@@ -16,6 +16,8 @@ limitations under the License.
 
 package controller
 
+import "time"
+
 type Config struct {
 	EnableLeaderElection         bool
 	Workers                      int
@@ -26,4 +28,8 @@ type Config struct {
 	KubeAPIBurst                 int
 	DebugPort                    int
 	AutoscalingSyncPeriodSeconds int
+	// DrainTimeout is the max wait for in-flight requests to drain before
+	// deleting a pod during lossless upgrade. 0 disables draining (delete
+	// immediately). Default 0 (disabled); set >0 to enable lossless drain.
+	DrainTimeout time.Duration
 }

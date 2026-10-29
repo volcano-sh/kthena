@@ -30,9 +30,8 @@ type modelServer struct {
 	modelServer *aiv1alpha1.ModelServer
 	pods        sets.Set[types.NamespacedName]
 
-	// PDGroup categorization for efficient PD scheduling
-	// Key: PD group value (the actual value of the group key label)
-	// Value: PDGroupPods containing categorized decode/prefill pods
+	// PDGroup categorization for efficient PD scheduling.
+	// Key: PD group value; Value: PDGroupPods with categorized decode/prefill pods.
 	pdGroups map[string]*PDGroupPods
 	// Reverse indexes updated with pdGroups under mutex, independent of PodInfo labels.
 	decodePodGroups  map[types.NamespacedName]string
@@ -195,6 +194,29 @@ func (m *modelServer) getPrefillPodsForDecodeGroup(pod *PodInfo) []types.Namespa
 	// Return prefill pods for the same PD group value
 	if pdGroupPods, exists := m.pdGroups[pdGroupValue]; exists {
 		return pdGroupPods.GetPrefillPods()
+	}
+
+	return nil
+}
+
+// getDecodePodsForPrefillPod returns decode pods paired with the given prefill
+// pod (same PD group). Nil if no PDGroup config or the pod isn't a prefill.
+func (m *modelServer) getDecodePodsForPrefillPod(pod *PodInfo) []types.NamespacedName {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
+	if m.modelServer.Spec.WorkloadSelector == nil || m.modelServer.Spec.WorkloadSelector.PDGroup == nil {
+		return nil
+	}
+	// Use the same classification snapshot as pdGroups; PodInfo labels may lag behind it.
+	pdGroupValue, ok := m.prefillPodGroups[pod.GetPodNamespacedName()]
+	if !ok {
+		return nil
+	}
+
+	// Return decode pods for the same PD group value
+	if pdGroupPods, exists := m.pdGroups[pdGroupValue]; exists {
+		return pdGroupPods.GetDecodePods()
 	}
 
 	return nil

@@ -21,6 +21,7 @@ import (
 	"os"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/filesource"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
+	"github.com/volcano-sh/kthena/pkg/kube"
 )
 
 const defaultDrainTimeout = 5 * time.Minute
@@ -102,10 +104,28 @@ func parseDrainTimeout() time.Duration {
 }
 
 func (s *Server) Run(ctx context.Context) {
+	// Build a kubeClient shared by the store (to patch traffic-drained during
+	// lossless upgrade) and the controllers. Config honors KubeAPIQPS/Burst.
+	cfg, err := kube.BuildConfig("", "")
+	if err != nil {
+		klog.Fatalf("Error building kubeconfig for store: %s", err.Error())
+	}
+	if s.KubeAPIQPS > 0 {
+		cfg.QPS = s.KubeAPIQPS
+	}
+	if s.KubeAPIBurst > 0 {
+		cfg.Burst = s.KubeAPIBurst
+	}
+	kubeClient, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		klog.Fatalf("Error building kubernetes clientset for store: %s", err.Error())
+	}
+
 	// Build store options. When REDIS_HOST is set, use a Redis-backed on-flight
 	// counter so that multiple router replicas share a globally consistent view
 	// of in-flight request counts, enabling better cross-router scheduling.
 	var storeOpts []datastore.Option
+	storeOpts = append(storeOpts, datastore.WithKubeClient(kubeClient))
 	if os.Getenv("REDIS_HOST") != "" {
 		if redisClient := utils.TryGetRedisClient(); redisClient != nil {
 			klog.Infof("Redis on-flight counter enabled: cross-router in-flight tracking active")
