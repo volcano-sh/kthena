@@ -38,7 +38,7 @@ Weight loading dominates bootstrap of large models on initial deployment, scale-
 
 #### Non-Goals
 
-- Deploying MX or its metadata backend, or configuring the engine (`--load-format modelexpress`, MX tuning variables). The controller only injects the MX endpoint, the source readiness URL, and the worker address (see [Environment injection](#environment-injection)).
+- Deploying MX or its metadata backend, or configuring the engine command line (`--load-format modelexpress`). The controller only injects the MX environment variables into selected engine containers (see [Environment injection](#environment-injection)).
 - Calling MX APIs from the controller. A Running role replica is treated as a source.
 - Choosing the load path. MX's fallback chain (P2P → cache → storage → native loader) does that.
 - ModelBooster integration, and cross-role or cross-layout sources.
@@ -150,11 +150,12 @@ type BootstrapAccelerateStrategy struct {
 	Provider BootstrapAccelerateStrategyProvider `json:"provider,omitempty"`
 
 	// Roles limits bootstrap acceleration to the listed roles and configures each of them.
-	// Empty means all roles with default settings.
+	// At least one role must be specified.
+	// +kubebuilder:validation:MinItems=1
 	// +listType=map
 	// +listMapKey=name
-	// +optional
-	Roles []BootstrapRole `json:"roles,omitempty"`
+	// +required
+	Roles []BootstrapRole `json:"roles"`
 
 	// SourceFanOut is the number of P2P targets that one source can serve, i.e. starting
 	// role replicas (created but not yet Running) per ready replica of the same role.
@@ -380,22 +381,62 @@ The plugin injects the variables below **only into inference-engine containers**
 
 `GenerateEntryPod` and `GenerateWorkerPod` remain unchanged. A variable already defined in a selected container wins, including values added by earlier plugins. Inject `MX_SERVER_ADDRESS` and `MX_ARTIFACT_READY_URL` only when the variable is absent and the corresponding field is nonempty; no deprecated endpoint variable is injected. This integration requires an MX client that supports `MX_SERVER_ADDRESS`. Clients that read only the deprecated `MODEL_EXPRESS_URL` (for example, TRT-LLM live transfer) are unsupported, and because MX prefers `MODEL_EXPRESS_URL` when both are set, templates or images (for example, a Dockerfile `ENV`) that set it must remove it. Injected `env` entries take precedence over `envFrom`, and the plugin does not resolve `envFrom`; users who supply any variable below through `envFrom` must move it to `env` (or leave the corresponding `modelExpress` field empty).
 
-For the central-server deployment covered by this proposal, inject only the following ([MX P2P environment variables](https://github.com/ai-dynamo/modelexpress/blob/main/docs/DEPLOYMENT.md#p2p-environment-variables)):
+For the central-server deployment covered by this proposal, inject the following into selected engine containers when the variable is not already set ([MX P2P environment variables](https://github.com/ai-dynamo/modelexpress/blob/main/docs/DEPLOYMENT.md#p2p-environment-variables)):
 
 | Variable | Value | Why |
 |---|---|---|
+| `MX_MODEL_REVISION` | Role template hash (`workload.serving.volcano.sh/role-template-hash`) when not already set in the container | Scopes the MX source identity to the role template revision unless the user supplies an explicit checkpoint revision. |
 | `MX_SERVER_ADDRESS` | `modelExpress.serverAddress`; inject only when the variable is absent and the address is nonempty | The client's gRPC endpoint; do not assume `localhost:8001` points to an external MX server. |
+| `MX_P2P_METADATA` | `'1'` | Enables P2P weight metadata registration and discovery. |
+| `MX_METADATA_PORT` | `'5555'` | Fixed base TCP port for NIXL metadata exchange (never `0` in Kubernetes). |
+| `MX_WORKER_GRPC_PORT` | `'6555'` | Fixed base TCP port for worker gRPC status/coordination (never `0` in Kubernetes). |
+| `MX_NIXL_BACKEND` | `UCX` | Default NIXL transport backend for InfiniBand/RoCE/TCP; override in container `env` when using `LIBFABRIC` (e.g., AWS EFA). |
+| `MX_INSTANT_TENSOR` | `'0'` | Disables per-tensor streaming by default in favor of standard batch weight transfer. |
+| `MX_ARTIFACT_TRANSFER` | `'1'` | Enables transfer of runtime/compiled artifacts alongside model weights. |
 | `MX_ARTIFACT_READY_URL` | `modelExpress.readyURL`; inject only when the variable is absent and the URL is nonempty | The engine endpoint a source polls before publishing. Set it when the engine's port or path differs from the MX default, or when the Pod readiness probe checks a different endpoint; a URL that never responds keeps the source from ever publishing. |
+| `MODEL_EXPRESS_LOG_LEVEL` | `INFO` | Default log verbosity for the ModelExpress client. |
+| `NIXL_LOG_LEVEL` | `INFO` | Default log verbosity for NIXL transfer operations. |
+| `UCX_LOG_LEVEL` | `WARN` | Suppresses noisy UCX info logs unless overridden. |
 | `MX_WORKER_HOST` | Downward API `status.podIP` | The address that readers use to reach this source. Auto-detection can pick an unroutable interface on multi-NIC GPU nodes. |
 
-MX client defaults already suit this topology and are not injected: an empty `MX_METADATA_BACKEND` uses the central server, `MX_P2P_METADATA` defaults to `1`, and `MX_METADATA_PORT`/`MX_WORKER_GRPC_PORT` default to the fixed base ports 5555/6555 (never set them to 0 in Kubernetes).
+Example of the environment entries injected into a selected engine container:
 
+```yaml
+- name: MX_MODEL_REVISION
+  value: 56eba4e34d3d031b8a62ac6bfb87a723
+- name: MX_SERVER_ADDRESS
+  value: 215.80.6.74:8001
+- name: MX_P2P_METADATA
+  value: '1'
+- name: MX_METADATA_PORT
+  value: '5555'
+- name: MX_WORKER_GRPC_PORT
+  value: '6555'
+- name: MX_NIXL_BACKEND
+  value: UCX
+- name: MX_INSTANT_TENSOR
+  value: '0'
+- name: MX_ARTIFACT_TRANSFER
+  value: '1'
+- name: MX_ARTIFACT_READY_URL
+  value: http://127.0.0.1:40390/health
+- name: MODEL_EXPRESS_LOG_LEVEL
+  value: INFO
+- name: NIXL_LOG_LEVEL
+  value: INFO
+- name: UCX_LOG_LEVEL
+  value: WARN
+- name: MX_WORKER_HOST
+  valueFrom:
+    fieldRef:
+      fieldPath: status.podIP
+```
 
 Pod IP is a sensible default for `MX_WORKER_HOST`, not a guarantee of RDMA reachability. Users must override it when the advertised address needs another interface. NetworkPolicy and the GPU/RDMA device allocation must permit the worker gRPC/NIXL port ranges and data-plane traffic. Multiple engines sharing one Pod network, or host-network Pods sharing a node, need nonoverlapping port ranges; Kthena does not allocate those automatically.
 
-**Configuration ownership.** Keep workload-specific values in `modelExpress` or the selected engine container's template, not controller arguments. The `serverAddress`, `readyURL`, and `engineContainers` fields suffice; the Pod IP is derived and MX supplies stable port defaults. Custom ports, `MX_NIXL_BACKEND` (`UCX` for InfiniBand/RoCE, `LIBFABRIC` for AWS EFA), NIC pinning, source selection, and timeouts can be set explicitly in the engine container's `env`. No controller-wide flags or arbitrary env passthrough API are needed.
+**Configuration ownership.** Keep workload-specific values in `modelExpress` or the selected engine container's template, not controller arguments. The `serverAddress`, `readyURL`, and `engineContainers` fields suffice; `MX_WORKER_HOST`, `MX_MODEL_REVISION`, and the standard MX/NIXL/UCX runtime defaults above are injected automatically when not already present in the container's `env`. Custom ports, alternate `MX_NIXL_BACKEND` values (for example `LIBFABRIC` for AWS EFA), NIC pinning, source selection, and timeouts can be overridden explicitly in the engine container's `env`. No controller-wide flags or arbitrary env passthrough API are needed.
 
-Do not guess a model revision or compile-cache digest from the ModelServing revision hash. Leave `MX_MODEL_REVISION` to the engine or an explicit checkpoint-version override; it labels source identity and does not pin the engine's checkpoint. Artifact transfer is opt-in: users setting `MX_ARTIFACT_TRANSFER=1` should also supply distinct `MX_ARTIFACT_COMPILE_CONFIG_DIGEST` values for incompatible prefill/decode compilation settings. `VLLM_PLUGINS=modelexpress` is needed only for vLLM older than 0.23, not injected universally. The decentralized `k8s-service` backend needs its own Service/rank routing and pinned source identity, so it is outside this central-server integration.
+When `MX_ARTIFACT_TRANSFER=1` is used with disaggregated roles that have incompatible compilation settings, users should supply distinct `MX_ARTIFACT_COMPILE_CONFIG_DIGEST` values in the role templates. `VLLM_PLUGINS=modelexpress` is needed only for vLLM older than 0.23, not injected universally. The decentralized `k8s-service` backend needs its own Service/rank routing and pinned source identity, so it is outside this central-server integration.
 
 The injection happens at Pod creation, so changing `serverAddress` affects only new Pods and doesn't trigger a rollout; only replicas with the new effective configuration can release their subsequent batches.
 
@@ -412,11 +453,11 @@ The injection happens at Pod creation, so changing `serverAddress` affects only 
 
 Unit tests (table-driven, `-race` where concurrent):
 
-- **Admitter:** $S$/$K$ with per-role integer and percentage seeds, the default of 1 when `roles` is empty or a seed is unset, the gang floor $g$, $D=0$, whole-unit fit across pools, blocking after a denied unit, $I > K$ after sources become unready or the policy is lowered, and the batch sequences in the examples above.
+- **Admitter:** $S$/$K$ with per-role integer and percentage seeds, the default of 1 when a seed is unset, the gang floor $g$, $D=0$, whole-unit fit across pools, blocking after a denied unit, $I > K$ after sources become unready or the policy is lowered, and the batch sequences in the examples above.
 - **Pool identity:** the configuration hash is stable under plugin JSON key reordering and changes with the endpoint, scope, engine containers, and plugin configuration; replicas with missing or mismatched annotations are not sources; `syncAll` rebuilds the observed hash without substituting the current spec's.
 - **Controller:** new-group core creation with its PodGroup, core-deficit units, units of one, out-of-scope roles ungated, a failed unit render creating nothing, disabling the policy, and rolling-update pacing (`maxUnavailable`, `maxSurge`, `partition`, rollback).
 - **Revision neutrality:** adding, editing, or removing the strategy does not change `ModelServingRevision`, `CalRoleTemplateHash`, or `BuildRevisionData`.
-- **Environment injection:** only selected engine containers change; init containers and sidecars are untouched; `readyURL` maps to `MX_ARTIFACT_READY_URL`; existing `MX_SERVER_ADDRESS`, `MX_ARTIFACT_READY_URL`, and other variables win; changing `readyURL` keeps the pool; nothing is injected when `modelExpress` is omitted; `MODEL_EXPRESS_URL` and MX defaults are never injected.
+- **Environment injection:** only selected engine containers change; init containers and sidecars are untouched; `MX_MODEL_REVISION`, `MX_SERVER_ADDRESS`, `MX_P2P_METADATA`, `MX_METADATA_PORT`, `MX_WORKER_GRPC_PORT`, `MX_NIXL_BACKEND`, `MX_INSTANT_TENSOR`, `MX_ARTIFACT_TRANSFER`, `MX_ARTIFACT_READY_URL`, `MODEL_EXPRESS_LOG_LEVEL`, `NIXL_LOG_LEVEL`, `UCX_LOG_LEVEL`, and `MX_WORKER_HOST` are injected as expected; existing user-specified variables win; changing `readyURL` keeps the pool; nothing is injected when `modelExpress` is omitted; `MODEL_EXPRESS_URL` is never injected.
 - **Webhook:** unknown or duplicate `roles[].name`, invalid `roles[].initialSeedReplicas`, malformed `serverAddress` or `readyURL`, missing engine containers in templates, and explicit registration of the managed plugin.
 
 E2E (`test/e2e/controller-manager`): a multi-replica ModelServing with the strategy and a stub engine (no MX needed) verifies batch order, gang cores with `schedulerName: volcano`, and a rolling update.
