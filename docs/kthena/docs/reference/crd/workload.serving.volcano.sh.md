@@ -938,6 +938,25 @@ _Appears in:_
 | `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition protects the first N existing replicas in ascending ordinal order<br />from updates. The remaining replicas are eligible for rolling update.<br />For a contiguous ordinal set, this is equivalent to protecting [0, Partition).<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
 
 
+#### RoleCoordination
+
+
+
+RoleCoordination enables proportional rolling updates across selected Roles
+in each ServingGroup. Its presence and policy are immutable after creation.
+
+
+
+_Appears in:_
+- [RolloutStrategy](#rolloutstrategy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `roles` _string array_ | Roles selects the Roles participating in coordinated rolling update. An<br />empty list selects every Role in spec.template.roles. |  |  |
+| `maxSkew` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxSkew is the maximum percentage-point difference allowed between the<br />target-version Ready ratios of participating Roles, using their entire formal<br />replica count, including partition-protected capacity. Only percentage values,<br />for example "10%", are accepted. |  | XIntOrString: \{\} <br /> |
+| `dependencies` _[RoleRolloutDependency](#rolerolloutdependency) array_ | Dependencies defines rollout startup dependencies. A graph root waits for<br />target-version Ready capacity throughout its dependency closure before its<br />first target start. Internal Roles may start together; old dependency<br />capacity is retained while old callers remain. |  |  |
+
+
 #### RoleRatioConstraint
 
 
@@ -973,6 +992,23 @@ _Appears in:_
 | `numeratorRole` _string_ |  |  |  |
 | `denominatorRole` _string_ |  |  |  |
 | `currentRatio` _string_ |  |  |  |
+
+
+#### RoleRolloutDependency
+
+
+
+
+
+
+
+_Appears in:_
+- [RoleCoordination](#rolecoordination)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `role` _string_ | Role is the dependent Role. |  |  |
+| `dependsOn` _string array_ | DependsOn lists the downstream Roles required by Role. |  |  |
 
 
 #### RoleScalingParam
@@ -1032,6 +1068,7 @@ _Appears in:_
 | `updateMethod` _[UpdateMethod](#updatemethod)_ | UpdateMethod selects how outdated ServingGroups or Roles are moved to the desired revision.<br />Supported values are Recreate (default) and InPlace.<br />InPlace patches container images on existing Pods when only regular-container images change.<br />Otherwise the ServingGroup, or the Role instance under RoleRollingUpdate, is recreated, and an InPlaceUpdateFallback event reports why. | Recreate | Enum: [Recreate InPlace] <br /> |
 | `progressDeadlineSeconds` _integer_ | ProgressDeadlineSeconds is the maximum time for a ServingGroup or Role instance updated in place to become ready on the target image.<br />After it passes, Pods that are not ready follow the RecoveryPolicy.<br />It only applies to in-place updates, and defaults to 1800 seconds. |  | Minimum: 60 <br /> |
 | `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration configures ServingGroupRollingUpdate.<br />It must not be set when type is RoleRollingUpdate; configure maxUnavailable<br />maxSurge, and partition on each Role instead. |  |  |
+| `roleCoordination` _[RoleCoordination](#rolecoordination)_ | RoleCoordination defines the cross-Role coordination parameters to be used<br />when type is RoleRollingUpdate. |  |  |
 | `evictionStrategy` _[EvictionStrategySpec](#evictionstrategyspec)_ | EvictionStrategy defines the protection policy during node eviction. |  |  |
 
 

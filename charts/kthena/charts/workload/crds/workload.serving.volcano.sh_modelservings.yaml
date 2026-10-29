@@ -176,6 +176,58 @@ spec:
                     format: int32
                     minimum: 60
                     type: integer
+                  roleCoordination:
+                    description: |-
+                      RoleCoordination defines the cross-Role coordination parameters to be used
+                      when type is RoleRollingUpdate.
+                    properties:
+                      dependencies:
+                        description: |-
+                          Dependencies defines rollout startup dependencies. A graph root waits for
+                          target-version Ready capacity throughout its dependency closure before its
+                          first target start. Internal Roles may start together; old dependency
+                          capacity is retained while old callers remain.
+                        items:
+                          properties:
+                            dependsOn:
+                              description: DependsOn lists the downstream Roles required
+                                by Role.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: set
+                            role:
+                              description: Role is the dependent Role.
+                              type: string
+                          required:
+                          - dependsOn
+                          - role
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - role
+                        x-kubernetes-list-type: map
+                      maxSkew:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxSkew is the maximum percentage-point difference allowed between the
+                          target-version Ready ratios of participating Roles, using their entire formal
+                          replica count, including partition-protected capacity. Only percentage values,
+                          for example "10%", are accepted.
+                        x-kubernetes-int-or-string: true
+                      roles:
+                        description: |-
+                          Roles selects the Roles participating in coordinated rolling update. An
+                          empty list selects every Role in spec.template.roles.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                    required:
+                    - maxSkew
+                    type: object
                   rollingUpdateConfiguration:
                     description: |-
                       RollingUpdateConfiguration configures ServingGroupRollingUpdate.

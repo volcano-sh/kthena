@@ -53,6 +53,9 @@ type RolloutStrategyApplyConfiguration struct {
 	// It must not be set when type is RoleRollingUpdate; configure maxUnavailable
 	// maxSurge, and partition on each Role instead.
 	RollingUpdateConfiguration *RollingUpdateConfigurationApplyConfiguration `json:"rollingUpdateConfiguration,omitempty"`
+	// RoleCoordination defines the cross-Role coordination parameters to be used
+	// when type is RoleRollingUpdate.
+	RoleCoordination *RoleCoordinationApplyConfiguration `json:"roleCoordination,omitempty"`
 	// EvictionStrategy defines the protection policy during node eviction.
 	EvictionStrategy *EvictionStrategySpecApplyConfiguration `json:"evictionStrategy,omitempty"`
 }
@@ -92,6 +95,14 @@ func (b *RolloutStrategyApplyConfiguration) WithProgressDeadlineSeconds(value in
 // If called multiple times, the RollingUpdateConfiguration field is set to the value of the last call.
 func (b *RolloutStrategyApplyConfiguration) WithRollingUpdateConfiguration(value *RollingUpdateConfigurationApplyConfiguration) *RolloutStrategyApplyConfiguration {
 	b.RollingUpdateConfiguration = value
+	return b
+}
+
+// WithRoleCoordination sets the RoleCoordination field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the RoleCoordination field is set to the value of the last call.
+func (b *RolloutStrategyApplyConfiguration) WithRoleCoordination(value *RoleCoordinationApplyConfiguration) *RolloutStrategyApplyConfiguration {
+	b.RoleCoordination = value
 	return b
 }
 

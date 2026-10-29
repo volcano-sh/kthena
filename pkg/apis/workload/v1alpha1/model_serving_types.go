@@ -180,6 +180,11 @@ type RolloutStrategy struct {
 	// +optional
 	RollingUpdateConfiguration *RollingUpdateConfiguration `json:"rollingUpdateConfiguration,omitempty"`
 
+	// RoleCoordination defines the cross-Role coordination parameters to be used
+	// when type is RoleRollingUpdate.
+	// +optional
+	RoleCoordination *RoleCoordination `json:"roleCoordination,omitempty"`
+
 	// EvictionStrategy defines the protection policy during node eviction.
 	// +optional
 	EvictionStrategy *EvictionStrategySpec `json:"evictionStrategy,omitempty"`
@@ -277,6 +282,41 @@ type RollingUpdateConfiguration struct {
 	Partition *intstr.IntOrString `json:"partition,omitempty"`
 }
 
+// RoleCoordination enables proportional rolling updates across selected Roles
+// in each ServingGroup. Its presence and policy are immutable after creation.
+type RoleCoordination struct {
+	// Roles selects the Roles participating in coordinated rolling update. An
+	// empty list selects every Role in spec.template.roles.
+	// +optional
+	// +listType=set
+	Roles []string `json:"roles,omitempty"`
+
+	// MaxSkew is the maximum percentage-point difference allowed between the
+	// target-version Ready ratios of participating Roles, using their entire formal
+	// replica count, including partition-protected capacity. Only percentage values,
+	// for example "10%", are accepted.
+	// +kubebuilder:validation:XIntOrString
+	MaxSkew *intstr.IntOrString `json:"maxSkew"`
+
+	// Dependencies defines rollout startup dependencies. A graph root waits for
+	// target-version Ready capacity throughout its dependency closure before its
+	// first target start. Internal Roles may start together; old dependency
+	// capacity is retained while old callers remain.
+	// +optional
+	// +listType=map
+	// +listMapKey=role
+	Dependencies []RoleRolloutDependency `json:"dependencies,omitempty"`
+}
+
+type RoleRolloutDependency struct {
+	// Role is the dependent Role.
+	Role string `json:"role"`
+
+	// DependsOn lists the downstream Roles required by Role.
+	// +listType=set
+	DependsOn []string `json:"dependsOn"`
+}
+
 type ModelServingConditionType string
 
 // There is a condition type of a modelServing
@@ -295,6 +335,11 @@ const (
 	// When the entry or worker template is updated, modelServing controller enters the upgrade process and
 	// UpdateInProgress is set to true.
 	ModelServingUpdateInProgress ModelServingConditionType = "UpdateInProgress"
+
+	// ModelServingCoordinatedRoleRolloutBlocked indicates that a coordinated
+	// Role rolling update is waiting for a dependency, proportional progress,
+	// old-version retention, or admitted target-version readiness.
+	ModelServingCoordinatedRoleRolloutBlocked ModelServingConditionType = "CoordinatedRoleRolloutBlocked"
 )
 
 // ModelServingStatus defines the observed state of ModelServing
