@@ -261,74 +261,42 @@ func Test_lineChartSlidingWindowWithZeroTTL(t *testing.T) {
 	assert.False(ok)
 }
 
-func Test_snapshotSlidingWindow(t *testing.T) {
-	assert := assert.New(t)
-
+func Test_snapshotSlidingWindowSinceLastUnfresh(t *testing.T) {
 	window := NewSnapshotSlidingWindow[string](10000, 15000)
+	for _, step := range []struct {
+		append string
+		at     int
+	}{{"t1", 1}, {"t3", 3}, {"t5", 5}, {"t7", 7}} {
+		window.getCurrentTimestamp = dateFunc(step.at)
+		window.Append(step.append)
+	}
 
-	_, ok := window.GetLastUnfreshSnapshot()
-	assert.False(ok)
-
-	window.getCurrentTimestamp = dateFunc(1)
-	window.Append("foo")
-
-	window.getCurrentTimestamp = dateFunc(3)
-	window.Append("bar")
-
-	window.getCurrentTimestamp = dateFunc(5)
-	window.Append("quz")
-
-	window.getCurrentTimestamp = dateFunc(7)
-	window.Append("abc")
-
-	_, ok = window.GetLastUnfreshSnapshot()
-	assert.False(ok)
-
-	window.getCurrentTimestamp = dateFunc(12)
-	last, ok := window.GetLastUnfreshSnapshot()
-	assert.Equal("foo", last)
-	assert.True(ok)
-
-	window.getCurrentTimestamp = dateFunc(14)
-	last, ok = window.GetLastUnfreshSnapshot()
-	assert.Equal("bar", last)
-	assert.True(ok)
-
-	window.getCurrentTimestamp = dateFunc(16)
-	last, ok = window.GetLastUnfreshSnapshot()
-	assert.Equal("quz", last)
-	assert.True(ok)
-
-	window.getCurrentTimestamp = dateFunc(18)
-	last, ok = window.GetLastUnfreshSnapshot()
-	assert.Equal("abc", last)
-	assert.True(ok)
-
-	window.getCurrentTimestamp = dateFunc(21)
-	last, ok = window.GetLastUnfreshSnapshot()
-	assert.Equal("abc", last)
-	assert.True(ok)
-
-	window.getCurrentTimestamp = dateFunc(23)
-	_, ok = window.GetLastUnfreshSnapshot()
-	assert.False(ok)
+	// The steps share one window and must run in this order, because each read
+	// also removes the snapshots that have expired by then.
+	steps := []struct {
+		name string
+		at   int
+		want []string
+	}{
+		{name: "every snapshot is still fresh", at: 7, want: nil},
+		{name: "first snapshot turned unfresh", at: 12, want: []string{"t1", "t3", "t5", "t7"}},
+		{name: "older unfresh snapshot dropped", at: 14, want: []string{"t3", "t5", "t7"}},
+		{name: "only the newest unfresh snapshot is kept", at: 16, want: []string{"t5", "t7"}},
+		{name: "last snapshot is the baseline", at: 18, want: []string{"t7"}},
+		{name: "baseline kept until it expires", at: 21, want: []string{"t7"}},
+		{name: "baseline expired", at: 23, want: nil},
+	}
+	for _, step := range steps {
+		window.getCurrentTimestamp = dateFunc(step.at)
+		assert.Equal(t, step.want, window.GetSnapshotsSinceLastUnfresh(), step.name)
+	}
 }
 
-func Test_snapshotSlidingWindowWithZeroTTL(t *testing.T) {
-	assert := assert.New(t)
-
+func Test_snapshotSlidingWindowSinceLastUnfreshWithZeroTTL(t *testing.T) {
 	window := NewSnapshotSlidingWindow[string](0, 0)
-
-	_, ok := window.GetLastUnfreshSnapshot()
-	assert.False(ok)
-
 	window.getCurrentTimestamp = dateFunc(1)
-	window.Append("foo")
-
-	_, ok = window.GetLastUnfreshSnapshot()
-	assert.False(ok)
+	window.Append("t1")
 
 	window.getCurrentTimestamp = dateFunc(50)
-	_, ok = window.GetLastUnfreshSnapshot()
-	assert.False(ok)
+	assert.Nil(t, window.GetSnapshotsSinceLastUnfresh())
 }

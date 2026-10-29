@@ -114,10 +114,10 @@ func (collector *MetricCollector) UpdateMetrics(
 	unreadyInstancesCountByMetric = make(map[string]int32)
 	readyInstancesMetrics = make(map[string][]algorithm.Metrics)
 
-	pastHistograms, ok := collector.PastHistograms.GetLastUnfreshSnapshot()
-	if !ok {
-		pastHistograms = make(map[string]HistogramInfo)
-	}
+	// pastHistograms are the stored snapshots, oldest first. The oldest one is
+	// the baseline, just over 60 seconds old. The list is empty until a snapshot
+	// is that old, and histograms are then compared with an empty baseline.
+	pastHistograms := collector.PastHistograms.GetSnapshotsSinceLastUnfresh()
 	currentHistograms := make(map[string]HistogramInfo)
 
 	// Group pod metrics by identical PodMetricSource (uri/port/selector) so we
@@ -127,13 +127,9 @@ func (collector *MetricCollector) UpdateMetrics(
 	podGroups, externalMetrics := collector.planMetricSources(ctx, targetMetricSources)
 
 	for _, g := range podGroups {
-		values, groupUnreadyPods, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
+		values, groupUnreadyPods, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
 		if collectErr != nil {
 			klog.Warningf("collect pod metrics for target %s failed: %v", collector.Target.TargetRef.Name, collectErr)
-			continue
-		}
-		if failed {
-			klog.Warningf("collect pod metrics for target %s skipped because pod failed/restarted", collector.Target.TargetRef.Name)
 			continue
 		}
 		groupMetrics := make([]algorithm.Metrics, 0, len(values))
@@ -241,30 +237,24 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	podLister listerv1.PodLister,
 	podSource *v1alpha1.PodMetricSource,
 	specs []podMetricSpec,
-	pastHistograms map[string]HistogramInfo,
+	pastHistograms []map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
-) (values map[string]algorithm.Metrics, unreadyPods sets.Set[string], failed bool, err error) {
+) (values map[string]algorithm.Metrics, unreadyPods sets.Set[string], err error) {
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
 	}
 	if len(pods) == 0 {
-		return nil, nil, false, fmt.Errorf("pod list is empty")
+		return nil, nil, fmt.Errorf("pod list is empty")
 	}
 
-	unreadyPods, failed = evaluatePodsReadiness(pods)
-	if failed {
-		return
-	}
+	toScrape, unreadyPods := groupPodsByReadiness(pods)
 
 	// Multiple policy keys may target the same scrape metric name.
 	wanted := groupPolicyKeysByScrapeName(specs)
 
-	values = make(map[string]algorithm.Metrics, len(pods))
-	for _, pod := range pods {
-		if !inferControllerUtils.IsPodRunningAndReady(pod) {
-			continue
-		}
+	values = make(map[string]algorithm.Metrics, len(toScrape))
+	for _, pod := range toScrape {
 		podValues := make(algorithm.Metrics, len(specs))
 		if scrapeErr := collector.collectPodMetrics(ctx, pod, podSource, wanted, podValues, pastHistograms, currentHistograms); scrapeErr != nil {
 			// Keep the ready pod as an entry with no values so the algorithm counts
@@ -277,17 +267,23 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	return
 }
 
-// evaluatePodsReadiness counts pods that are not ready and reports whether any
-// pod has failed or restarted.
-func evaluatePodsReadiness(pods []*corev1.Pod) (unreadyPods sets.Set[string], failed bool) {
+// groupPodsByReadiness splits pods into the ones to scrape (running and ready)
+// and the unready ones. Failed or terminating pods are skipped and counted
+// nowhere, as in the Kubernetes HPA. A pod whose container restarted and is
+// ready again is scraped like any other ready pod.
+func groupPodsByReadiness(pods []*corev1.Pod) (toScrape []*corev1.Pod, unreadyPods sets.Set[string]) {
 	unreadyPods = sets.New[string]()
+	toScrape = make([]*corev1.Pod, 0, len(pods))
 	for _, pod := range pods {
+		if util.IsPodFailed(pod) {
+			klog.V(4).Infof("skip pod %s for metrics: failed or terminating", metricPodKey(pod))
+			continue
+		}
 		if !inferControllerUtils.IsPodRunningAndReady(pod) {
 			unreadyPods.Insert(metricPodKey(pod))
+			continue
 		}
-		if util.IsPodFailed(pod) || inferControllerUtils.ContainerRestarted(pod) {
-			failed = true
-		}
+		toScrape = append(toScrape, pod)
 	}
 	return
 }
@@ -316,10 +312,10 @@ func (collector *MetricCollector) collectPodMetrics(
 	podSource *v1alpha1.PodMetricSource,
 	wanted map[string][]string,
 	values map[string]float64,
-	pastHistograms map[string]HistogramInfo,
+	pastHistograms []map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
 ) error {
-	pastHistogramMap := pastHistogramMapForPod(pod, pastHistograms)
+	pastHistogramChains := pastHistogramChainsForPod(pod, pastHistograms)
 
 	currentHistogramMap := currentHistograms[pod.Name].HistogramMap
 	if currentHistogramMap == nil {
@@ -342,7 +338,7 @@ func (collector *MetricCollector) collectPodMetrics(
 			continue
 		}
 		for _, policyKey := range policyKeys {
-			v, snapshot, gotValue, extractErr := extractMetricFromFamily(mf, pastHistogramMap[policyKey])
+			v, snapshot, gotValue, extractErr := extractMetricFromFamily(mf, pastHistogramChains[policyKey])
 			if extractErr != nil {
 				return extractErr
 			}
@@ -362,14 +358,31 @@ func (collector *MetricCollector) collectPodMetrics(
 	return nil
 }
 
-// pastHistogramMapForPod returns the previous histogram snapshots for pod, but
-// only when the pod has not restarted since they were recorded.
-func pastHistogramMapForPod(pod *corev1.Pod, pastHistograms map[string]HistogramInfo) map[string]*histogram.Snapshot {
-	pastValue, ok := pastHistograms[pod.Name]
-	if ok && pod.Status.StartTime != nil && pastValue.PodStartTime != nil && pod.Status.StartTime.Equal(pastValue.PodStartTime) {
-		return pastValue.HistogramMap
+// samePod reports whether past was recorded for this same pod. A pod that was
+// deleted and created again with the same name has a different start time.
+func samePod(pod *corev1.Pod, past HistogramInfo) bool {
+	return pod.Status.StartTime != nil && past.PodStartTime != nil &&
+		pod.Status.StartTime.Equal(past.PodStartTime)
+}
+
+// pastHistogramChainsForPod returns this pod's earlier histograms for each
+// metric, oldest first. The oldest one is the baseline that the current
+// histogram is compared with. A snapshot is skipped when this pod is not in
+// it (for example, because the pod's scrape failed) or when it was taken from
+// an earlier pod with the same name, which had a different start time. If a
+// snapshot is missing only one metric, it is skipped for that metric only.
+func pastHistogramChainsForPod(pod *corev1.Pod, pastHistograms []map[string]HistogramInfo) map[string][]*histogram.Snapshot {
+	chains := map[string][]*histogram.Snapshot{}
+	for _, histograms := range pastHistograms {
+		info, ok := histograms[pod.Name]
+		if !ok || !samePod(pod, info) {
+			continue
+		}
+		for policyKey, snapshot := range info.HistogramMap {
+			chains[policyKey] = append(chains[policyKey], snapshot)
+		}
 	}
-	return map[string]*histogram.Snapshot{}
+	return chains
 }
 
 func (collector *MetricCollector) scrapePod(ctx context.Context, pod *corev1.Pod, podSource *v1alpha1.PodMetricSource) (string, error) {
@@ -433,8 +446,9 @@ func parsePrometheusFamilies(body string, wanted map[string][]string) (map[strin
 
 // extractMetricFromFamily returns the scalar value (and histogram snapshot, when
 // applicable) for mf. Counter and gauge families may contain multiple labeled
-// samples, so their values are summed.
-func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogram *histogram.Snapshot) (value float64, histSnapshot *histogram.Snapshot, found bool, err error) {
+// samples, so their values are summed. pastHistograms are this pod's earlier
+// snapshots of the metric, oldest first. The first one is the baseline.
+func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistograms []*histogram.Snapshot) (value float64, histSnapshot *histogram.Snapshot, found bool, err error) {
 	if len(mf.Metric) < 1 {
 		return 0, nil, false, nil
 	}
@@ -472,8 +486,15 @@ func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogra
 		}
 		snapshot := histogram.NewSnapshotOfHistogram(hist)
 		past := histogram.NewDefaultSnapshot()
-		if pastHistogram != nil {
-			past = pastHistogram
+		// If the engine restarted since the baseline, its histogram started again
+		// from zero and the baseline cannot be subtracted from it. Compare against
+		// an empty baseline instead of returning an error or a wrong quantile.
+		if len(pastHistograms) > 0 {
+			if resetInChain(pastHistograms, snapshot) {
+				klog.V(4).Infof("histogram %s was reset since the baseline, comparing against an empty baseline", mf.GetName())
+			} else {
+				past = pastHistograms[0]
+			}
 		}
 		quantile, qErr := histogram.QuantileInDiff(util.SloQuantilePercentile, snapshot, past)
 		if qErr != nil {
@@ -483,6 +504,21 @@ func extractMetricFromFamily(mf *io_prometheus_client.MetricFamily, pastHistogra
 	default:
 		return 0, nil, false, fmt.Errorf("unsupported metric type %v", mf.GetType())
 	}
+}
+
+// resetInChain reports whether the histogram was reset anywhere between the
+// first snapshot in past and current. It checks every pair of neighbouring
+// snapshots, so it finds a reset even if the counts have since grown back
+// above the first snapshot.
+func resetInChain(past []*histogram.Snapshot, current *histogram.Snapshot) bool {
+	// Copy past so that appending current cannot change the caller's slice.
+	chain := append(slices.Clone(past), current)
+	for i := 1; i < len(chain); i++ {
+		if chain[i].ResetSince(chain[i-1]) {
+			return true
+		}
+	}
+	return false
 }
 
 func (collector *MetricCollector) fetchPrometheusMetric(ctx context.Context, src *v1alpha1.PrometheusMetricSource) (float64, error) {

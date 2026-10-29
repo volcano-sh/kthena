@@ -219,18 +219,23 @@ func (window *SnapshotSlidingWindow[T]) Append(value T) {
 	window.pool.PushBack(snapshotRecord[T]{currentTimestamp, value})
 }
 
-func (window *SnapshotSlidingWindow[T]) GetLastUnfreshSnapshot() (value T, ok bool) {
+// GetSnapshotsSinceLastUnfresh returns the snapshots in the window, oldest
+// first. The first one is the newest snapshot older than freshMilliseconds,
+// and every snapshot after it is at most freshMilliseconds old. It returns
+// nil when freshMilliseconds is 0 or when no snapshot is older than
+// freshMilliseconds.
+func (window *SnapshotSlidingWindow[T]) GetSnapshotsSinceLastUnfresh() []T {
 	if window.freshMilliseconds == 0 {
-		return value, false
+		return nil
 	}
 	currentTimestamp := window.getCurrentTimestamp()
 	window.expire(currentTimestamp)
-	if window.pool.Len() == 0 {
-		return value, false
+	if window.pool.Len() == 0 || isFresh(window.freshMilliseconds, currentTimestamp, window.pool.Front().timestamp) {
+		return nil
 	}
-	front := window.pool.Front()
-	if isFresh(window.freshMilliseconds, currentTimestamp, front.timestamp) {
-		return value, false
+	values := make([]T, 0, window.pool.Len())
+	for i := 0; i < window.pool.Len(); i++ {
+		values = append(values, window.pool.At(i).value)
 	}
-	return front.value, true
+	return values
 }
