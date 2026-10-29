@@ -319,7 +319,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 
 		sync := waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) > 0 && pods[0].Pod.Name == "test-pod-ready"
+			return len(pods) > 0 && pods[0].GetPod().Name == "test-pod-ready"
 		})
 		assert.True(t, sync, "Pod should be found in store after creation")
 	})
@@ -360,7 +360,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 		// The exact verification depends on your store implementation
 		sync = waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) == 1 && pods[0].Pod.Name == "test-pod-ready"
+			return len(pods) == 1 && pods[0].GetPod().Name == "test-pod-ready"
 		})
 		assert.True(t, sync, "Pod should be found in store after creation")
 	})
@@ -405,7 +405,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 		sync := waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
 			return len(pods) == 2 &&
-				(pods[0].Pod.Name == "test-pod-update-ready" || pods[1].Pod.Name == "test-pod-update-ready")
+				(pods[0].GetPod().Name == "test-pod-update-ready" || pods[1].GetPod().Name == "test-pod-update-ready")
 		})
 		assert.True(t, sync, "Pod should be found in store after update")
 	})
@@ -455,7 +455,7 @@ func TestModelServerController_PodLifecycle(t *testing.T) {
 		// Verify pod was removed from store since it's not ready
 		sync = waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) == 2 && (pods[0].Pod.Name != "test-pod-update-not-ready" && pods[1].Pod.Name != "test-pod-update-not-ready")
+			return len(pods) == 2 && (pods[0].GetPod().Name != "test-pod-update-not-ready" && pods[1].GetPod().Name != "test-pod-update-not-ready")
 		})
 		assert.True(t, sync, "Pod should not be found in store after creation")
 	})
@@ -714,7 +714,7 @@ func TestModelServerController_PodSelectionLogic(t *testing.T) {
 
 		sync := waitForObjectInCache(t, 2*time.Second, func() bool {
 			pods, _ := store.GetPodsByModelServer(utils.GetNamespaceName(ms))
-			return len(pods) > 0 && pods[0].Pod.Name == "test-pod-matching"
+			return len(pods) > 0 && pods[0].GetPod().Name == "test-pod-matching"
 		})
 		assert.True(t, sync, "Pod should be found in store after creation")
 	})
