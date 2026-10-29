@@ -105,7 +105,7 @@ spec:
                   roles:
                     description: |-
                       Roles limits acceleration to the listed roles and configures each of them.
-                      Empty means all roles with default settings.
+                      At least one role must be specified.
                     items:
                       description: BootstrapRole configures bootstrap acceleration
                         for one role.
@@ -129,6 +129,7 @@ spec:
                       required:
                       - name
                       type: object
+                    minItems: 1
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
@@ -144,6 +145,8 @@ spec:
                     format: int32
                     minimum: 1
                     type: integer
+                required:
+                - roles
                 type: object
               plugins:
                 description: Plugins defines optional plugin chain to customize serving

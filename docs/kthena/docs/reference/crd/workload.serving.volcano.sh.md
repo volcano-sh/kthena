@@ -201,7 +201,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `provider` _[BootstrapAccelerateStrategyProvider](#bootstrapacceleratestrategyprovider)_ | Provider is the weight transfer system used by the inference engines. | ModelExpress | Enum: [ModelExpress] <br /> |
-| `roles` _[BootstrapRole](#bootstraprole) array_ | Roles limits acceleration to the listed roles and configures each of them.<br />Empty means all roles with default settings. |  |  |
+| `roles` _[BootstrapRole](#bootstraprole) array_ | Roles limits acceleration to the listed roles and configures each of them.<br />At least one role must be specified. |  | MinItems: 1 <br /> |
 | `sourceFanOut` _integer_ | SourceFanOut is the number of P2P targets that one source can serve, i.e.<br />starting role replicas (created but not yet Running) per ready replica of<br />the same role. Once a role replica becomes ready, it acts as a new source<br />for the other replicas of that role, so the budget grows as more replicas<br />become ready. The effective budget is at least the role's gang minimum. | 1 | Minimum: 1 <br /> |
 | `modelExpress` _[ModelExpressConfig](#modelexpressconfig)_ | ModelExpress configures environment injection for inference engines.<br />If unset, users configure the engine environment themselves. |  |  |
 

@@ -30,7 +30,7 @@ type BootstrapAccelerateStrategyApplyConfiguration struct {
 	// Provider is the weight transfer system used by the inference engines.
 	Provider *workloadv1alpha1.BootstrapAccelerateStrategyProvider `json:"provider,omitempty"`
 	// Roles limits acceleration to the listed roles and configures each of them.
-	// Empty means all roles with default settings.
+	// At least one role must be specified.
 	Roles []BootstrapRoleApplyConfiguration `json:"roles,omitempty"`
 	// SourceFanOut is the number of P2P targets that one source can serve, i.e.
 	// starting role replicas (created but not yet Running) per ready replica of

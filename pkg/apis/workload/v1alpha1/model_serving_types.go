@@ -96,11 +96,12 @@ type BootstrapAccelerateStrategy struct {
 	Provider BootstrapAccelerateStrategyProvider `json:"provider,omitempty"`
 
 	// Roles limits acceleration to the listed roles and configures each of them.
-	// Empty means all roles with default settings.
+	// At least one role must be specified.
+	// +kubebuilder:validation:MinItems=1
 	// +listType=map
 	// +listMapKey=name
-	// +optional
-	Roles []BootstrapRole `json:"roles,omitempty"`
+	// +required
+	Roles []BootstrapRole `json:"roles"`
 
 	// SourceFanOut is the number of P2P targets that one source can serve, i.e.
 	// starting role replicas (created but not yet Running) per ready replica of
