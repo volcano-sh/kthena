@@ -42,6 +42,17 @@ type KthenaConfig struct {
 	InferenceExtensionEnabled bool
 	ImageTag                  string
 	ChartPath                 string
+
+	// TokenizerEnabled deploys the kthena-tokenizer service.
+	TokenizerEnabled bool
+	// TokenizerMode is "sidecar" (default) or "standalone".
+	TokenizerMode string
+	// TokenizerImageTag overrides the tokenizer image tag.
+	TokenizerImageTag string
+	// TokenizerRenderCommand overrides VLLM_RENDER_COMMAND via extraEnv.
+	TokenizerRenderCommand string
+	// TokenizerModels maps served model names to their tokenizer sources.
+	TokenizerModels map[string]string
 }
 
 // NewDefaultConfig returns a default configuration for kthena installation
@@ -83,6 +94,35 @@ func InstallKthena(cfg *KthenaConfig) error {
 		"--set", fmt.Sprintf("workload.controllerManager.image.tag=%s", cfg.ImageTag),
 		"--set", fmt.Sprintf("workload.controllerManager.downloaderImage.tag=%s", cfg.ImageTag),
 		"--set", fmt.Sprintf("workload.controllerManager.runtimeImage.tag=%s", cfg.ImageTag),
+	}
+
+	if cfg.TokenizerEnabled {
+		args = append(args,
+			"--set", fmt.Sprintf("networking.kthenaRouter.tokenizerService.enabled=%v", cfg.TokenizerEnabled),
+		)
+		if cfg.TokenizerMode != "" {
+			args = append(args,
+				"--set", fmt.Sprintf("networking.kthenaRouter.tokenizerService.mode=%s", cfg.TokenizerMode),
+			)
+		}
+		tag := cfg.TokenizerImageTag
+		if tag == "" {
+			tag = cfg.ImageTag
+		}
+		args = append(args,
+			"--set", fmt.Sprintf("networking.kthenaRouter.tokenizerService.image.tag=%s", tag),
+		)
+		if cfg.TokenizerRenderCommand != "" {
+			args = append(args,
+				"--set", "networking.kthenaRouter.tokenizerService.extraEnv[0].name=VLLM_RENDER_COMMAND",
+				"--set", fmt.Sprintf("networking.kthenaRouter.tokenizerService.extraEnv[0].value=%s", cfg.TokenizerRenderCommand),
+			)
+		}
+		for model, source := range cfg.TokenizerModels {
+			args = append(args,
+				"--set", fmt.Sprintf("networking.kthenaRouter.tokenizerService.models.%s=%s", model, source),
+			)
+		}
 	}
 
 	cmd := exec.Command("helm", args...)
@@ -156,12 +196,15 @@ func waitForKthenaDeployments(cfg *KthenaConfig) error {
 }
 
 func kthenaDeployments(cfg *KthenaConfig) []string {
-	deployments := make([]string, 0, 2)
+	deployments := make([]string, 0, 3)
 	if cfg.WorkloadEnabled {
 		deployments = append(deployments, "kthena-controller-manager")
 	}
 	if cfg.NetworkingEnabled {
 		deployments = append(deployments, "kthena-router")
+	}
+	if cfg.TokenizerEnabled && cfg.TokenizerMode == "standalone" {
+		deployments = append(deployments, "kthena-tokenizer")
 	}
 	return deployments
 }

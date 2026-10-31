@@ -120,6 +120,12 @@ test-e2e-gateway-api: ## Run gateway-api e2e tests.
 	@TEST_CATEGORY=gateway-api ./test/e2e/setup.sh
 	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/router/gateway-api/...
 
+.PHONY: test-e2e-tokenizer
+test-e2e-tokenizer: ## Run tokenizer service e2e tests.
+	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
+	@IMG_TOKENIZER=${IMG_TOKENIZER} IMG_TOKENIZER_ENGINE_MOCK=${IMG_TOKENIZER_ENGINE_MOCK} TOKENIZER_DOCKERFILE=e2e TEST_CATEGORY=tokenizer ./test/e2e/setup.sh
+	@IMG_TOKENIZER=${IMG_TOKENIZER} IMG_TOKENIZER_ENGINE_MOCK=${IMG_TOKENIZER_ENGINE_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=20m ./test/e2e/router/tokenizer/...
+
 .PHONY: test-e2e-gateway-inference-extension
 test-e2e-gateway-inference-extension: ## Run gateway-inference-extension e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
@@ -165,6 +171,7 @@ IMG_DOWNLOADER ?= ${HUB}/downloader:${TAG}
 IMG_RUNTIME ?= ${HUB}/runtime:${TAG}
 IMG_TOKENIZER ?= ${HUB}/kthena-tokenizer:${TAG}
 IMG_E2E_EXTERNAL_PROVIDER_MOCK ?= ${HUB}/kthena-external-provider-mock:${TAG}
+IMG_TOKENIZER_ENGINE_MOCK ?= ${HUB}/kthena-tokenizer-engine-mock:${TAG}
 
 .PHONY: docker-build-router
 docker-build-router: generate
@@ -189,6 +196,14 @@ docker-build-tokenizer:
 .PHONY: docker-build-e2e-external-provider-mock
 docker-build-e2e-external-provider-mock:
 	$(CONTAINER_TOOL) build -t ${IMG_E2E_EXTERNAL_PROVIDER_MOCK} -f test/e2e/external-provider-mock/Dockerfile .
+
+.PHONY: docker-build-tokenizer-engine-mock
+docker-build-tokenizer-engine-mock:
+	$(CONTAINER_TOOL) build -t ${IMG_TOKENIZER_ENGINE_MOCK} -f docker/Dockerfile.kthena-tokenizer-engine-mock .
+
+.PHONY: docker-build-tokenizer-e2e
+docker-build-tokenizer-e2e: ## Build tokenizer image for E2E tests (uses distroless, no vLLM base required).
+	$(CONTAINER_TOOL) build -t ${IMG_TOKENIZER} -f docker/Dockerfile.kthena-tokenizer-e2e .
 
 .PHONY: docker-build-all
 docker-build-all: docker-build-router docker-build-controller docker-build-downloader docker-build-runtime## Build all images.

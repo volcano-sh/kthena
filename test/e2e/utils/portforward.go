@@ -161,13 +161,25 @@ func startForwarder(namespace, podName string, localPort, podPort int) (PortForw
 	return f, nil
 }
 
+// AllocateLocalPortE binds to 127.0.0.1:0, returns the allocated port as a string, and
+// releases the listener. Callers that do not have a *testing.T should use this variant.
+func AllocateLocalPortE() (string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", fmt.Errorf("allocate local port: %w", err)
+	}
+	port := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+	if err := listener.Close(); err != nil {
+		return "", fmt.Errorf("release local port listener: %w", err)
+	}
+	return port, nil
+}
+
 // AllocateLocalPort binds to 127.0.0.1:0 and returns the allocated port as a string.
 func AllocateLocalPort(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	port, err := AllocateLocalPortE()
 	require.NoError(t, err)
-	port := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
-	require.NoError(t, listener.Close())
 	return port
 }
 
