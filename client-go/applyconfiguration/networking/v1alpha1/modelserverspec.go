@@ -20,6 +20,7 @@ package v1alpha1
 
 import (
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	v1 "k8s.io/api/core/v1"
 )
 
 // ModelServerSpecApplyConfiguration represents a declarative configuration of the ModelServerSpec type for use
@@ -56,6 +57,12 @@ type ModelServerSpecApplyConfiguration struct {
 	TrafficPolicy *TrafficPolicyApplyConfiguration `json:"trafficPolicy,omitempty"`
 	// KVConnector specifies the KV connector configuration for PD disaggregated routing
 	KVConnector *KVConnectorSpecApplyConfiguration `json:"kvConnector,omitempty"`
+	// APIKeySecretRef references the API key the serving instances require, for
+	// example a vLLM engine started with --api-key. The router sends it as a bearer
+	// token when discovering the models a pod serves. The Secret must live in this
+	// ModelServer's namespace and carry the
+	// networking.serving.volcano.sh/external-model-provider-credential label.
+	APIKeySecretRef *v1.SecretKeySelector `json:"apiKeySecretRef,omitempty"`
 }
 
 // ModelServerSpecApplyConfiguration constructs a declarative configuration of the ModelServerSpec type for use with
@@ -122,5 +129,13 @@ func (b *ModelServerSpecApplyConfiguration) WithTrafficPolicy(value *TrafficPoli
 // If called multiple times, the KVConnector field is set to the value of the last call.
 func (b *ModelServerSpecApplyConfiguration) WithKVConnector(value *KVConnectorSpecApplyConfiguration) *ModelServerSpecApplyConfiguration {
 	b.KVConnector = value
+	return b
+}
+
+// WithAPIKeySecretRef sets the APIKeySecretRef field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the APIKeySecretRef field is set to the value of the last call.
+func (b *ModelServerSpecApplyConfiguration) WithAPIKeySecretRef(value v1.SecretKeySelector) *ModelServerSpecApplyConfiguration {
+	b.APIKeySecretRef = &value
 	return b
 }
