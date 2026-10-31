@@ -292,11 +292,10 @@ jobs:
           path: ${{ env.archive_path }}
           retention-days: 1
 
-  push_helm_chart:
+  package_helm_chart:
     needs: [ setup, merge_images ]
+    if: needs.setup.outputs.is_tag == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -308,10 +307,6 @@ jobs:
         run: |
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
-
-      - name: Login to GHCR
-        if: github.event_name != 'pull_request'
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Update Chart and Package
         env:
@@ -330,21 +325,11 @@ jobs:
           helm package $CHART_PATH --version $VERSION --app-version $VERSION
           mv kthena-${VERSION}.tgz kthena.tgz
 
-      - name: Push to GHCR
-        if: github.event_name != 'pull_request'
-        env:
-          VERSION: ${{ needs.setup.outputs.version }}
-          REPO_OWNER: ${{ needs.setup.outputs.repo_owner }}
-        run: |
-          helm push kthena.tgz oci://ghcr.io/$REPO_OWNER/charts
-
       - name: Prepare Helm Release Artifacts
-        if: needs.setup.outputs.is_tag == 'true'
         run: |
           helm template kthena ./charts/kthena --namespace kthena-system --include-crds > kthena-install.yaml
 
       - name: Upload Helm Release Artifacts
-        if: needs.setup.outputs.is_tag == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: helm-release-artifacts
@@ -353,7 +338,7 @@ jobs:
             ./kthena-install.yaml
 
   create_github_release:
-    needs: [ setup, push_helm_chart, build_cli ]
+    needs: [ setup, package_helm_chart, build_cli ]
     if: needs.setup.outputs.is_tag == 'true'
     permissions:
       contents: write
@@ -378,7 +363,7 @@ jobs:
           body: |
             This release includes the following artifacts:
 
-            - **Helm Chart**: `kthena.tgz` (OCI artifact pushed to GHCR)
+            - **Helm Chart**: `kthena.tgz` (also published to the [volcano-sh Helm repository](https://volcano-sh.github.io/helm-charts))
             - **Installation YAML**: `kthena-install.yaml`
             - **CLI Binaries**: Pre-built binaries for Linux (amd64/arm64), macOS (amd64/arm64), and Windows (amd64)
 

@@ -220,6 +220,10 @@ docker-buildx: ## Build and push docker image for cross-platform support
 		-f docker/Dockerfile.kthena-controller-manager \
 		--push .
 
+.PHONY: generate-charts
+generate-charts: ## Package the Helm chart for the volcano-sh Helm repository into _output/release/chart (requires TAG=vX.Y.Z).
+	TAG=$(TAG) hack/generate-charts.sh
+
 
 ##@ Dependencies
 

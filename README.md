@@ -81,13 +81,16 @@ The two components talk to Kubernetes, not to each other, so you can mix and mat
 > **ModelBooster deprecation:** ModelBooster is deprecated in v1.1; use ModelServing, ModelServer, and ModelRoute. Removal is no earlier than v1.5. See the [deployment guidance](docs/kthena/docs/user-guide/model-deployment.md#modelbooster-deprecation). Existing ModelBooster deployments remain supported in v1.1 and require both subcharts.
 
 ```bash
+helm repo add volcano-sh https://volcano-sh.github.io/helm-charts
+helm repo update
+
 # Workload controllers only (no router)
-helm install kthena oci://ghcr.io/volcano-sh/charts/kthena \
+helm install kthena volcano-sh/kthena \
   --namespace kthena-system --create-namespace \
   --set networking.enabled=false
 
 # Router only (no workload controllers)
-helm install kthena oci://ghcr.io/volcano-sh/charts/kthena \
+helm install kthena volcano-sh/kthena \
   --namespace kthena-system --create-namespace \
   --set workload.enabled=false
 ```
