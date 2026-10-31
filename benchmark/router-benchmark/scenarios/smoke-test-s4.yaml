@@ -1,0 +1,59 @@
+name: "smoke-test-s4-backend-count-impact"
+description: "s4 scenario: scheduler scaling when backend pod count increases"
+
+# rate=2 was empirically validated on the 4c/16g CI runner against this
+# exact backend shape (6 mocker pods, 250m/1 CPU each): CI runs
+# 30693603161 and 30694269799 cleared 96.72-100% success on random and
+# least-request, with 0 mocker restarts, 0 genuine AIPerf errors, and
+# p50/p95/p99 latency matching every other validated scenario's shape.
+# Chosen as a starting point proportional to s2's validated 8-pod ceiling
+# (rate=3): 6 pods -> ~2.25, rounded down to 2 - and it held on the first
+# try, no lower values were needed.
+#
+# The scenario's original rate=50 was never tested directly on this 6-pod
+# shape (superseded before any run); it is close to the confirmed-unsafe
+# rate=20 that failed at 8 pods (issue #1452's original diagnosis), so
+# there was no reason to expect it safe on fewer pods.
+#
+# See volcano-sh/kthena#1452 for the full experiment history.
+load:
+  schedule:
+    mode: "rate"
+    rate: 2
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "homogeneous"
+      count: 6
+      # CI kind nodes are small (4 CPU); shrink per-pod requests so
+      # 6 pods + system components still fit on a single node.
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
