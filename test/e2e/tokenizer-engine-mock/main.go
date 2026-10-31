@@ -32,12 +32,6 @@ import (
 	"time"
 )
 
-type tokenizeReq struct {
-	Model            string `json:"model"`
-	Prompt           string `json:"prompt"`
-	AddSpecialTokens bool   `json:"add_special_tokens"`
-}
-
 type tokenizeResp struct {
 	Count       int   `json:"count"`
 	MaxModelLen int   `json:"max_model_len"`
