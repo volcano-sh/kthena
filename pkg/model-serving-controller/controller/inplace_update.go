@@ -35,6 +35,8 @@ import (
 
 const defaultInPlaceProgressDeadline = 1800 * time.Second
 
+var errInPlaceHistoryUnresolved = errors.New("in-place source history is unresolved")
+
 // inPlaceDecision is the outcome of evaluating one update unit.
 type inPlaceDecision int
 
@@ -422,6 +424,12 @@ func (c *ModelServingController) completeInPlaceUpdates(ctx context.Context, ms 
 		}
 		for _, unit := range splitInPlaceUnits(ms, sg.Name, pods, roleMode) {
 			if err := c.reconcileInPlaceUnit(ctx, ms, unit, revision); err != nil {
+				if errors.Is(err, errInPlaceHistoryUnresolved) {
+					// Pause only this unit. Unknown history supplies no Ready
+					// credit, but must not block independently safe units.
+					c.revisionHistory(ctx, ms).recordComparisonError(unit.groupName+"/"+unit.roleID+" in-place update", err)
+					continue
+				}
 				return err
 			}
 		}
@@ -454,6 +462,22 @@ func splitInPlaceUnits(ms *workloadv1alpha1.ModelServing, groupName string, pods
 }
 
 func (c *ModelServingController) reconcileInPlaceUnit(ctx context.Context, ms *workloadv1alpha1.ModelServing, unit *inPlaceUnit, revision string) error {
+	active := false
+	for _, state := range unit.states {
+		active = active || state.InProgress()
+	}
+	if active {
+		// Validate every member before any completion, retargeting or deadline
+		// recovery. This also covers an unpatched member of a partial update.
+		for _, pod := range unit.pods {
+			if utils.IsPodTerminating(pod) {
+				return nil
+			}
+			if _, err := c.revisionHistory(ctx, ms).workload(ctx, utils.ObjectRevision(pod)); err != nil {
+				return errors.Join(errInPlaceHistoryUnresolved, err)
+			}
+		}
+	}
 	var earliest time.Time
 	inProgress, retargeted := false, false
 	for i, pod := range unit.pods {
@@ -560,7 +584,7 @@ func (c *ModelServingController) inPlaceMembersPresent(ctx context.Context, ms *
 			}
 			applied, source, _, err := c.appliedRoleTemplate(ctx, ms, unit.groupName, desired.Name, instance)
 			if err != nil {
-				return false, err
+				return false, errors.Join(errInPlaceHistoryUnresolved, err)
 			}
 			members := make([]*corev1.Pod, 0, len(unit.pods))
 			for _, pod := range unit.pods {

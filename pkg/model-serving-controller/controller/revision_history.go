@@ -375,7 +375,8 @@ func (c *ModelServingController) compareServingGroupTemplate(
 	group datastore.ServingGroup,
 	targetRevision string,
 ) templateComparison {
-	if group.Revision == targetRevision {
+	roleMode := ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate
+	if (roleMode && c.store != nil) || group.Revision == targetRevision {
 		// A ServingGroup revision alone cannot describe a partially updated
 		// RoleRollingUpdate. Continue with the observed Role identities below.
 	} else {
@@ -404,6 +405,7 @@ func (c *ModelServingController) compareServingGroupTemplate(
 		return templateEquivalent
 	}
 	history := c.revisionHistory(ctx, ms)
+	unknown := false
 	for _, desired := range ms.Spec.Template.Roles {
 		observedRoles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group.Name, desired.Name)
 		if err != nil {
@@ -413,10 +415,20 @@ func (c *ModelServingController) compareServingGroupTemplate(
 		}
 		for _, observed := range observedRoles {
 			comparison := c.compareRoleTemplate(ctx, ms, group, desired, observed)
+			if roleMode && comparison == templateUnknown {
+				// A known outdated Role can still progress within its own budget.
+				// Preserve unknown status if no such Role exists; do not advance
+				// the group identity merely because the known Roles are current.
+				unknown = true
+				continue
+			}
 			if comparison != templateEquivalent {
 				return comparison
 			}
 		}
+	}
+	if unknown {
+		return templateUnknown
 	}
 	return templateEquivalent
 }

@@ -113,6 +113,155 @@ func (f *inPlaceHistoryFixture) requireUnitRevision(t *testing.T, revision strin
 	}
 }
 
+func TestInPlaceIntegrationUnknownSourceDoesNotBlockIndependentBudget(t *testing.T) {
+	for _, strategy := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
+		for _, phase := range []string{"completed", "expired-partial"} {
+			for _, unavailable := range []int{1, 2} {
+				t.Run(fmt.Sprintf("%s/%s/maxUnavailable-%d", strategy, phase, unavailable), func(t *testing.T) {
+					f := newInPlaceHistoryFixture(t, strategy)
+					f.current.Status.CurrentRevision = "known-old"
+					f.current.Spec.RolloutStrategy.ProgressDeadlineSeconds = ptr.To[int32](1)
+					f.current.Spec.RolloutStrategy.RollingUpdateConfiguration = &workloadv1alpha1.RollingUpdateConfiguration{
+						Partition: ptr.To(intstr.FromInt(0)), MaxSurge: ptr.To(intstr.FromInt(0)), MaxUnavailable: ptr.To(intstr.FromInt(unavailable)),
+					}
+					knownGroup, knownRoleID := f.group, "decode-1"
+					groupOrdinal, roleOrdinal := 0, 1
+					if strategy == workloadv1alpha1.ServingGroupRollingUpdate {
+						f.current.Spec.Replicas = ptr.To[int32](2)
+						f.current.Spec.RecoveryPolicy = workloadv1alpha1.ServingGroupRecreate
+						groupOrdinal, roleOrdinal = 1, 0
+						knownGroup, knownRoleID = utils.GenerateServingGroupName(f.current.Name, 1), "decode-0"
+					} else {
+						f.current.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+						f.current.Spec.Template.Roles[0].MaxUnavailable = ptr.To(intstr.FromInt(unavailable))
+						f.current.Spec.RecoveryPolicy = workloadv1alpha1.RoleRecreate
+					}
+					recordTestRevision(t, f.c.kubeClientSet, f.old, "known-old")
+					recordTestRevision(t, f.c.kubeClientSet, f.current, "target-alias")
+					for name, uid := range seedAppliedRole(t, f.c, f.old, f.old.Spec.Template.Roles[0], groupOrdinal, roleOrdinal, "known-old", -1) {
+						f.uids[name] = uid
+					}
+					require.NoError(t, f.c.store.UpdateRoleStatus(utils.GetNamespaceName(f.current), knownGroup, "decode", knownRoleID, datastore.RoleRunning))
+					require.NoError(t, f.c.store.UpdateServingGroupStatus(utils.GetNamespaceName(f.current), knownGroup, datastore.ServingGroupRunning))
+					_, err := f.c.modelServingClient.WorkloadV1alpha1().ModelServings(f.current.Namespace).Update(context.Background(), f.current, metav1.UpdateOptions{})
+					require.NoError(t, err)
+					require.NoError(t, f.c.modelServingsInformer.GetIndexer().Update(f.current))
+
+					startedAt := time.Now()
+					if phase == "expired-partial" {
+						startedAt = startedAt.Add(-time.Hour)
+					}
+					unknown := map[string]corev1.Pod{}
+					for _, pod := range f.pods(t) {
+						if utils.ObjectRevision(&pod) != "old" || (phase == "expired-partial" && pod.Name != utils.GeneratePodName(f.group, "decode-0", 0)) {
+							continue
+						}
+						_, err := inplace.Start(context.Background(), f.c.kubeClientSet, &pod, map[string]string{"main": "image:v2"}, "target-alias", startedAt)
+						require.NoError(t, err)
+					}
+					f.runPatchedContainers(t)
+					for _, pod := range f.pods(t) {
+						if utils.ObjectRevision(&pod) == "old" {
+							unknown[pod.Name] = pod
+						}
+					}
+					require.Len(t, unknown, 2)
+					oldCR, err := utils.GetControllerRevision(context.Background(), f.c.kubeClientSet, f.old, "old")
+					require.NoError(t, err)
+					require.NoError(t, f.c.kubeClientSet.AppsV1().ControllerRevisions(oldCR.Namespace).Delete(context.Background(), oldCR.Name, metav1.DeleteOptions{}))
+					var syncedPodGroups []string
+					f.c.podGroupManager = &fakePodGroupManager{
+						hasCRD: true,
+						createOrUpdateFunc: func(_ context.Context, _ *workloadv1alpha1.ModelServing, group string) (error, time.Duration) {
+							syncedPodGroups = append(syncedPodGroups, group)
+							return nil, 0
+						},
+					}
+					client := f.c.kubeClientSet.(*kubefake.Clientset)
+					client.ClearActions()
+					err = f.c.syncModelServing(context.Background(), namespacedKey(f.current.Namespace, f.current.Name))
+					require.ErrorContains(t, err, "ControllerRevision is missing", "unknown source history must remain retryable after independent progress")
+					require.NotContains(t, syncedPodGroups, f.group, "unknown applied layout must not overwrite its PodGroup")
+					for _, action := range client.Actions() {
+						if action.GetResource().Resource != "pods" {
+							continue
+						}
+						require.NotEqual(t, "delete", action.GetVerb(), "an expired update cannot authorize deleting a member with unknown source history")
+						require.NotEqual(t, "delete-collection", action.GetVerb(), "these image-only known units must use in-place updates; unknown units must remain untouched")
+					}
+					for _, pod := range f.pods(t) {
+						require.Equal(t, f.uids[pod.Name], pod.UID)
+						if before, found := unknown[pod.Name]; found {
+							require.Equal(t, before.Labels, pod.Labels)
+							require.Equal(t, before.Annotations, pod.Annotations, "unknown source prevents completion, retargeting and deadline recovery")
+							continue
+						}
+						state := inplace.StateOf(&pod)
+						if unavailable == 2 {
+							require.NotNil(t, state, "minAvailable=0 lets the independently known unit start despite unknown source history elsewhere")
+							require.True(t, state.InProgress())
+							require.Equal(t, "target-alias", state.Revision)
+							require.Equal(t, "image:v2", pod.Spec.Containers[0].Image)
+						} else {
+							require.Nil(t, state, "the unknown unit contributes no Ready credit to the maxUnavailable=1 budget")
+							require.Equal(t, "image:v1", pod.Spec.Containers[0].Image)
+						}
+					}
+					roles, err := f.c.store.GetRoleList(utils.GetNamespaceName(f.current), f.group, "decode")
+					require.NoError(t, err)
+					for _, role := range roles {
+						if role.Name == "decode-0" {
+							require.Equal(t, "old", role.Revision)
+							if strategy == workloadv1alpha1.RoleRollingUpdate {
+								require.Equal(t, datastore.RoleCreating, role.Status, "an unverified in-place Role must not grant Ready credit")
+							}
+						}
+					}
+					require.Equal(t, datastore.ServingGroupCreating, f.c.store.GetServingGroupStatus(utils.GetNamespaceName(f.current), f.group))
+				})
+			}
+		}
+	}
+}
+
+func TestInPlaceIntegrationUnknownRoleDoesNotAdvanceGroupIdentity(t *testing.T) {
+	f := newInPlaceHistoryFixture(t, workloadv1alpha1.RoleRollingUpdate)
+	f.current.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+	f.current.Spec.Template.Roles[0].MaxUnavailable = ptr.To(intstr.FromInt(2))
+	recordTestRevision(t, f.c.kubeClientSet, f.current, "target-alias")
+	seedAppliedRole(t, f.c, f.current, f.current.Spec.Template.Roles[0], 0, 1, "target-alias", -1)
+	require.NoError(t, f.c.store.UpdateRoleStatus(utils.GetNamespaceName(f.current), f.group, "decode", "decode-1", datastore.RoleRunning))
+	require.NoError(t, f.c.store.UpdateServingGroupRevision(utils.GetNamespaceName(f.current), f.group, "old"))
+	_, err := f.c.modelServingClient.WorkloadV1alpha1().ModelServings(f.current.Namespace).Update(context.Background(), f.current, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, f.c.modelServingsInformer.GetIndexer().Update(f.current))
+	for _, pod := range f.pods(t) {
+		if utils.ObjectRevision(&pod) == "old" {
+			_, err := inplace.Start(context.Background(), f.c.kubeClientSet, &pod, map[string]string{"main": "image:v2"}, "target-alias", time.Now())
+			require.NoError(t, err)
+		}
+	}
+	f.runPatchedContainers(t)
+	oldCR, err := utils.GetControllerRevision(context.Background(), f.c.kubeClientSet, f.old, "old")
+	require.NoError(t, err)
+	require.NoError(t, f.c.kubeClientSet.AppsV1().ControllerRevisions(oldCR.Namespace).Delete(context.Background(), oldCR.Name, metav1.DeleteOptions{}))
+	before := f.pods(t)
+	client := f.c.kubeClientSet.(*kubefake.Clientset)
+	client.ClearActions()
+	err = f.c.syncModelServing(context.Background(), namespacedKey(f.current.Namespace, f.current.Name))
+	require.ErrorContains(t, err, "ControllerRevision is missing")
+	revision, found := f.c.store.GetServingGroupRevision(utils.GetNamespaceName(f.current), f.group)
+	require.True(t, found)
+	require.Equal(t, "old", revision, "one known equivalent Role cannot prove that an unknown sibling is current")
+	require.Equal(t, datastore.ServingGroupCreating, f.c.store.GetServingGroupStatus(utils.GetNamespaceName(f.current), f.group))
+	for _, action := range client.Actions() {
+		if action.GetResource().Resource == "pods" {
+			require.NotContains(t, []string{"patch", "delete", "delete-collection"}, action.GetVerb(), "unknown plus equivalent Roles must not authorize Pod mutation")
+		}
+	}
+	require.Equal(t, before, f.pods(t), "both unknown and already-current Pods retain identity and state")
+}
+
 func TestInPlaceIntegrationUsesResolvedHistoryAcrossRestart(t *testing.T) {
 	for _, strategy := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
 		for _, identity := range []string{"semantic-alias", "hash-collision"} {
