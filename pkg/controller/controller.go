@@ -159,7 +159,7 @@ func SetupController(ctx context.Context, cc Config) {
 			startControllers(ctx)
 			klog.Info("Start as leader")
 		}
-		leaderElector, err := initLeaderElector(kubeClient, startedLeading)
+		leaderElector, err := initLeaderElector(ctx, kubeClient, startedLeading)
 		if err != nil {
 			panic(err)
 		}
@@ -172,7 +172,7 @@ func SetupController(ctx context.Context, cc Config) {
 }
 
 // initLeaderElector inits a leader elector for leader election
-func initLeaderElector(kubeClient kubernetes.Interface, startedLeading func(ctx context.Context)) (*leaderelection.LeaderElector, error) {
+func initLeaderElector(ctx context.Context, kubeClient kubernetes.Interface, startedLeading func(ctx context.Context)) (*leaderelection.LeaderElector, error) {
 	resourceLock, err := newResourceLock(kubeClient)
 	if err != nil {
 		return nil, err
@@ -184,9 +184,7 @@ func initLeaderElector(kubeClient kubernetes.Interface, startedLeading func(ctx 
 		RetryPeriod:   defaultRetryPeriod,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: startedLeading,
-			OnStoppedLeading: func() {
-				klog.Error("leader election lost")
-			},
+			OnStoppedLeading: onStoppedLeading(ctx, func() { os.Exit(1) }),
 		},
 		ReleaseOnCancel: false,
 		Name:            leaderElectionId,
@@ -195,6 +193,19 @@ func initLeaderElector(kubeClient kubernetes.Interface, startedLeading func(ctx 
 		return nil, err
 	}
 	return leaderElector, nil
+}
+
+// onStoppedLeading exits the process if leadership is lost while ctx is still active,
+// so the pod restarts and re-enters leader election.
+func onStoppedLeading(ctx context.Context, exit func()) func() {
+	return func() {
+		if ctx.Err() != nil {
+			klog.Info("leader election stopped as part of shutdown")
+			return
+		}
+		klog.Error("leader election lost unexpectedly; exiting so the process can restart and re-elect a leader")
+		exit()
+	}
 }
 
 // newResourceLock returns a lease lock which is used to elect leader
