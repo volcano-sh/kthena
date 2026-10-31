@@ -131,6 +131,70 @@ func TestValidateModelServingMissingReplicasDoesNotPanic(t *testing.T) {
 	assert.Contains(t, reason, "spec.template.roles[0].replicas")
 }
 
+func TestValidateModelServingUpdateRoleNamesImmutable(t *testing.T) {
+	modelServingWithRoles := func(names ...string) *workloadv1alpha1.ModelServing {
+		roles := make([]workloadv1alpha1.Role, 0, len(names))
+		for _, name := range names {
+			roles = append(roles, workloadv1alpha1.Role{Name: name})
+		}
+		return &workloadv1alpha1.ModelServing{
+			Spec: workloadv1alpha1.ModelServingSpec{
+				Template: workloadv1alpha1.ServingGroup{Roles: roles},
+			},
+		}
+	}
+
+	tests := []struct {
+		name        string
+		oldRoles    []string
+		newRoles    []string
+		wantAllowed bool
+	}{
+		{
+			name:        "unchanged role names",
+			oldRoles:    []string{"prefill", "decode"},
+			newRoles:    []string{"prefill", "decode"},
+			wantAllowed: true,
+		},
+		{
+			name:     "renamed role",
+			oldRoles: []string{"prefill", "decode"},
+			newRoles: []string{"embedding", "decode"},
+		},
+		{
+			name:     "added role",
+			oldRoles: []string{"prefill", "decode"},
+			newRoles: []string{"prefill", "decode", "embedding"},
+		},
+		{
+			name:     "removed role",
+			oldRoles: []string{"prefill", "decode"},
+			newRoles: []string{"prefill"},
+		},
+		{
+			name:        "reordered roles",
+			oldRoles:    []string{"prefill", "decode"},
+			newRoles:    []string{"decode", "prefill"},
+			wantAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed, reason := validateModelServingUpdate(
+				modelServingWithRoles(tt.oldRoles...),
+				modelServingWithRoles(tt.newRoles...),
+			)
+			assert.Equal(t, tt.wantAllowed, allowed)
+			if tt.wantAllowed {
+				assert.Empty(t, reason)
+			} else {
+				assert.Contains(t, reason, "role names are immutable")
+			}
+		})
+	}
+}
+
 func TestValidGeneratedNameLengthUsesReplicaDefaultsForMissingValues(t *testing.T) {
 	replicas := int32(1)
 	longName := "this-is-a-very-long-name-that-exceeds-the-allowed-length-for-generated-name"
