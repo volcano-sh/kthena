@@ -79,7 +79,7 @@ func TestRegisterDefaultPlugins(t *testing.T) {
 		assert.NotNil(t, builder, "Filter plugin builder for %s should not be nil", pluginName)
 
 		// Test that the builder actually creates a plugin
-		plugin := builder(runtime.RawExtension{})
+		plugin := builder(store, runtime.RawExtension{})
 		assert.NotNil(t, plugin, "Plugin %s should be created successfully", pluginName)
 		assert.Equal(t, pluginName, plugin.Name(), "Plugin name should match")
 	}
@@ -136,7 +136,7 @@ func TestGetFilterPlugins(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filterPlugins := getFilterPlugins(registry, tt.filterPluginMap, tt.pluginsArgMap)
+			filterPlugins := getFilterPlugins(registry, datastore.New(), tt.filterPluginMap, tt.pluginsArgMap)
 
 			assert.Equal(t, tt.expectedCount, len(filterPlugins))
 

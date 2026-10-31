@@ -1,0 +1,23 @@
+# This example demonstrates the per-ModelServer least-request threshold.
+# maxWaitingRequests filters out pods whose engine waiting-queue depth reaches
+# the value. It is independent of the global least-request threshold in the
+# router scheduler configuration: when both apply, the stricter (smaller)
+# value wins. The filter takes effect when the least-request plugins
+# (global and per-ModelServer) are enabled in the router scheduler config.
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: deepseek-r1-7b-least-request
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: deepseek-r1-7b
+  workloadPort:
+    port: 8000
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    loadBalancer:
+      leastRequest:
+        maxWaitingRequests: 4

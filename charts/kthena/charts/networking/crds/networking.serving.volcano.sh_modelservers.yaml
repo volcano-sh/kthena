@@ -171,6 +171,26 @@ spec:
                         minimum: 0
                         type: integer
                     type: object
+                  loadBalancer:
+                    description: LoadBalancer configures load-balancing policies for
+                      this ModelServer.
+                    properties:
+                      leastRequest:
+                        description: LeastRequest configures the least-request policy
+                          for this ModelServer.
+                        properties:
+                          maxWaitingRequests:
+                            description: |-
+                              MaxWaitingRequests is the per-ModelServer waiting-queue threshold: pods
+                              whose engine-reported waiting-queue depth reaches this value are filtered
+                              out during scheduling. It complements the global threshold in the router
+                              scheduler configuration; when both apply, the stricter (smaller) value
+                              wins.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        type: object
+                    type: object
                   retry:
                     description: The retry policy for the inference request.
                     properties:

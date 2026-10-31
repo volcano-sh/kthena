@@ -71,8 +71,9 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 		"least-latency": 1,
 		"prefix-cache":  1,
 	}
-	filterPluginMap := []string{
+	filterPlugins := []string{
 		"least-request",
+		"modelserver-least-request",
 	}
 	pluginsArgMap := map[string]runtime.RawExtension{
 		"least-request": {Raw: []byte(`{"maxWaitingRequests": 10}`)},
@@ -85,14 +86,14 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 		// If no scheduler configuration is provided, use the default configuration
 		klog.Warning("No scheduler configuration found, using default configuration")
 	} else {
-		scorePluginMap, filterPluginMap, pluginsArgMap, err = conf.LoadSchedulerConfig(&routerConfig.Scheduler)
+		scorePluginMap, filterPlugins, pluginsArgMap, err = conf.LoadSchedulerConfig(&routerConfig.Scheduler)
 		if err != nil {
 			klog.Fatalf("failed to Load Scheduler: %v", err)
 		}
 	}
 
 	leastRequestEnabled := false
-	for _, name := range filterPluginMap {
+	for _, name := range filterPlugins {
 		if name == plugins.LeastRequestPluginName {
 			leastRequestEnabled = true
 			break
@@ -110,7 +111,7 @@ func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration)
 	scorePlugins := getScorePlugins(registry, store, scorePluginMap, pluginsArgMap)
 	return &SchedulerImpl{
 		store:             store,
-		filterPlugins:     getFilterPlugins(registry, filterPluginMap, pluginsArgMap),
+		filterPlugins:     getFilterPlugins(registry, store, filterPlugins, pluginsArgMap),
 		scorePlugins:      scorePlugins,
 		postScheduleHooks: getPostScheduleHooks(scorePlugins),
 		syncOnFlight:      leastRequestEnabled,

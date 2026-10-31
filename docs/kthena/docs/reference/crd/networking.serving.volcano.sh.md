@@ -230,6 +230,38 @@ _Appears in:_
 | `mooncake` |  |
 
 
+#### LeastRequest
+
+
+
+LeastRequest configures the least-request load balancing policy.
+
+
+
+_Appears in:_
+- [LoadBalancer](#loadbalancer)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `maxWaitingRequests` _integer_ | MaxWaitingRequests is the per-ModelServer waiting-queue threshold: pods<br />whose engine-reported waiting-queue depth reaches this value are filtered<br />out during scheduling. It complements the global threshold in the router<br />scheduler configuration; when both apply, the stricter (smaller) value<br />wins. |  | Minimum: 1 <br /> |
+
+
+#### LoadBalancer
+
+
+
+LoadBalancer groups the per-ModelServer load-balancing policies.
+
+
+
+_Appears in:_
+- [TrafficPolicy](#trafficpolicy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `leastRequest` _[LeastRequest](#leastrequest)_ | LeastRequest configures the least-request policy for this ModelServer. |  |  |
+
+
 #### ModelMatch
 
 
@@ -643,6 +675,7 @@ _Appears in:_
 | `retry` _[Retry](#retry)_ | The retry policy for the inference request. |  |  |
 | `connectionPool` _[ConnectionPool](#connectionpool)_ | ConnectionPool configures the upstream HTTP connection pool used when<br />forwarding to this ModelServer's pods. When omitted, a shared default<br />pool is used. Each ModelServer that sets this gets its own isolated pool. |  |  |
 | `sessionSticky` _[SessionSticky](#sessionsticky)_ | SessionSticky pins requests with the same extracted session key to the same<br />backend Pod of this ModelServer for a TTL. Nil or omitted disables session<br />affinity for this ModelServer. It does not override ModelRoute weighted<br />selection among ModelServers. |  |  |
+| `loadBalancer` _[LoadBalancer](#loadbalancer)_ | LoadBalancer configures load-balancing policies for this ModelServer. |  |  |
 
 
 #### WorkloadPort

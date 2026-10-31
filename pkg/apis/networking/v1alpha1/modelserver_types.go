@@ -199,7 +199,27 @@ type TrafficPolicy struct {
 	// +optional
 	SessionSticky *SessionSticky `json:"sessionSticky,omitempty"`
 
-	// TODO: add LoadBalancer policy
+	// LoadBalancer configures load-balancing policies for this ModelServer.
+	LoadBalancer *LoadBalancer `json:"loadBalancer,omitempty"`
+}
+
+// LoadBalancer groups the per-ModelServer load-balancing policies.
+type LoadBalancer struct {
+	// LeastRequest configures the least-request policy for this ModelServer.
+	// +optional
+	LeastRequest *LeastRequest `json:"leastRequest,omitempty"`
+}
+
+// LeastRequest configures the least-request load balancing policy.
+type LeastRequest struct {
+	// MaxWaitingRequests is the per-ModelServer waiting-queue threshold: pods
+	// whose engine-reported waiting-queue depth reaches this value are filtered
+	// out during scheduling. It complements the global threshold in the router
+	// scheduler configuration; when both apply, the stricter (smaller) value
+	// wins.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxWaitingRequests *int32 `json:"maxWaitingRequests,omitempty"`
 }
 
 // ConnectionPool configures the HTTP connection pool for a ModelServer.

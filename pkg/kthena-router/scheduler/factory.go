@@ -25,7 +25,7 @@ import (
 )
 
 type ScorePluginBuilder = func(store datastore.Store, arg runtime.RawExtension) framework.ScorePlugin
-type FilterPluginBuilder = func(arg runtime.RawExtension) framework.FilterPlugin
+type FilterPluginBuilder = func(store datastore.Store, arg runtime.RawExtension) framework.FilterPlugin
 
 // PluginRegistry manages the registration and retrieval of scheduler plugins
 type PluginRegistry struct {
@@ -86,23 +86,26 @@ func registerDefaultPlugins(registry *PluginRegistry) {
 		return plugins.NewKVCacheAware(store, args)
 	})
 	// filterPlugin
-	registry.registerFilterPlugin(plugins.LeastRequestPluginName, func(args runtime.RawExtension) framework.FilterPlugin {
+	registry.registerFilterPlugin(plugins.LeastRequestPluginName, func(_ datastore.Store, args runtime.RawExtension) framework.FilterPlugin {
 		return plugins.NewLeastRequest(args)
 	})
-	registry.registerFilterPlugin(plugins.LoraAffinityPluginName, func(args runtime.RawExtension) framework.FilterPlugin {
+	registry.registerFilterPlugin(plugins.ModelServerLeastRequestPluginName, func(store datastore.Store, args runtime.RawExtension) framework.FilterPlugin {
+		return plugins.NewModelServerLeastRequest(store)
+	})
+	registry.registerFilterPlugin(plugins.LoraAffinityPluginName, func(_ datastore.Store, args runtime.RawExtension) framework.FilterPlugin {
 		return plugins.NewLoraAffinity()
 	})
 }
 
-func getFilterPlugins(registry *PluginRegistry, filterPluginMap []string, pluginsArgMap map[string]runtime.RawExtension) []framework.FilterPlugin {
+func getFilterPlugins(registry *PluginRegistry, store datastore.Store, filterPlugins []string, pluginsArgMap map[string]runtime.RawExtension) []framework.FilterPlugin {
 	var list []framework.FilterPlugin
 	// TODO: enable lora affinity when models from metrics are available.
-	for _, pluginName := range filterPluginMap {
+	for _, pluginName := range filterPlugins {
 		if builderFunc, exist := registry.getFilterPlugin(pluginName); !exist {
 			klog.Errorf("Failed to get plugin %s.", pluginName)
 			continue
 		} else {
-			plugin := builderFunc(pluginsArgMap[pluginName])
+			plugin := builderFunc(store, pluginsArgMap[pluginName])
 			if plugin != nil {
 				list = append(list, plugin)
 			}

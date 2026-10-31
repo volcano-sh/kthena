@@ -50,6 +50,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &networkingv1alpha1.GlobalRateLimitApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("KVConnectorSpec"):
 		return &networkingv1alpha1.KVConnectorSpecApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("LeastRequest"):
+		return &networkingv1alpha1.LeastRequestApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("LoadBalancer"):
+		return &networkingv1alpha1.LoadBalancerApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("ModelMatch"):
 		return &networkingv1alpha1.ModelMatchApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("ModelRoute"):

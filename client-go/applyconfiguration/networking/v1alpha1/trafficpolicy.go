@@ -42,6 +42,8 @@ type TrafficPolicyApplyConfiguration struct {
 	// affinity for this ModelServer. It does not override ModelRoute weighted
 	// selection among ModelServers.
 	SessionSticky *SessionStickyApplyConfiguration `json:"sessionSticky,omitempty"`
+	// LoadBalancer configures load-balancing policies for this ModelServer.
+	LoadBalancer *LoadBalancerApplyConfiguration `json:"loadBalancer,omitempty"`
 }
 
 // TrafficPolicyApplyConfiguration constructs a declarative configuration of the TrafficPolicy type for use with
@@ -79,5 +81,13 @@ func (b *TrafficPolicyApplyConfiguration) WithConnectionPool(value *ConnectionPo
 // If called multiple times, the SessionSticky field is set to the value of the last call.
 func (b *TrafficPolicyApplyConfiguration) WithSessionSticky(value *SessionStickyApplyConfiguration) *TrafficPolicyApplyConfiguration {
 	b.SessionSticky = value
+	return b
+}
+
+// WithLoadBalancer sets the LoadBalancer field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the LoadBalancer field is set to the value of the last call.
+func (b *TrafficPolicyApplyConfiguration) WithLoadBalancer(value *LoadBalancerApplyConfiguration) *TrafficPolicyApplyConfiguration {
+	b.LoadBalancer = value
 	return b
 }
