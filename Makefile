@@ -88,6 +88,7 @@ test: generate ## Run tests. Exclude e2e, client-go.
 test-docs: ## Run documentation tests (type check and build)
 	cd docs/kthena && npm run typecheck
 	cd docs/kthena && npm run build
+	cd docs/kthena && npm run test:i18n
 
 .PHONY: test-e2e
 test-e2e: ## Run all e2e tests sequentially (legacy).
