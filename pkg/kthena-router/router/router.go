@@ -796,12 +796,16 @@ func (r *Router) finalizeSessionSticky(
 		selected.PrefillPod = ctx.PrefillPods[0].GetPodNamespacedName().Name
 		selected.Pod = ctx.DecodePods[0].GetPodNamespacedName().Name
 	} else {
-		if len(ctx.BestPods) == 0 || ctx.BestPods[0].Pod == nil {
+		var podName string
+		if len(ctx.BestPods) > 0 && ctx.BestPods[0] != nil {
+			podName = ctx.BestPods[0].GetPodNamespacedName().Name
+		}
+		if podName == "" {
 			klog.Warningf("session sticky: skip commit for modelServer %q: no selectable pod after schedule",
 				selectedModelServer)
 			return
 		}
-		selected.Pod = ctx.BestPods[0].Pod.Name
+		selected.Pod = podName
 	}
 	reqCtx := c.Request.Context()
 	if prevOK && !prev.Equal(selected) {

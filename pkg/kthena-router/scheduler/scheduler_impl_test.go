@@ -31,6 +31,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/testutil"
 )
 
 // TestTopNPodInfos tests the TopNPodInfos function
@@ -269,6 +270,7 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 		overloadDecode      string // RequestWaitingNum above filter threshold
 		overloadPrefill     string
 		deletePrefill       string // remove from store before Schedule
+		updatePods          bool   // update the sticky pair from another goroutine during Schedule
 		wantDecode          string
 		wantPrefill         string
 		wantStickyCleared   bool
@@ -280,6 +282,15 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 			name:                "complete sticky pair pins and skips score",
 			stickyDecode:        "decode-b",
 			stickyPrefill:       "prefill-b",
+			wantDecode:          "decode-b",
+			wantPrefill:         "prefill-b",
+			wantSingleCandidate: true,
+		},
+		{
+			name:                "complete sticky pair pins while the pods are updated",
+			stickyDecode:        "decode-b",
+			stickyPrefill:       "prefill-b",
+			updatePods:          true,
 			wantDecode:          "decode-b",
 			wantPrefill:         "prefill-b",
 			wantSingleCandidate: true,
@@ -388,6 +399,9 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 			}
 
 			scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+			if tt.updatePods {
+				scheduler = schedulerWithoutFilters(store)
+			}
 			ctx := &framework.Context{
 				Prompt:               &common.ChatMessage{},
 				ModelServerName:      modelServerName,
@@ -395,7 +409,14 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 				StickyPodName:        tt.stickyDecode,
 				StickyPrefillPodName: tt.stickyPrefill,
 			}
-			require.NoError(t, scheduler.Schedule(ctx, pods))
+			if tt.updatePods {
+				wait := updatePodsConcurrently(podsByName(pods, tt.stickyDecode, tt.stickyPrefill)...)
+				err = scheduler.Schedule(ctx, pods)
+				wait()
+			} else {
+				err = scheduler.Schedule(ctx, pods)
+			}
+			require.NoError(t, err)
 			require.NotEmpty(t, ctx.DecodePods)
 			require.NotEmpty(t, ctx.PrefillPods)
 			require.NotNil(t, ctx.DecodePods[0].Pod)
@@ -422,6 +443,84 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestScheduleStickyPod tests that non-PD scheduling pins the sticky pod. With
+// updatePods, another goroutine updates the sticky pod during Schedule, so that
+// -race fails if the sticky check reads PodInfo.Pod without the PodInfo lock.
+func TestScheduleStickyPod(t *testing.T) {
+	tests := []struct {
+		name       string
+		updatePods bool
+	}{
+		{name: "sticky pod pins and skips score"},
+		{name: "sticky pod pins while the pods are updated", updatePods: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pods := []*datastore.PodInfo{
+				testutil.PodInfoWithEngine("pod-a", "default", "10.0.0.1", ""),
+				testutil.PodInfoWithEngine("pod-b", "default", "10.0.0.2", ""),
+			}
+			scheduler := NewScheduler(datastore.New(), nil).(*SchedulerImpl)
+			if tt.updatePods {
+				scheduler = schedulerWithoutFilters(datastore.New())
+			}
+			ctx := &framework.Context{
+				Prompt:          &common.ChatMessage{},
+				ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
+				StickyPodName:   "pod-b",
+			}
+
+			var err error
+			if tt.updatePods {
+				wait := updatePodsConcurrently(pods[1])
+				err = scheduler.Schedule(ctx, pods)
+				wait()
+			} else {
+				err = scheduler.Schedule(ctx, pods)
+			}
+			require.NoError(t, err)
+			require.Len(t, ctx.BestPods, 1)
+			require.Equal(t, "pod-b", ctx.BestPods[0].GetPod().Name)
+		})
+	}
+}
+
+// schedulerWithoutFilters returns a scheduler with no filter plugins. The
+// filter plugins take the PodInfo lock just before the sticky check, which
+// orders a concurrent update before the read and hides a missing lock from
+// -race.
+func schedulerWithoutFilters(store datastore.Store) *SchedulerImpl {
+	return &SchedulerImpl{store: store}
+}
+
+// updatePodsConcurrently updates each pod's Pod object from another goroutine,
+// as the ModelServer controller does when a pod changes. Call the returned
+// function after Schedule to wait for the update.
+func updatePodsConcurrently(pods ...*datastore.PodInfo) (wait func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, pod := range pods {
+			pod.UpdatePod(pod.GetPod().DeepCopy(), pod.GetEngine(), pod.GetModelServers())
+		}
+	}()
+	return func() { <-done }
+}
+
+// podsByName returns the pods with the given names, in that order.
+func podsByName(pods []*datastore.PodInfo, names ...string) []*datastore.PodInfo {
+	var found []*datastore.PodInfo
+	for _, name := range names {
+		for _, pod := range pods {
+			if pod.GetPodNamespacedName().Name == name {
+				found = append(found, pod)
+			}
+		}
+	}
+	return found
 }
 
 // TestScheduleNonPDGroupWithEmptyScores tests non-PD scheduling with empty scores

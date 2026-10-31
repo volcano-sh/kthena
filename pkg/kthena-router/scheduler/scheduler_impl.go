@@ -154,7 +154,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		if ctx.StickyPodName != "" && ctx.StickyPrefillPodName != "" {
 			// 2. Sticky decode must still be in the filtered decode list.
 			stickyDecodeIndex := slices.IndexFunc(decodePods, func(pod *datastore.PodInfo) bool {
-				return pod != nil && pod.Pod != nil && pod.Pod.Name == ctx.StickyPodName
+				return pod != nil && pod.GetPodNamespacedName().Name == ctx.StickyPodName
 			})
 			if stickyDecodeIndex >= 0 {
 				stickyDecode := decodePods[stickyDecodeIndex]
@@ -166,7 +166,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 				}
 				// 4. Sticky prefill must still be selectable in that group.
 				stickyPrefillIndex := slices.IndexFunc(stickyPrefillPods, func(pod *datastore.PodInfo) bool {
-					return pod != nil && pod.Pod != nil && pod.Pod.Name == ctx.StickyPrefillPodName
+					return pod != nil && pod.GetPodNamespacedName().Name == ctx.StickyPrefillPodName
 				})
 				if stickyErr == nil && stickyPrefillIndex >= 0 {
 					// 5. Both sides OK: pin only this pair and return (no Score, no topN fill).
@@ -230,7 +230,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 
 	if ctx.StickyPodName != "" {
 		for _, p := range pods {
-			if p.Pod != nil && p.Pod.Name == ctx.StickyPodName {
+			if p.GetPodNamespacedName().Name == ctx.StickyPodName {
 				// Sticky pod already passed filters; skip score plugins.
 				ctx.BestPods = []*datastore.PodInfo{p}
 				return nil
