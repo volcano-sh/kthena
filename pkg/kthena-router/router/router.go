@@ -1472,6 +1472,22 @@ func doRequest(
 	if timeout > 0 {
 		resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
 	}
+	// Request-side 4xx errors cannot be fixed by retrying another pod, and the
+	// old behaviour swallowed the backend status code into a synthetic 503 and
+	// lost the error body. Treat this explicit allowlist as normal responses so
+	// the original status code and body are passed through to the client.
+	// Unknown 4xx codes keep the existing forwarding-error semantics: which
+	// status code an engine uses for pod-local conditions (e.g. an adapter not
+	// loaded on that pod) is engine-specific, so the proxy retry loop must stay
+	// in charge of recovering by trying the remaining pods.
+	var passThrough4xx = resp.StatusCode == http.StatusBadRequest ||
+		resp.StatusCode == http.StatusUnauthorized ||
+		resp.StatusCode == http.StatusForbidden ||
+		resp.StatusCode == http.StatusRequestEntityTooLarge ||
+		resp.StatusCode == http.StatusUnprocessableEntity
+	if passThrough4xx {
+		return resp, nil
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return resp, fmt.Errorf("http resp error, http code is %d", resp.StatusCode)
 	}

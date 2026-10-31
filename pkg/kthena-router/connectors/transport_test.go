@@ -829,6 +829,7 @@ func TestPrefillerProxy(t *testing.T) {
 		statusCode    int
 		responseBody  string
 		expectError   bool
+		nonRetryable  bool
 		errorContains string
 	}{
 		{
@@ -838,11 +839,19 @@ func TestPrefillerProxy(t *testing.T) {
 			expectError:  false,
 		},
 		{
-			name:          "prefill request with 4xx error",
+			name:          "prefill request rejected with request-side 400",
 			statusCode:    400,
 			responseBody:  `{"error": "bad request"}`,
 			expectError:   true,
-			errorContains: "prefill request failed with status 400",
+			nonRetryable:  true,
+			errorContains: "prefill request rejected with status 400",
+		},
+		{
+			name:          "prefill request with unknown 4xx error",
+			statusCode:    404,
+			responseBody:  `{"error": "not found"}`,
+			expectError:   true,
+			errorContains: "prefill request failed with status 404",
 		},
 		{
 			name:          "prefill request with 5xx error",
@@ -879,6 +888,12 @@ func TestPrefillerProxy(t *testing.T) {
 				assert.Error(t, err)
 				if tt.errorContains != "" {
 					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+				var nonRetryable *NonRetryableError
+				if tt.nonRetryable {
+					assert.ErrorAs(t, err, &nonRetryable, "request-side 4xx must stop the PD retry loop")
+				} else {
+					assert.NotErrorAs(t, err, &nonRetryable, "non request-side failures must stay retryable")
 				}
 			} else {
 				assert.NoError(t, err)
@@ -919,6 +934,7 @@ func TestDecoderProxy(t *testing.T) {
 		responseHeaders map[string]string
 		contentType     string
 		expectError     bool
+		nonRetryable    bool
 		errorContains   string
 	}{
 		{
@@ -942,11 +958,19 @@ func TestDecoderProxy(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:          "decode request with 4xx error",
+			name:          "decode request rejected with request-side 400",
 			statusCode:    400,
 			responseBody:  `{"error": "bad request"}`,
 			expectError:   true,
-			errorContains: "decode request failed with status 400",
+			nonRetryable:  true,
+			errorContains: "decode request rejected with status 400",
+		},
+		{
+			name:          "decode request with unknown 4xx error",
+			statusCode:    404,
+			responseBody:  `{"error": "not found"}`,
+			expectError:   true,
+			errorContains: "decode request failed with status 404",
 		},
 		{
 			name:          "decode request with 5xx error",
@@ -987,6 +1011,12 @@ func TestDecoderProxy(t *testing.T) {
 				assert.Error(t, err)
 				if tt.errorContains != "" {
 					assert.Contains(t, err.Error(), tt.errorContains)
+				}
+				var nonRetryable *NonRetryableError
+				if tt.nonRetryable {
+					assert.ErrorAs(t, err, &nonRetryable, "request-side 4xx must stop the PD retry loop")
+				} else {
+					assert.NotErrorAs(t, err, &nonRetryable, "non request-side failures must stay retryable")
 				}
 				// Unchanged pre-existing behavior for non-Responses paths: nothing
 				// is forwarded to the client on a non-2xx decode response.
@@ -1084,14 +1114,16 @@ func TestDecoderProxyResponsesAPIStreaming(t *testing.T) {
 // trying another prefill/decode pair on the very first failed attempt. decoderProxy must
 // instead return the upstream status/headers/body via DecodeUpstreamError without writing
 // anything, leaving the retry decision (and the eventual write) to the caller.
+// A 500 is used here because request-side codes (400/401/403/413/422) are deliberately
+// non-retryable and short-circuit to NonRetryableError before the capture path.
 func TestDecoderProxyResponsesAPINonStreamingErrorDoesNotWritePrematurely(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	errBody := `{"error":{"message":"invalid input","type":"invalid_request_error"}}`
+	errBody := `{"error":{"message":"engine unavailable","type":"server_error"}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Upstream", "yes")
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(errBody))
 	}))
 	defer server.Close()
@@ -1115,7 +1147,7 @@ func TestDecoderProxyResponsesAPINonStreamingErrorDoesNotWritePrematurely(t *tes
 
 	var respErr *DecodeUpstreamError
 	require.ErrorAs(t, err, &respErr, "a Responses non-2xx must be returned as *DecodeUpstreamError so the caller can retry")
-	assert.Equal(t, http.StatusBadRequest, respErr.StatusCode)
+	assert.Equal(t, http.StatusInternalServerError, respErr.StatusCode)
 	assert.Equal(t, errBody, string(respErr.Body))
 	assert.Equal(t, "yes", respErr.Header.Get("X-Upstream"))
 
@@ -1123,7 +1155,7 @@ func TestDecoderProxyResponsesAPINonStreamingErrorDoesNotWritePrematurely(t *tes
 	// forwards the captured response via WriteTo — verify that produces the real upstream
 	// status/headers/body, not a generic error.
 	respErr.WriteTo(c)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Equal(t, errBody, w.Body.String())
 	assert.Equal(t, "yes", w.Header().Get("X-Upstream"))
 }
