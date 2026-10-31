@@ -547,7 +547,7 @@ Send the same prompt to the router multiple times. On the first request, the `kv
 | Cache truth source     | Router heuristic          | Actual engine KV events from vLLM | Actual engine KV events from vLLM   |
 | Dependencies           | None                      | Redis + Runtime sidecar           | Runtime sidecar (no Redis)          |
 
-- Use **`prefix-cache`** when you want lightweight, dependency-free prefix matching for simple workloads.
+- Use **[`prefix-cache`](./prefix-cache)** when you want lightweight, dependency-free prefix matching for simple workloads.
 - Use **`kvcache-aware`** when you need accurate, distributed KV cache coordination backed by real engine cache events — particularly effective with long shared system prompts.
 
 ## Troubleshooting
