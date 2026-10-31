@@ -184,7 +184,7 @@ networking:
     # -- The router will drain all in-flight requests before forcefully closing connections.
     terminationGracePeriodSeconds: 330
     # -- Drain timeout for kthena-router graceful shutdown.
-    # -- This should be less than terminationGracePeriodSeconds.
+    # -- Keep it more than 5s below terminationGracePeriodSeconds: after the drain timeout, the router can take up to 5s more to clean up the requests it force-closed.
     drainTimeout: 5m
     # -- Tolerations for Kthena Router pods.
     tolerations: []

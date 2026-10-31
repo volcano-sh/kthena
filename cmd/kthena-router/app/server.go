@@ -30,7 +30,15 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
-const defaultDrainTimeout = 5 * time.Minute
+const (
+	defaultDrainTimeout = 5 * time.Minute
+	// defaultHandlerExitTimeout bounds how long Run waits for request handlers
+	// to return after the listeners have stopped. Handlers of connections that
+	// were force-closed at the drain timeout still have to run their cleanup,
+	// such as releasing the pod's on-flight count in Redis, before the process
+	// exits.
+	defaultHandlerExitTimeout = 5 * time.Second
+)
 
 // Configuration sources the router can read ModelRoute, ModelServer and
 // ExternalModelProvider objects from.
@@ -70,6 +78,12 @@ type Server struct {
 	RouterConfigFile string
 	// drainTimeout is HTTP server shutdown grace; not datastore state.
 	drainTimeout time.Duration
+	// handlerExitTimeout bounds the wait for request handlers once the
+	// listeners have stopped. NewServer sets it to defaultHandlerExitTimeout;
+	// it is a field only so that tests can shorten it.
+	handlerExitTimeout time.Duration
+	// listeners tracks the inference listeners so Run can wait for them to drain.
+	listeners listenerGroup
 }
 
 func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort, metricsPort int, exposeMetricsOnRouterPort bool, kubeAPIQPS float32, kubeAPIBurst int) *Server {
@@ -88,6 +102,7 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 		KubeAPIBurst:                       kubeAPIBurst,
 		ConfigSource:                       ConfigSourceKubernetes,
 		drainTimeout:                       parseDrainTimeout(),
+		handlerExitTimeout:                 defaultHandlerExitTimeout,
 	}
 }
 
@@ -137,14 +152,54 @@ func (s *Server) Run(ctx context.Context) {
 		klog.Fatalf("Failed to sync controllers")
 	}
 	klog.Infof("Controllers have synced, starting store periodic update loop")
-	store.Run(ctx)
+	// drainCtx is cancelled only after the inference listeners have drained.
+	// The store's background loops, such as the request queue dispatch, and the
+	// management servers run on it, so requests queued at shutdown are still
+	// admitted and the drain stays observable.
+	drainCtx, stopAfterDrain := context.WithCancel(context.Background())
+	defer stopAfterDrain()
+	store.Run(drainCtx)
 	// start router
-	s.startRouter(ctx, r, store)
+	s.startRouter(ctx, drainCtx, r, store)
 
 	// Block until context is cancelled to keep the process running
 	klog.Info("Router server started, waiting for shutdown signal...")
 	<-ctx.Done()
 	klog.Info("Router server shutting down...")
+	s.shutdown(r.ActiveRequestCount, stopAfterDrain)
+}
+
+// shutdown returns once the inference listeners have drained, or have been
+// force-closed after the drain timeout, and their request handlers have
+// returned. Only then does it stop what runs on drainCtx. main() exits as soon
+// as Run returns, so in-flight requests must be finished by then.
+func (s *Server) shutdown(activeRequests func() int64, stopAfterDrain context.CancelFunc) {
+	s.listeners.closeAndWait()
+	if running := waitForRequestHandlers(activeRequests, s.handlerExitTimeout); running > 0 {
+		klog.Warningf("%d requests still running %v after the listeners stopped, exiting anyway",
+			running, s.handlerExitTimeout)
+	}
+	stopAfterDrain()
+	klog.Info("Router server stopped")
+}
+
+// waitForRequestHandlers waits until activeRequests reports no running request
+// handler, or until timeout passes, and returns the number still running.
+// http.Server.Close does not wait for handlers to return and the router only
+// exposes a counter, so this polls. It returns at once unless connections were
+// force-closed at the drain timeout.
+func waitForRequestHandlers(activeRequests func() int64, timeout time.Duration) int64 {
+	deadline := time.Now().Add(timeout)
+	for {
+		running := activeRequests()
+		if running <= 0 {
+			return 0
+		}
+		if time.Now().After(deadline) {
+			return running
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (s *Server) HasSynced() bool {
