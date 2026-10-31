@@ -99,27 +99,46 @@ func NewTokenRateLimiter() *TokenRateLimiter {
 
 // RateLimit checks if the request is within rate limits for both input and output tokens
 func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
-	// Estimate input tokens
-	tokens, err := r.tokenizer.CalculateTokenNum(prompt)
-	if err != nil {
-		klog.Errorf("failed to calculate token number: %v", err)
-		tokens = len(prompt) / 4 // fallback estimation
-	}
+	return r.rateLimit(model, prompt, true)
+}
 
+// CheckRateLimit reports whether the request is within rate limits without consuming any quota.
+func (r *TokenRateLimiter) CheckRateLimit(model, prompt string) error {
+	return r.rateLimit(model, prompt, false)
+}
+
+func (r *TokenRateLimiter) rateLimit(model, prompt string, consume bool) error {
 	r.mutex.RLock()
 	inputLimiter, hasInputLimit := r.inputLimiter[model]
 	outputLimiter, hasOutputLimit := r.outputLimiter[model]
 	r.mutex.RUnlock()
 
-	// Check input token rate limit
-	if hasInputLimit && !inputLimiter.AllowN(time.Now(), tokens) {
-		return &InputRateLimitExceededError{}
+	if !hasInputLimit && !hasOutputLimit {
+		return nil
 	}
 
 	// Check output token rate limit - we conservatively check if there's at least 1 token available
 	// This prevents starting requests that likely won't be able to complete
 	if hasOutputLimit && outputLimiter.Tokens() < 1.0 {
 		return &OutputRateLimitExceededError{}
+	}
+
+	if !hasInputLimit {
+		return nil
+	}
+
+	tokens, err := r.tokenizer.CalculateTokenNum(prompt)
+	if err != nil {
+		klog.Errorf("failed to calculate token number: %v", err)
+		tokens = len(prompt) / 4 // fallback estimation
+	}
+
+	if consume {
+		if !inputLimiter.AllowN(time.Now(), tokens) {
+			return &InputRateLimitExceededError{}
+		}
+	} else if inputLimiter.Tokens() < float64(tokens) {
+		return &InputRateLimitExceededError{}
 	}
 
 	return nil

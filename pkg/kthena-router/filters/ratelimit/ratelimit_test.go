@@ -17,6 +17,7 @@ limitations under the License.
 package ratelimit
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -224,6 +225,86 @@ func TestTokenRateLimiter_OutputRateLimit(t *testing.T) {
 	}
 	if _, ok := err.(*OutputRateLimitExceededError); !ok {
 		t.Fatalf("expected OutputRateLimitExceededError, got %T: %v", err, err)
+	}
+}
+
+func TestTokenRateLimiter_OutputRejectionKeepsInputQuota(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model"
+	inputTokens := uint32(10)
+	outputTokens := uint32(5)
+
+	// A minute-based unit keeps refill negligible during the test.
+	rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit:  &inputTokens,
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                networkingv1alpha1.Minute,
+	})
+	rl.RecordOutputTokens(model, 5)
+
+	before := rl.inputLimiter[model].Tokens()
+	err := rl.RateLimit(model, "hello world")
+	if _, ok := err.(*OutputRateLimitExceededError); !ok {
+		t.Fatalf("expected OutputRateLimitExceededError, got %T: %v", err, err)
+	}
+	if after := rl.inputLimiter[model].Tokens(); after < before {
+		t.Fatalf("input quota consumed by rejected request: before=%v after=%v", before, after)
+	}
+}
+
+func TestTokenRateLimiter_CheckRateLimitDoesNotConsume(t *testing.T) {
+	model := "test-model"
+	prompt := "hello world"
+	tokens, err := NewTokenRateLimiter().tokenizer.CalculateTokenNum(prompt)
+	if err != nil {
+		t.Fatalf("failed to calculate tokens: %v", err)
+	}
+	inputTokens := uint32(tokens)
+	outputTokens := uint32(5)
+
+	tests := []struct {
+		name          string
+		exhaustInput  bool
+		exhaustOutput bool
+		wantErr       error
+	}{
+		{name: "within quota"},
+		{name: "input quota exhausted", exhaustInput: true, wantErr: &InputRateLimitExceededError{}},
+		{name: "output quota exhausted", exhaustOutput: true, wantErr: &OutputRateLimitExceededError{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rl := NewTokenRateLimiter()
+			// A minute-based unit keeps refill negligible during the test.
+			rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+				InputTokensPerUnit:  &inputTokens,
+				OutputTokensPerUnit: &outputTokens,
+				Unit:                networkingv1alpha1.Minute,
+			})
+			if tt.exhaustInput {
+				if err := rl.RateLimit(model, prompt); err != nil {
+					t.Fatalf("failed to exhaust input quota: %v", err)
+				}
+			}
+			if tt.exhaustOutput {
+				rl.RecordOutputTokens(model, int(outputTokens))
+			}
+
+			before := rl.inputLimiter[model].Tokens()
+			for i := 0; i < 3; i++ {
+				err := rl.CheckRateLimit(model, prompt)
+				if tt.wantErr == nil && err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				if tt.wantErr != nil && reflect.TypeOf(err) != reflect.TypeOf(tt.wantErr) {
+					t.Fatalf("expected %T, got %T: %v", tt.wantErr, err, err)
+				}
+			}
+			if after := rl.inputLimiter[model].Tokens(); after < before {
+				t.Fatalf("CheckRateLimit consumed input quota: before=%v after=%v", before, after)
+			}
+		})
 	}
 }
 
