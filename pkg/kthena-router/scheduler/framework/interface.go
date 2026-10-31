@@ -25,6 +25,10 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 )
 
+// AgentHints is re-exported from common for convenience so plugins can refer to
+// the type as framework.AgentHints without an extra import.
+type AgentHints = common.AgentHints
+
 // Context stores information which maybe useful in Filter or Score plugins.
 type Context struct {
 	Model  string
@@ -54,6 +58,13 @@ type Context struct {
 
 	// MetricsRecorder for recording scheduler plugin metrics
 	MetricsRecorder *metrics.RequestMetricsRecorder
+
+	// AgentHints carries optional agent-semantic fields (program_id, task_priority,
+	// context_type, speculative_prefill, session_ttl_hint, session_id, agent_version)
+	// extracted from request headers at the router entry point. Plugins MUST
+	// treat nil / empty hints as "no hint — behave exactly as before".
+	// See Issue #1828 for the full RFC.
+	AgentHints *common.AgentHints
 }
 
 type ScorePlugin interface {
