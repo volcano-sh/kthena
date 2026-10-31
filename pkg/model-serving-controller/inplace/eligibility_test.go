@@ -104,7 +104,6 @@ func TestOnlyImagesChanged(t *testing.T) {
 		{
 			name: "changes that render the same Pods",
 			mutate: func(ms *workloadv1alpha1.ModelServing) {
-				ms.Spec.SchedulerName = ""
 				entry := &ms.Spec.Template.Roles[0].EntryTemplate
 				entry.Spec.Containers[0].Env = append(entry.Spec.Containers[0].Env,
 					corev1.EnvVar{Name: workloadv1alpha1.EntryAddressEnv, Value: "stale"})
@@ -187,6 +186,15 @@ func TestOnlyImagesChanged(t *testing.T) {
 			},
 		},
 		{
+			name: "explicit empty scheduler change with the image",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				// Explicit empty selects Kubernetes' default scheduler, while
+				// the old workload uses Volcano; this is not image-only.
+				ms.Spec.SchedulerName = ""
+				setEntryImage(ms, 0, "example.com/engine:v2")
+			},
+		},
+		{
 			name: "plugin change",
 			mutate: func(ms *workloadv1alpha1.ModelServing) {
 				ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{{
@@ -238,14 +246,21 @@ func TestOnlyRoleImagesChanged(t *testing.T) {
 			want:     true,
 		},
 		{
-			name: "changes in another Role and outside the Roles",
+			name: "changes in another Role do not affect this Role",
 			mutate: func(ms *workloadv1alpha1.ModelServing) {
-				ms.Spec.SchedulerName = "default-scheduler"
 				ms.Spec.Template.Roles[1].EntryTemplate.Spec.Containers[0].Env[0].Value = "m2"
 				setEntryImage(ms, 0, "example.com/engine:v2")
 			},
 			roleName: "decode",
 			want:     true,
+		},
+		{
+			name: "scheduler change affects this Role",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.SchedulerName = "default-scheduler"
+				setEntryImage(ms, 0, "example.com/engine:v2")
+			},
+			roleName: "decode",
 		},
 		{
 			name: "environment change in the Role",

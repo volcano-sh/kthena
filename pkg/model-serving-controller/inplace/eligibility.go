@@ -54,15 +54,17 @@ func OnlyImagesChanged(oldMS, newMS *workloadv1alpha1.ModelServing) (bool, error
 	return bytes.Equal(oldData, newData), nil
 }
 
-// OnlyRoleImagesChanged is OnlyImagesChanged for one Role, compared by its template hash.
+// OnlyRoleImagesChanged compares the effective revision inputs for one Role,
+// including its scheduler and applicable plugins, after substituting images.
 func OnlyRoleImagesChanged(oldMS, newMS *workloadv1alpha1.ModelServing, roleName string) bool {
-	oldRole, newRole := findRole(oldMS, roleName), findRole(newMS, roleName)
+	patched := oldMS.DeepCopy()
+	oldRole, newRole := findRole(patched, roleName), findRole(newMS, roleName)
 	if oldRole == nil || newRole == nil {
 		return false
 	}
-	patched := oldRole.DeepCopy()
-	copyImages(patched, newRole)
-	return utils.CalRoleTemplateHash(*patched) == utils.CalRoleTemplateHash(*newRole)
+	copyImages(oldRole, newRole)
+	equal, err := utils.EqualRoleRevisions("", "", patched, newMS, roleName)
+	return err == nil && equal
 }
 
 func findRole(ms *workloadv1alpha1.ModelServing, roleName string) *workloadv1alpha1.Role {
