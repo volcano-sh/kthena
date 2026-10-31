@@ -270,7 +270,7 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 		overloadDecode      string // RequestWaitingNum above filter threshold
 		overloadPrefill     string
 		deletePrefill       string // remove from store before Schedule
-		updatePods          bool   // replace the pods from another goroutine during Schedule
+		updatePods          bool   // update the sticky pair from another goroutine during Schedule
 		wantDecode          string
 		wantPrefill         string
 		wantStickyCleared   bool
@@ -399,6 +399,9 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 			}
 
 			scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+			if tt.updatePods {
+				scheduler = schedulerWithoutFilters(store)
+			}
 			ctx := &framework.Context{
 				Prompt:               &common.ChatMessage{},
 				ModelServerName:      modelServerName,
@@ -407,7 +410,9 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 				StickyPrefillPodName: tt.stickyPrefill,
 			}
 			if tt.updatePods {
-				err = scheduleWhilePodsAreUpdated(scheduler, ctx, pods)
+				wait := updatePodsConcurrently(podsByName(pods, tt.stickyDecode, tt.stickyPrefill)...)
+				err = scheduler.Schedule(ctx, pods)
+				wait()
 			} else {
 				err = scheduler.Schedule(ctx, pods)
 			}
@@ -441,8 +446,8 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 }
 
 // TestScheduleStickyPod tests that non-PD scheduling pins the sticky pod. With
-// updatePods, another goroutine replaces the pods during Schedule, so that -race
-// fails if the sticky check reads PodInfo.Pod without the PodInfo lock.
+// updatePods, another goroutine updates the sticky pod during Schedule, so that
+// -race fails if the sticky check reads PodInfo.Pod without the PodInfo lock.
 func TestScheduleStickyPod(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -459,6 +464,9 @@ func TestScheduleStickyPod(t *testing.T) {
 				testutil.PodInfoWithEngine("pod-b", "default", "10.0.0.2", ""),
 			}
 			scheduler := NewScheduler(datastore.New(), nil).(*SchedulerImpl)
+			if tt.updatePods {
+				scheduler = schedulerWithoutFilters(datastore.New())
+			}
 			ctx := &framework.Context{
 				Prompt:          &common.ChatMessage{},
 				ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
@@ -467,7 +475,9 @@ func TestScheduleStickyPod(t *testing.T) {
 
 			var err error
 			if tt.updatePods {
-				err = scheduleWhilePodsAreUpdated(scheduler, ctx, pods)
+				wait := updatePodsConcurrently(pods[1])
+				err = scheduler.Schedule(ctx, pods)
+				wait()
 			} else {
 				err = scheduler.Schedule(ctx, pods)
 			}
@@ -478,39 +488,39 @@ func TestScheduleStickyPod(t *testing.T) {
 	}
 }
 
-// scheduleWhilePodsAreUpdated runs Schedule while another goroutine keeps
-// replacing the pod object of every PodInfo, as the ModelServer controller does
-// when a pod changes. Schedule runs several times: the filter plugins take the
-// PodInfo lock, so -race reports an unlocked read only when an update lands
-// between that lock and the read. ctx must pin a sticky pod, so that every run
-// gets the same result.
-func scheduleWhilePodsAreUpdated(scheduler *SchedulerImpl, ctx *framework.Context, pods []*datastore.PodInfo) error {
-	stop := make(chan struct{})
+// schedulerWithoutFilters returns a scheduler with no filter plugins. The
+// filter plugins take the PodInfo lock just before the sticky check, which
+// orders a concurrent update before the read and hides a missing lock from
+// -race.
+func schedulerWithoutFilters(store datastore.Store) *SchedulerImpl {
+	return &SchedulerImpl{store: store}
+}
+
+// updatePodsConcurrently updates each pod's Pod object from another goroutine,
+// as the ModelServer controller does when a pod changes. Call the returned
+// function after Schedule to wait for the update.
+func updatePodsConcurrently(pods ...*datastore.PodInfo) (wait func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			for _, pod := range pods {
-				pod.UpdatePod(pod.GetPod().DeepCopy(), pod.GetEngine(), pod.GetModelServers())
-			}
+		for _, pod := range pods {
+			pod.UpdatePod(pod.GetPod().DeepCopy(), pod.GetEngine(), pod.GetModelServers())
 		}
 	}()
-	defer func() {
-		close(stop)
-		<-done
-	}()
+	return func() { <-done }
+}
 
-	for range 20 {
-		if err := scheduler.Schedule(ctx, pods); err != nil {
-			return err
+// podsByName returns the pods with the given names, in that order.
+func podsByName(pods []*datastore.PodInfo, names ...string) []*datastore.PodInfo {
+	var found []*datastore.PodInfo
+	for _, name := range names {
+		for _, pod := range pods {
+			if pod.GetPodNamespacedName().Name == name {
+				found = append(found, pod)
+			}
 		}
 	}
-	return nil
+	return found
 }
 
 // TestScheduleNonPDGroupWithEmptyScores tests non-PD scheduling with empty scores
