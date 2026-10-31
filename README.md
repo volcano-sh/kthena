@@ -5,12 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>The Lightweight, Modular, Enterprise-Grade LLM Serving Platform That Makes AI Infrastructure Simple, Scalable, and Cost-Efficient</strong>
-</p>
-
-<p align="center">
-| <a href="https://kthena.volcano.sh/">Documentation</a> | <a href="https://kthena.volcano.sh/blog">Blog</a> | <a href="#">White Paper</a> | <a href="#">Slack</a> |
-
+  <strong>Kubernetes-native LLM Serving Platform: declarative model lifecycle and intelligent request routing</strong>
 </p>
 
 <div align="center">
@@ -25,43 +20,35 @@
 
 **Kthena** is a lightweight, Kubernetes-native LLM inference platform that transforms how organizations deploy and manage Large Language Models in production. Built with declarative model lifecycle management and intelligent request routing, it provides high performance and enterprise-grade scalability for LLM inference workloads.
 
-The platform extends Kubernetes with purpose-built Custom Resource Definitions (CRDs) for managing LLM workloads, supporting multiple inference engines (vLLM, SGLang, Triton) and advanced serving patterns like prefill-decode disaggregation. Kthena's architecture separates control plane operations (model lifecycle, autoscaling policies) from data plane traffic routing through an intelligent router, enabling teams to manage complex LLM deployments with familiar cloud-native patterns while delivering cost-driven autoscaling, heterogeneous accelerators support, and multi-backend inference engines.
+The platform extends Kubernetes with purpose-built Custom Resource Definitions (CRDs) for managing LLM workloads on inference engines such as vLLM and SGLang, including advanced serving patterns like prefill-decode disaggregation and cost-optimized autoscaling across heterogeneous accelerators.
 
-Kthena is deliberately **lightweight and composable**. The entire platform is two self-contained Go binaries with a small dependency surface, and its two planes are fully decoupled: install the **workload controllers** to manage the model lifecycle, install the **router** to handle inference traffic, or install both. Each side stands on its own and neither depends on the other at runtime — adopt just the piece you need today, and add the other whenever you're ready.
+Kthena is deliberately **lightweight and composable**. The entire platform is two self-contained Go binaries with a small dependency surface, and its two planes are fully decoupled: install the **workload controllers** to manage the model lifecycle, install the **router** to handle inference traffic, or install both. Neither depends on the other at runtime, and optional capabilities such as gang scheduling, webhooks, Gateway API support, and TLS stay off until you need them.
 
 ## Key Features
 
-### **Lightweight & Modular**
-- **Small footprint**: Two self-contained Go binaries with a minimal dependency surface — quick to install, cheap to run, and simple to upgrade.
-- **Independently deployable planes**: The controller manager (workload) and the router (networking) are separate Helm subcharts with separate CRD groups and release lifecycles. Deploy either one alone, or both together.
-- **No runtime coupling**: Each component talks only to the Kubernetes API, never to the other, so a partial install is a first-class scenario, not a degraded mode.
-- **Bring your own stack**: Keep your existing API gateway, ingress, and observability tooling — Kthena plugs into them instead of replacing them.
-- **Opt-in capabilities**: Gang scheduling (Volcano), webhooks, Gateway API support, and TLS are all optional, so a minimal install stays minimal.
+### Model Lifecycle Management
+- **Role-based deployment**: `ModelServing` deploys a model as serving groups of roles (for example prefill and decode), each with entry and worker pods.
+- **Prefill-decode disaggregation**: Separate compute-intensive prefill from token-generation decode to optimize hardware utilization and meet latency-based SLOs.
+- **Rolling updates**: Roll out model changes with configurable strategies and partitions.
+- **Autoscaling**: Scale on metrics scraped from pods or queried from Prometheus, including PD-disaggregated scaling and cost-optimized scaling across heterogeneous hardware.
 
-### **Production-Ready LLM Serving**
-Deploy and scale Large Language Models with enterprise-grade reliability, supporting vLLM, SGLang, Triton, and TorchServe inference engines through consistent Kubernetes-native APIs.
-
-### **Simplified LLM Management**
-- **Prefill-Decode Disaggregation**: Separate compute-intensive prefill operations from token generation decode processes to optimize hardware utilization and meet latency-based SLOs.
-- **Cost-Driven Autoscaling**: Intelligent scaling based on multiple metrics (CPU, GPU, memory, custom) with configurable budget constraints and cost optimization policies
-- **Zero-Downtime Updates**: Rolling model updates with configurable strategies
-- **Dynamic LoRA Management**: Hot-swap adapters without service interruption  
-
-### **Built-in Network Topology-Aware Scheduling**
-Network topology-aware scheduling places inference instances within the same network domain to maximize inter-instance communication bandwidth and enhance inference performance.
-
-### **Built-in Gang Scheduling**
-Gang scheduling ensures atomic scheduling of distributed inference groups like xPyD, preventing resource waste from partial deployments.
+### Scheduling (with Volcano)
+- **Gang scheduling**: Schedule distributed inference groups such as xPyD atomically, preventing resource waste from partial deployments.
+- **Network topology-aware scheduling**: Place inference instances within the same network domain to maximize inter-instance communication bandwidth.
 
 ### Intelligent Routing & Traffic Control
-- Multi-model routing with pluggable load-balancing algorithms, including model load aware and KV-cache aware strategies.
-- PD group aware request distribution for xPyD (x-prefill/y-decode) deployment patterns.
-- Rich traffic policies, including canary releases, weighted traffic distribution, token-based rate limiting, and automated failover.
-- LoRA adapter aware routing without inference outage
+- **Pluggable load balancing**: Multi-model routing with filter and score plugins, including model-load-aware and KV-cache-aware strategies.
+- **PD-aware routing**: Request distribution for xPyD (x-prefill/y-decode) deployments, with KV transfer over HTTP, NIXL, Mooncake, or SGLang connectors.
+- **Traffic policies**: Canary releases, weighted traffic distribution, and failover.
+- **Rate limiting**: Token-based rate limiting, enforced locally or globally via Redis.
+- **Fairness and session stickiness**: Optional fairness queuing, and session-sticky routing backed by memory or Redis.
+- **LoRA-aware routing**: Route requests to LoRA adapters without inference outage.
+- **External model providers**: Route to OpenAI- and Anthropic-compatible APIs alongside self-hosted models.
+- **Authentication and Gateway API**: JWT authentication, plus optional Gateway API and Gateway API Inference Extension integration.
 
 ## Architecture
 
-Kthena implements a Kubernetes-native architecture with a clear split between the control plane and the data plane. Each plane is an independent component with its own CRD group, its own Helm subchart, and its own release lifecycle — **either one can be deployed and used on its own**. It contains the following key components:
+Kthena implements a Kubernetes-native architecture with a clear split between the control plane and the data plane. Each plane has its own CRD group, Helm subchart, and release lifecycle. It contains the following key components:
 
 - **Kthena-controller-manager**: 
   The control plane component governing the LLM inference lifecycle. It continuously reconciles Kthena CRDs to deploy, scale, and upgrade inference replicas across the cluster while exposing advanced scheduling policies that integrate directly with the [Volcano scheduler](https://github.com/volcano-sh/volcano/).   
@@ -100,11 +87,18 @@ For more details, please refer to [Kthena Architecture](https://kthena.volcano.s
 
 ## Getting Started
 
-Get up and running with Kthena in minutes. This [guide](docs/kthena/docs/getting-started/quick-start.md) will walk you through installing the platform and deploying your first LLM model. You can install the full platform, or only the component you need — see [Modular Deployment](#modular-deployment) and the [installation guide](docs/kthena/docs/getting-started/installation.md).
+Install the full platform with Helm:
 
-### Install from code
+```bash
+helm install kthena oci://ghcr.io/volcano-sh/charts/kthena \
+  --namespace kthena-system --create-namespace
+```
 
-If you don't have a kubernetes cluster, try one-click install from code base:
+This [guide](docs/kthena/docs/getting-started/quick-start.md) will walk you through installing the platform and deploying your first LLM model. You can install the full platform, or only the component you need — see [Modular Deployment](#modular-deployment) and the [installation guide](docs/kthena/docs/getting-started/installation.md).
+
+### Install from source
+
+To try Kthena from source without an Kubernetes cluster, run:
 
 ```bash
 ./hack/local-up-kthena.sh
@@ -112,27 +106,13 @@ If you don't have a kubernetes cluster, try one-click install from code base:
 
 Run `./hack/local-up-kthena.sh --help` for more options.
 
-## Community
+## Community and Contributing
 
-Kthena is an open source project that welcomes contributions from developers, platform engineers, and AI practitioners.
+Kthena welcomes contributions from developers, platform engineers, and AI practitioners.
 
-**Get Involved:**
-- **Issues**: Report bugs and request features on [GitHub Issues](https://github.com/volcano-sh/kthena/issues)
-- **Discussions**: Join conversations on [GitHub Discussions](https://github.com/volcano-sh/kthena/discussions)
-- **Documentation**: Help improve guides and examples
-
-## Contributing
-
-Contributions are welcome! Here's how to get started:
-
-### Contribution Guidelines
-
-- **Code**: Follow Go conventions and include tests for new features
-- **Documentation**: Update relevant docs and examples
-- **Issues**: Use GitHub Issues for bug reports and feature requests
-- **Pull Requests**: Ensure CI passes and include clear descriptions
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidelines.
+- **Issues**: Report bugs and request features on [GitHub Issues](https://github.com/volcano-sh/kthena/issues).
+- **Discussions**: Join conversations on [GitHub Discussions](https://github.com/volcano-sh/kthena/discussions).
+- **Contributing**: See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and pull request guidelines.
 
 ## Meeting
 
