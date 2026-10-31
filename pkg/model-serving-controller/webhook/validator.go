@@ -554,9 +554,9 @@ func validateEvictionStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList
 
 	switch protectionLevel {
 	case workloadv1alpha1.ProtectionLevelServingGroup:
-		allErrs = append(allErrs, validateServingGroupMinAvailable(ms, strategy.MinAvailable, fldPath.Child("minAvailable"))...)
+		allErrs = append(allErrs, validateServingGroupEvictionBudget(ms, strategy, fldPath)...)
 	case workloadv1alpha1.ProtectionLevelRole:
-		allErrs = append(allErrs, validateRoleMinAvailable(ms, strategy.RoleMinAvailable, fldPath.Child("roleMinAvailable"))...)
+		allErrs = append(allErrs, validateRoleEvictionBudget(ms, strategy, fldPath)...)
 	default:
 		allErrs = append(allErrs, field.NotSupported(
 			fldPath.Child("protectionLevel"),
@@ -568,32 +568,62 @@ func validateEvictionStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList
 	return allErrs
 }
 
-func validateServingGroupMinAvailable(ms *workloadv1alpha1.ModelServing, minAvailable *intstr.IntOrString, fldPath *field.Path) field.ErrorList {
+func validateServingGroupEvictionBudget(ms *workloadv1alpha1.ModelServing, strategy *workloadv1alpha1.EvictionStrategySpec, fldPath *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
-	if minAvailable == nil {
-		return append(allErrs, field.Required(fldPath, "minAvailable is required when evictionStrategy.protectionLevel is ServingGroup"))
+	if strategy.MinAvailable == nil && strategy.MaxUnavailable == nil {
+		return append(allErrs, field.Required(fldPath, "one of minAvailable or maxUnavailable is required when evictionStrategy.protectionLevel is ServingGroup"))
+	}
+	if strategy.MinAvailable != nil && strategy.MaxUnavailable != nil {
+		return append(allErrs, field.Invalid(fldPath, strategy, "minAvailable and maxUnavailable are mutually exclusive"))
 	}
 
-	allErrs = append(allErrs, validateIntOrPercent(minAvailable, fldPath)...)
-	if len(allErrs) > 0 || ms.Spec.Replicas == nil || *ms.Spec.Replicas < 0 {
+	isMaxUnavailable := strategy.MaxUnavailable != nil
+	value := strategy.MinAvailable
+	valuePath := fldPath.Child("minAvailable")
+	fieldName := "minAvailable"
+	if isMaxUnavailable {
+		value = strategy.MaxUnavailable
+		valuePath = fldPath.Child("maxUnavailable")
+		fieldName = "maxUnavailable"
+	}
+
+	allErrs = append(allErrs, validateIntOrPercent(value, valuePath)...)
+	// Like a Kubernetes PodDisruptionBudget, maxUnavailable is an eviction
+	// budget, not a minimum replica constraint. An integer value may exceed the
+	// current replica count and is clamped to zero required healthy replicas at
+	// evaluation time.
+	if len(allErrs) > 0 || isMaxUnavailable || ms.Spec.Replicas == nil || *ms.Spec.Replicas < 0 {
 		return allErrs
 	}
 
 	totalReplicas := int(*ms.Spec.Replicas)
-	value, err := intstr.GetScaledValueFromIntOrPercent(minAvailable, totalReplicas, true)
+	resolved, err := intstr.GetScaledValueFromIntOrPercent(value, totalReplicas, true)
 	if err != nil {
-		allErrs = append(allErrs, field.Invalid(fldPath, minAvailable, fmt.Sprintf("invalid minAvailable: %v", err)))
-	} else if value > totalReplicas {
-		allErrs = append(allErrs, field.Invalid(fldPath, minAvailable, fmt.Sprintf("minAvailable (%d) cannot exceed replicas (%d)", value, totalReplicas)))
+		allErrs = append(allErrs, field.Invalid(valuePath, value, fmt.Sprintf("invalid %s: %v", fieldName, err)))
+	} else if resolved > totalReplicas {
+		allErrs = append(allErrs, field.Invalid(valuePath, value, fmt.Sprintf("%s (%d) cannot exceed replicas (%d)", fieldName, resolved, totalReplicas)))
 	}
 
 	return allErrs
 }
 
-func validateRoleMinAvailable(ms *workloadv1alpha1.ModelServing, roleMinAvailable map[string]intstr.IntOrString, fldPath *field.Path) field.ErrorList {
+func validateRoleEvictionBudget(ms *workloadv1alpha1.ModelServing, strategy *workloadv1alpha1.EvictionStrategySpec, fldPath *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
-	if len(roleMinAvailable) == 0 {
-		return append(allErrs, field.Required(fldPath, "roleMinAvailable is required when evictionStrategy.protectionLevel is Role"))
+	if len(strategy.RoleMinAvailable) == 0 && len(strategy.RoleMaxUnavailable) == 0 {
+		return append(allErrs, field.Required(fldPath, "one of roleMinAvailable or roleMaxUnavailable is required when evictionStrategy.protectionLevel is Role"))
+	}
+	if len(strategy.RoleMinAvailable) > 0 && len(strategy.RoleMaxUnavailable) > 0 {
+		return append(allErrs, field.Invalid(fldPath, strategy, "roleMinAvailable and roleMaxUnavailable are mutually exclusive"))
+	}
+
+	isMaxUnavailable := len(strategy.RoleMaxUnavailable) > 0
+	values := strategy.RoleMinAvailable
+	valuePath := fldPath.Child("roleMinAvailable")
+	fieldName := "roleMinAvailable"
+	if isMaxUnavailable {
+		values = strategy.RoleMaxUnavailable
+		valuePath = fldPath.Child("roleMaxUnavailable")
+		fieldName = "roleMaxUnavailable"
 	}
 
 	roleReplicas := make(map[string]int, len(ms.Spec.Template.Roles))
@@ -604,8 +634,8 @@ func validateRoleMinAvailable(ms *workloadv1alpha1.ModelServing, roleMinAvailabl
 		roleReplicas[role.Name] = int(*role.Replicas)
 	}
 
-	for roleName, minAvailable := range roleMinAvailable {
-		rolePath := fldPath.Key(roleName)
+	for roleName, value := range values {
+		rolePath := valuePath.Key(roleName)
 		replicas, ok := roleReplicas[roleName]
 		if !ok {
 			allErrs = append(allErrs, field.Invalid(
@@ -617,16 +647,16 @@ func validateRoleMinAvailable(ms *workloadv1alpha1.ModelServing, roleMinAvailabl
 		}
 
 		before := len(allErrs)
-		allErrs = append(allErrs, validateIntOrPercent(&minAvailable, rolePath)...)
-		if len(allErrs) > before {
+		allErrs = append(allErrs, validateIntOrPercent(&value, rolePath)...)
+		if len(allErrs) > before || isMaxUnavailable {
 			continue
 		}
 
-		value, err := intstr.GetScaledValueFromIntOrPercent(&minAvailable, replicas, true)
+		resolved, err := intstr.GetScaledValueFromIntOrPercent(&value, replicas, true)
 		if err != nil {
-			allErrs = append(allErrs, field.Invalid(rolePath, minAvailable, fmt.Sprintf("invalid roleMinAvailable: %v", err)))
-		} else if value > replicas {
-			allErrs = append(allErrs, field.Invalid(rolePath, minAvailable, fmt.Sprintf("roleMinAvailable (%d) for role %s cannot exceed replicas (%d)", value, roleName, replicas)))
+			allErrs = append(allErrs, field.Invalid(rolePath, value, fmt.Sprintf("invalid %s: %v", fieldName, err)))
+		} else if resolved > replicas {
+			allErrs = append(allErrs, field.Invalid(rolePath, value, fmt.Sprintf("%s (%d) for role %s cannot exceed replicas (%d)", fieldName, resolved, roleName, replicas)))
 		}
 	}
 

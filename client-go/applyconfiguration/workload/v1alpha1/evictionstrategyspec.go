@@ -34,13 +34,29 @@ type EvictionStrategySpecApplyConfiguration struct {
 	ProtectionLevel *workloadv1alpha1.ProtectionLevelType `json:"protectionLevel,omitempty"`
 	// MinAvailable defines the minimum number of available ServingGroup instances.
 	// It is used only when protectionLevel is ServingGroup.
+	// It is mutually exclusive with MaxUnavailable.
 	// It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%).
+	// Percentages are rounded up.
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+	// MaxUnavailable defines the maximum number of unavailable ServingGroup instances.
+	// It is used only when protectionLevel is ServingGroup.
+	// It is mutually exclusive with MinAvailable.
+	// It can be an absolute number (ex: 1) or a percentage of total instances (ex: 20%).
+	// Percentages are rounded up.
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 	// RoleMinAvailable defines role-specific minimum available role instances.
 	// It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
 	// If a role is absent from this map, it is not protected by the eviction budget.
 	// Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%).
+	// Percentages are rounded up.
 	RoleMinAvailable map[string]intstr.IntOrString `json:"roleMinAvailable,omitempty"`
+	// RoleMaxUnavailable defines role-specific maximum unavailable role instances.
+	// It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
+	// If a role is absent from this map, it is not protected by the eviction budget.
+	// It is mutually exclusive with RoleMinAvailable.
+	// Values can be absolute numbers (ex: 1) or percentages of total role instances (ex: 20%).
+	// Percentages are rounded up.
+	RoleMaxUnavailable map[string]intstr.IntOrString `json:"roleMaxUnavailable,omitempty"`
 }
 
 // EvictionStrategySpecApplyConfiguration constructs a declarative configuration of the EvictionStrategySpec type for use with
@@ -65,6 +81,14 @@ func (b *EvictionStrategySpecApplyConfiguration) WithMinAvailable(value intstr.I
 	return b
 }
 
+// WithMaxUnavailable sets the MaxUnavailable field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the MaxUnavailable field is set to the value of the last call.
+func (b *EvictionStrategySpecApplyConfiguration) WithMaxUnavailable(value intstr.IntOrString) *EvictionStrategySpecApplyConfiguration {
+	b.MaxUnavailable = &value
+	return b
+}
+
 // WithRoleMinAvailable puts the entries into the RoleMinAvailable field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, the entries provided by each call will be put on the RoleMinAvailable field,
@@ -75,6 +99,20 @@ func (b *EvictionStrategySpecApplyConfiguration) WithRoleMinAvailable(entries ma
 	}
 	for k, v := range entries {
 		b.RoleMinAvailable[k] = v
+	}
+	return b
+}
+
+// WithRoleMaxUnavailable puts the entries into the RoleMaxUnavailable field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, the entries provided by each call will be put on the RoleMaxUnavailable field,
+// overwriting an existing map entries in RoleMaxUnavailable field with the same key.
+func (b *EvictionStrategySpecApplyConfiguration) WithRoleMaxUnavailable(entries map[string]intstr.IntOrString) *EvictionStrategySpecApplyConfiguration {
+	if b.RoleMaxUnavailable == nil && len(entries) > 0 {
+		b.RoleMaxUnavailable = make(map[string]intstr.IntOrString, len(entries))
+	}
+	for k, v := range entries {
+		b.RoleMaxUnavailable[k] = v
 	}
 	return b
 }

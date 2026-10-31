@@ -345,8 +345,20 @@ func (in *EvictionStrategySpec) DeepCopyInto(out *EvictionStrategySpec) {
 		*out = new(intstr.IntOrString)
 		**out = **in
 	}
+	if in.MaxUnavailable != nil {
+		in, out := &in.MaxUnavailable, &out.MaxUnavailable
+		*out = new(intstr.IntOrString)
+		**out = **in
+	}
 	if in.RoleMinAvailable != nil {
 		in, out := &in.RoleMinAvailable, &out.RoleMinAvailable
+		*out = make(map[string]intstr.IntOrString, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
+	if in.RoleMaxUnavailable != nil {
+		in, out := &in.RoleMaxUnavailable, &out.RoleMaxUnavailable
 		*out = make(map[string]intstr.IntOrString, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val

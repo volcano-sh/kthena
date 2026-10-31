@@ -338,7 +338,7 @@ func (h *EvictionHandler) checkServingGroupProtection(ms *workloadv1alpha1.Model
 	totalReplicas := int(replicasOrDefault(ms.Spec.Replicas))
 	minAvailable := -1
 	if totalReplicas > 0 {
-		minAvailable, _ = intstr.GetScaledValueFromIntOrPercent(minAvailableOrDefault(strategy.MinAvailable), totalReplicas, true)
+		minAvailable = servingGroupMinAvailable(strategy, totalReplicas)
 	}
 	if totalReplicas == 0 {
 		logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, true, "ModelServing replicas is zero")
@@ -434,8 +434,7 @@ func (h *EvictionHandler) checkRoleProtection(ms *workloadv1alpha1.ModelServing,
 	totalInstances := expectedRoleInstancesInServingGroup(ms, targetRole, len(roleInstances))
 	minAvailable := -1
 	if totalInstances > 0 {
-		minAvailableValue := roleMinAvailableOrDefault(strategy, targetRole)
-		minAvailable, _ = intstr.GetScaledValueFromIntOrPercent(minAvailableValue, totalInstances, true)
+		minAvailable = roleMinAvailable(strategy, targetRole, totalInstances)
 	}
 	if totalInstances == 0 {
 		logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, true, "role instance count is zero")
@@ -962,22 +961,28 @@ func parseDisruptionUnitKey(key string) (disruptionUnit, bool) {
 	return unit, true
 }
 
-func minAvailableOrDefault(value *intstr.IntOrString) *intstr.IntOrString {
-	if value != nil {
-		return value
+func servingGroupMinAvailable(strategy *workloadv1alpha1.EvictionStrategySpec, total int) int {
+	if strategy.MaxUnavailable != nil {
+		maxUnavailable, _ := intstr.GetScaledValueFromIntOrPercent(strategy.MaxUnavailable, total, true)
+		return max(total-maxUnavailable, 0)
 	}
-	defaultValue := intstr.FromInt(1)
-	return &defaultValue
+	if strategy.MinAvailable != nil {
+		minAvailable, _ := intstr.GetScaledValueFromIntOrPercent(strategy.MinAvailable, total, true)
+		return minAvailable
+	}
+	return 1
 }
 
-func roleMinAvailableOrDefault(strategy *workloadv1alpha1.EvictionStrategySpec, role string) *intstr.IntOrString {
-	if strategy.RoleMinAvailable != nil {
-		if value, ok := strategy.RoleMinAvailable[role]; ok {
-			return &value
-		}
+func roleMinAvailable(strategy *workloadv1alpha1.EvictionStrategySpec, role string, total int) int {
+	if value, ok := strategy.RoleMaxUnavailable[role]; ok {
+		maxUnavailable, _ := intstr.GetScaledValueFromIntOrPercent(&value, total, true)
+		return max(total-maxUnavailable, 0)
 	}
-	defaultValue := intstr.FromInt(0)
-	return &defaultValue
+	if value, ok := strategy.RoleMinAvailable[role]; ok {
+		minAvailable, _ := intstr.GetScaledValueFromIntOrPercent(&value, total, true)
+		return minAvailable
+	}
+	return 0
 }
 
 func expectedRoleInstancesInServingGroup(ms *workloadv1alpha1.ModelServing, roleName string, fallback int) int {

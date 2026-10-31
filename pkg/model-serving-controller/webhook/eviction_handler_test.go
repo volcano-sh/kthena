@@ -120,6 +120,120 @@ func TestEvictionHandler(t *testing.T) {
 	})
 }
 
+func TestEvictionHandlerServingGroupMaxUnavailablePercentageRoundsUp(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MaxUnavailable:  intstrPtr(intstr.FromString("50%")),
+				},
+			},
+		},
+	}
+	handler := newTestEvictionHandler(ms, []*corev1.Pod{
+		createPod("pod-g1", "ms-0", true),
+		createPod("pod-g2", "ms-1", true),
+		createPod("pod-g3", "ms-2", true),
+	})
+
+	// 50% of 3 rounds up to 2, so two groups may be unavailable.
+	assert.True(t, handleEvictionRequest(handler, "pod-g1").Allowed)
+	assert.True(t, handleEvictionRequest(handler, "pod-g2").Allowed)
+	resp := handleEvictionRequest(handler, "pod-g3")
+	assert.False(t, resp.Allowed)
+	assert.Contains(t, resp.Result.Message, "Current ready groups (1) <= minAvailable (1)")
+}
+
+func TestEvictionHandlerServingGroupMaxUnavailableAboveReplicas(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MaxUnavailable:  intstrPtr(intstr.FromInt(5)),
+				},
+			},
+		},
+	}
+	handler := newTestEvictionHandler(ms, []*corev1.Pod{
+		createPod("pod-g1", "ms-0", true),
+		createPod("pod-g2", "ms-1", true),
+		createPod("pod-g3", "ms-2", true),
+	})
+
+	// maxUnavailable greater than replicas requires zero healthy groups, so all
+	// currently desired groups may be disrupted.
+	assert.True(t, handleEvictionRequest(handler, "pod-g1").Allowed)
+	assert.True(t, handleEvictionRequest(handler, "pod-g2").Allowed)
+	assert.True(t, handleEvictionRequest(handler, "pod-g3").Allowed)
+}
+
+func TestEvictionHandlerRoleMaxUnavailablePercentageRoundsUp(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
+					RoleMaxUnavailable: map[string]intstr.IntOrString{
+						"decode": intstr.FromString("50%"),
+					},
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{{Name: "decode", Replicas: int32Ptr(3)}},
+			},
+		},
+	}
+	handler := newTestEvictionHandler(ms, []*corev1.Pod{
+		createRolePod("decode-0-entry", "ms-0", "decode", "decode-0", true),
+		createRolePod("decode-1-entry", "ms-0", "decode", "decode-1", true),
+		createRolePod("decode-2-entry", "ms-0", "decode", "decode-2", true),
+	})
+
+	// 50% of 3 rounds up to 2, so two Role instances may be unavailable.
+	assert.True(t, handleEvictionRequest(handler, "decode-0-entry").Allowed)
+	assert.True(t, handleEvictionRequest(handler, "decode-1-entry").Allowed)
+	resp := handleEvictionRequest(handler, "decode-2-entry")
+	assert.False(t, resp.Allowed)
+	assert.Contains(t, resp.Result.Message, "role decode ready instances (1) <= minAvailable (1)")
+}
+
+func TestEvictionHandlerRoleMaxUnavailableAboveReplicas(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
+					RoleMaxUnavailable: map[string]intstr.IntOrString{
+						"decode": intstr.FromInt(5),
+					},
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{{Name: "decode", Replicas: int32Ptr(3)}},
+			},
+		},
+	}
+	handler := newTestEvictionHandler(ms, []*corev1.Pod{
+		createRolePod("decode-0-entry", "ms-0", "decode", "decode-0", true),
+		createRolePod("decode-1-entry", "ms-0", "decode", "decode-1", true),
+		createRolePod("decode-2-entry", "ms-0", "decode", "decode-2", true),
+	})
+
+	assert.True(t, handleEvictionRequest(handler, "decode-0-entry").Allowed)
+	assert.True(t, handleEvictionRequest(handler, "decode-1-entry").Allowed)
+	assert.True(t, handleEvictionRequest(handler, "decode-2-entry").Allowed)
+}
+
 func TestEvictionHandlerAllowsSameTrackedServingGroup(t *testing.T) {
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{

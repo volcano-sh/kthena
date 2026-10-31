@@ -207,15 +207,34 @@ type EvictionStrategySpec struct {
 
 	// MinAvailable defines the minimum number of available ServingGroup instances.
 	// It is used only when protectionLevel is ServingGroup.
+	// It is mutually exclusive with MaxUnavailable.
 	// It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%).
+	// Percentages are rounded up.
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+
+	// MaxUnavailable defines the maximum number of unavailable ServingGroup instances.
+	// It is used only when protectionLevel is ServingGroup.
+	// It is mutually exclusive with MinAvailable.
+	// It can be an absolute number (ex: 1) or a percentage of total instances (ex: 20%).
+	// Percentages are rounded up.
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
 	// RoleMinAvailable defines role-specific minimum available role instances.
 	// It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
 	// If a role is absent from this map, it is not protected by the eviction budget.
 	// Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%).
+	// Percentages are rounded up.
 	// +optional
 	RoleMinAvailable map[string]intstr.IntOrString `json:"roleMinAvailable,omitempty"`
+
+	// RoleMaxUnavailable defines role-specific maximum unavailable role instances.
+	// It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
+	// If a role is absent from this map, it is not protected by the eviction budget.
+	// It is mutually exclusive with RoleMinAvailable.
+	// Values can be absolute numbers (ex: 1) or percentages of total role instances (ex: 20%).
+	// Percentages are rounded up.
+	// +optional
+	RoleMaxUnavailable map[string]intstr.IntOrString `json:"roleMaxUnavailable,omitempty"`
 }
 
 // RolloutStrategyType defines the strategy to use to update replicas.

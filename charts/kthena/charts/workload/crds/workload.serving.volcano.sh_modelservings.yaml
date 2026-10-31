@@ -134,6 +134,17 @@ spec:
                     description: EvictionStrategy defines the protection policy during
                       node eviction.
                     properties:
+                      maxUnavailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxUnavailable defines the maximum number of unavailable ServingGroup instances.
+                          It is used only when protectionLevel is ServingGroup.
+                          It is mutually exclusive with MinAvailable.
+                          It can be an absolute number (ex: 1) or a percentage of total instances (ex: 20%).
+                          Percentages are rounded up.
+                        x-kubernetes-int-or-string: true
                       minAvailable:
                         anyOf:
                         - type: integer
@@ -141,7 +152,9 @@ spec:
                         description: |-
                           MinAvailable defines the minimum number of available ServingGroup instances.
                           It is used only when protectionLevel is ServingGroup.
+                          It is mutually exclusive with MaxUnavailable.
                           It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%).
+                          Percentages are rounded up.
                         x-kubernetes-int-or-string: true
                       protectionLevel:
                         default: ServingGroup
@@ -153,6 +166,20 @@ spec:
                         - ServingGroup
                         - Role
                         type: string
+                      roleMaxUnavailable:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          RoleMaxUnavailable defines role-specific maximum unavailable role instances.
+                          It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
+                          If a role is absent from this map, it is not protected by the eviction budget.
+                          It is mutually exclusive with RoleMinAvailable.
+                          Values can be absolute numbers (ex: 1) or percentages of total role instances (ex: 20%).
+                          Percentages are rounded up.
+                        type: object
                       roleMinAvailable:
                         additionalProperties:
                           anyOf:
@@ -164,6 +191,7 @@ spec:
                           It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
                           If a role is absent from this map, it is not protected by the eviction budget.
                           Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%).
+                          Percentages are rounded up.
                         type: object
                     required:
                     - protectionLevel
