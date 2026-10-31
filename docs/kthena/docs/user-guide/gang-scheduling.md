@@ -53,6 +53,73 @@ type GangPolicy struct {
 }
 ```
 
+## Dynamic Resource Allocation (DRA)
+
+Kthena builds the PodGroup `minResources` from the container
+`resources.requests` of each role. Pods that receive devices through
+`resourceClaims` do not add a device entry to `resources.requests`, so a
+ServingGroup that uses only DRA claims produces a PodGroup with an empty
+`minResources` map.
+
+Volcano's default scheduler configuration does not enable the `capacity`
+plugin, and the default enqueue plugins evaluate scalar queue resources
+only. Without the `capacity` plugin, a DRA-only gang can be admitted at
+enqueue time and then partially bound when the cluster does not have
+enough devices for every role.
+
+To make the enqueue decision account for DRA devices, enable the
+`capacity` plugin and declare a quota for the DeviceClass on the Queue
+that the ModelServing uses. The Queue is selected with the
+`scheduling.volcano.sh/queue-name` annotation, or `default` when the
+annotation is not set. The `capacity` plugin replaces `proportion`, so do
+not enable both.
+
+```yaml
+# ConfigMap volcano-system/volcano-scheduler-configmap
+data:
+  volcano-scheduler.conf: |
+    actions: "enqueue, allocate, backfill, reclaim"
+    tiers:
+    - plugins:
+      - name: priority
+      - name: gang
+      - name: conformance
+    - plugins:
+      - name: drf
+      - name: predicates
+      - name: capacity
+        arguments:
+          capacity.DynamicResourceAllocationEnable: true
+      - name: nodeorder
+```
+
+```yaml
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: default
+spec:
+  capability:
+    "deviceclass/gpu.nvidia.com": "4"
+```
+
+With this configuration, the `capacity` plugin rejects the workload at
+enqueue time when the requested DeviceClass count exceeds the Queue
+`capability`, so the gang is not admitted.
+
+The `capacity` plugin arguments are optional. When they are not set,
+Volcano uses the Kubernetes `DynamicResourceAllocation` feature gate as
+the default. The same Queue fields also enforce scalar quotas, so review
+the existing `capability`, `deserved`, and `guarantee` values before
+enabling it.
+
+For the full quota model, including consumable capacity and shared
+claims, see the Volcano
+[DeviceClass Quota User Guide](https://github.com/volcano-sh/volcano/blob/master/docs/user-guide/how_to_use_dra_quota.md).
+
+Partial binding with DRA claims is reported in
+[#1887](https://github.com/volcano-sh/kthena/issues/1887).
+
 ## Preparation
 
 ### Prerequisites
