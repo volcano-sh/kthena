@@ -50,6 +50,22 @@ case "${TEST_CATEGORY}" in
     echo "Loading external provider mock image into Kind cluster"
     kind load docker-image "${EXTERNAL_PROVIDER_MOCK_IMAGE}" --name "${CLUSTER_NAME}"
     ;;
+  tokenizer)
+    echo "Building tokenizer image"
+    TOKENIZER_TARGET="${TOKENIZER_DOCKERFILE:-}"
+    if [ "${TOKENIZER_TARGET}" = "e2e" ]; then
+      make docker-build-tokenizer-e2e IMG_TOKENIZER="${HUB}/kthena-tokenizer:${TAG}"
+    else
+      make docker-build-tokenizer IMG_TOKENIZER="${HUB}/kthena-tokenizer:${TAG}"
+    fi
+    echo "Loading tokenizer image into Kind cluster"
+    kind load docker-image "${HUB}/kthena-tokenizer:${TAG}" --name "${CLUSTER_NAME}"
+    TOKENIZER_ENGINE_MOCK_IMAGE="${TOKENIZER_ENGINE_MOCK_IMAGE:-${HUB}/kthena-tokenizer-engine-mock:${TAG}}"
+    echo "Building tokenizer engine mock image"
+    make docker-build-tokenizer-engine-mock IMG_TOKENIZER_ENGINE_MOCK="${TOKENIZER_ENGINE_MOCK_IMAGE}"
+    echo "Loading tokenizer engine mock image into Kind cluster"
+    kind load docker-image "${TOKENIZER_ENGINE_MOCK_IMAGE}" --name "${CLUSTER_NAME}"
+    ;;
 esac
 
 echo "Start to install cert-manager"

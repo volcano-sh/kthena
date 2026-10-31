@@ -17,6 +17,7 @@ COPY client-go/ client-go/
 
 # Build. GOARCH is left empty so the binary matches the build platform.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o kthena-tokenizer cmd/kthena-tokenizer/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o kthena-tokenizer-stub cmd/kthena-tokenizer-stub/main.go
 
 # The tokenizer service delegates tokenization and chat-template rendering to
 # `vllm launch render` subprocesses, so the runtime image is the CPU-only vLLM
@@ -24,5 +25,6 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o kt
 FROM vllm/vllm-openai-cpu:latest
 
 COPY --from=builder /workspace/kthena-tokenizer /usr/local/bin/kthena-tokenizer
+COPY --from=builder /workspace/kthena-tokenizer-stub /usr/local/bin/kthena-tokenizer-stub
 
 ENTRYPOINT ["/usr/local/bin/kthena-tokenizer"]
