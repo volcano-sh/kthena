@@ -125,31 +125,6 @@ Stale entries are garbage-collected in the router after 24 hours, and ownership 
      │  └─────────────────┘                              │
      └───────────────────────────────────────────────────┘
 ```
-                        ┌────────────────┐
-                        │ Client Request │
-                        └───────┐────────┘
-                                │
-                                ▼
-        ┌─────────────────────┐  ┌─────────────────────┐
-        │  Kthena Router #1     │  │  Kthena Router #2     │
-        │  ┌───────────────┐  │  │  ┌───────────────┐  │
-        │  │ in-memory index │  │  │  │ in-memory index │  │
-        │  └───────────────┘  │  │  └───────────────┘  │
-        └───▲────────┐───────┘  └───▲────────┐───────┘
-            │        │              │        │
-   push KV  │        │ register     │        │ register
-   events   │        │ (heartbeat)  │        │ (heartbeat)
-            │        ▼              │        ▼
-           ┌┘────────────────────┴─────────────┐
-           │          vLLM Pods                   │
-           │  ┌───────────────┐                   │
-           │  │Runtime sidecar│ ◀── ZMQ kv-events │
-           │  └───────────────┘                   │
-           │  ┌───────────────┐                   │
-           │  │  vLLM Engine  │                   │
-           │  └───────────────┘                   │
-           └─────────────────────────────────────┘
-```
 
 - Each **router replica** registers with every runtime sidecar; the response of the registration is the sidecar's KV event stream.
 - The **Runtime sidecar** (started with `KV_EVENT_SYNC_MODE=memory`) streams standardized block hashes to every registered router; each stream starts with the full block index.
