@@ -187,6 +187,59 @@ _Appears in:_
 | `heterogeneousStatus` _[TargetScalingStatus](#targetscalingstatus) array_ | HeterogeneousStatus reports the per-target observed state when<br />HeterogeneousTarget is used. |  |  |
 
 
+#### BootstrapAccelerateStrategy
+
+
+
+BootstrapAccelerateStrategy configures source-aware creation of role replicas.
+
+
+
+_Appears in:_
+- [ModelServingSpec](#modelservingspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `provider` _[BootstrapAccelerateStrategyProvider](#bootstrapacceleratestrategyprovider)_ | Provider is the weight transfer system used by the inference engines. | ModelExpress | Enum: [ModelExpress] <br /> |
+| `roles` _[BootstrapRole](#bootstraprole) array_ | Roles limits acceleration to the listed roles and configures each of them.<br />At least one role must be specified. |  | MinItems: 1 <br /> |
+| `sourceFanOut` _integer_ | SourceFanOut is the number of P2P targets that one source can serve, i.e.<br />starting role replicas (created but not yet Running) per ready replica of<br />the same role. Once a role replica becomes ready, it acts as a new source<br />for the other replicas of that role, so the budget grows as more replicas<br />become ready. The effective budget is at least the role's gang minimum. | 1 | Minimum: 1 <br /> |
+| `modelExpress` _[ModelExpressConfig](#modelexpressconfig)_ | ModelExpress configures environment injection for inference engines.<br />If unset, users configure the engine environment themselves. |  |  |
+
+
+#### BootstrapAccelerateStrategyProvider
+
+_Underlying type:_ _string_
+
+BootstrapAccelerateStrategyProvider identifies the weight transfer provider.
+
+_Validation:_
+- Enum: [ModelExpress]
+
+_Appears in:_
+- [BootstrapAccelerateStrategy](#bootstrapacceleratestrategy)
+
+| Field | Description |
+| --- | --- |
+| `ModelExpress` |  |
+
+
+#### BootstrapRole
+
+
+
+BootstrapRole configures bootstrap acceleration for one role.
+
+
+
+_Appears in:_
+- [BootstrapAccelerateStrategy](#bootstrapacceleratestrategy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the name of a role in spec.template.roles. |  | MinLength: 1 <br /> |
+| `initialSeedReplicas` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | InitialSeedReplicas is the number of this role's replicas that may be<br />created while no ready source exists for it. It is a positive integer or a<br />percentage from 1% to 100% of spec.replicas * role.replicas, rounded up<br />(10% of 3 is 1). The effective budget is at least the role's gang minimum<br />in one ServingGroup. A desired count of zero creates nothing. | 1 | XIntOrString: \{\} <br /> |
+
+
 #### DisaggregatedScalingStatus
 
 
@@ -538,6 +591,24 @@ _Appears in:_
 | `modelMatch` _[ModelMatch](#modelmatch)_ | ModelMatch defines the predicate used to match LLM inference requests to a given<br />TargetModels. Multiple match conditions are ANDed together, i.e. the match will<br />evaluate to true only if all conditions are satisfied. |  |  |
 
 
+#### ModelExpressConfig
+
+
+
+ModelExpressConfig configures the ModelExpress inference-engine containers.
+
+
+
+_Appears in:_
+- [BootstrapAccelerateStrategy](#bootstrapacceleratestrategy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `engineContainers` _string array_ | EngineContainers names regular inference-engine containers in entry and<br />worker Pods of in-scope roles. Sidecars and init containers are not selected. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
+| `serverAddress` _string_ | ServerAddress is the ModelExpress server's gRPC address (host:port).<br />It is injected as MX_SERVER_ADDRESS only if that variable is not already<br />set in the selected container. If empty, users supply the endpoint themselves. |  |  |
+| `readyURL` _string_ | ReadyURL is the engine endpoint that ModelExpress polls before a source<br />publishes its metadata; it may differ from the Pod readiness probe.<br />It is injected as MX_ARTIFACT_READY_URL only if that variable is not already<br />set in the selected container. If empty, ModelExpress uses the engine default. |  |  |
+
+
 #### ModelServing
 
 
@@ -592,6 +663,7 @@ _Appears in:_
 | `replicas` _integer_ | Number of ServingGroups. That is the number of instances that run serving tasks<br />Default to 1. | 1 |  |
 | `schedulerName` _string_ | SchedulerName defines the name of the scheduler used by ModelServing | volcano |  |
 | `plugins` _[PluginSpec](#pluginspec) array_ | Plugins defines optional plugin chain to customize serving pods. |  |  |
+| `bootstrapAccelerateStrategy` _[BootstrapAccelerateStrategy](#bootstrapacceleratestrategy)_ | BootstrapAccelerateStrategy creates role replicas in source-aware batches<br />for peer-to-peer model weight loading. If unset, creation is unchanged. |  |  |
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
 | `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
