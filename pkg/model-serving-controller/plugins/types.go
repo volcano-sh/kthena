@@ -42,3 +42,9 @@ type Plugin interface {
 	// OnPodReady is invoked when the controller observes the Pod running and ready.
 	OnPodReady(ctx context.Context, req *HookRequest) error
 }
+
+// InPlaceUpdatePlugin is implemented by plugins whose Pod mutations stay valid after an in-place image patch.
+// Without it, outdated ServingGroups are recreated instead.
+type InPlaceUpdatePlugin interface {
+	SupportsInPlaceUpdate() bool
+}

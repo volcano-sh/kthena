@@ -226,6 +226,11 @@ func (c *LWSController) syncHandler(ctx context.Context, key string) error {
 	} else if err != nil {
 		return err
 	} else {
+		// Never rewrite a ModelServing that this LWS did not create.
+		if !metav1.IsControlledBy(ms, lws) {
+			return fmt.Errorf("ModelServing %s/%s already exists and is not controlled by LeaderWorkerSet %s",
+				namespace, msName, lws.Name)
+		}
 		desiredMs := c.constructModelServing(lws)
 		if !reflect.DeepEqual(ms.Spec, desiredMs.Spec) {
 			msCopy := ms.DeepCopy()

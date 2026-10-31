@@ -95,6 +95,18 @@ func (c *Chain) OnPodCreate(ctx context.Context, req *HookRequest) error {
 	return nil
 }
 
+func (c *Chain) PluginWithoutInPlaceUpdate() (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	for _, entry := range c.entries {
+		if p, ok := entry.plugin.(InPlaceUpdatePlugin); !ok || !p.SupportsInPlaceUpdate() {
+			return entry.plugin.Name(), true
+		}
+	}
+	return "", false
+}
+
 // OnPodReady executes plugins' ready hooks in order.
 func (c *Chain) OnPodReady(ctx context.Context, req *HookRequest) error {
 	if c == nil {

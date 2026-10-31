@@ -18,7 +18,7 @@ Plugin Configuration (PluginConfig):
 | ------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | least-request | maxWaitingRequests                                                                      | Sets the maximum number of waiting requests. Must not be negative; 0 or omitted uses the default of 10.                                                                                                                                                             |
 | least-latency | TTFTTPOTWeightFactor                                                                    | Sets the TTFT weight factor. Must be between `0.0` and `1.0`.                                                                                                                                             |
-| prefix-cache  | blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize                             | Configures prefix cache parameters                                                                                                                                                                        |
+| prefix-cache  | blockSizeToHash<br />maxBlocksToMatch<br />maxHashCacheSize<br />topKMatches            | Configures prefix cache parameters                                                                                                                                                                        |
 | kvcache-aware | blockSizeToHash<br />maxBlocksToMatch<br />indexMode<br />runtimePort                   | Configures KV cache aware token-block matching parameters. Requires the Kthena Runtime sidecar; uses Redis (`indexMode: redis`, default) or an in-memory index streamed from the runtimes (`indexMode: memory`). |
 
 `TTFTTPOTWeightFactor` controls how the least-latency plugin balances Time To First Token (TTFT) and Time Per Output Token (TPOT):
@@ -83,6 +83,7 @@ data:
           blockSizeToHash: 64
           maxBlocksToMatch: 128
           maxHashCacheSize: 50000
+          topKMatches: 5
       - name: kvcache-aware
         args:
           blockSizeToHash: 16
@@ -128,6 +129,7 @@ data:
           blockSizeToHash: 64
           maxBlocksToMatch: 128
           maxHashCacheSize: 50000
+          topKMatches: 5
       - name: kvcache-aware
         args:
           # The default block size of vllm is 16, keep in line with it.

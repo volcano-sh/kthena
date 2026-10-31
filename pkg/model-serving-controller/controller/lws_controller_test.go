@@ -17,14 +17,23 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	lwsclientset "sigs.k8s.io/lws/client-go/clientset/versioned"
+	lwsinformers "sigs.k8s.io/lws/client-go/informers/externalversions"
 
+	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
+	kthenainformers "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
@@ -369,6 +378,111 @@ func TestConstructModelServing(t *testing.T) {
 				assert.Equal(t, expectedRole.EntryTemplate.Metadata.Labels, role.EntryTemplate.Metadata.Labels)
 				assert.Equal(t, expectedRole.EntryTemplate.Metadata.Annotations, role.EntryTemplate.Metadata.Annotations)
 			}
+		})
+	}
+}
+
+func TestLWSSyncHandlerModelServingOwnership(t *testing.T) {
+	lws := &lwsv1.LeaderWorkerSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "team-llm", Namespace: "default", UID: "lws-uid"},
+		Spec: lwsv1.LeaderWorkerSetSpec{
+			Replicas: ptr.To(int32(1)),
+			LeaderWorkerTemplate: lwsv1.LeaderWorkerTemplate{
+				WorkerTemplate: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "nginx"}}},
+				},
+			},
+		},
+	}
+	// A ModelServing a user created with the same name as the LWS.
+	userMS := func() *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{Name: "team-llm", Namespace: "default"},
+			Spec:       workloadv1alpha1.ModelServingSpec{Replicas: ptr.To(int32(3))},
+		}
+	}
+	ownedBy := func(ms *workloadv1alpha1.ModelServing, uid string) *workloadv1alpha1.ModelServing {
+		ms.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: lwsv1.GroupVersion.String(),
+			Kind:       "LeaderWorkerSet",
+			Name:       "team-llm",
+			UID:        types.UID(uid),
+			Controller: ptr.To(true),
+		}}
+		return ms
+	}
+
+	tests := []struct {
+		name         string
+		existing     *workloadv1alpha1.ModelServing
+		wantErr      string
+		wantReplicas int32
+		wantVerbs    []string
+	}{
+		{
+			name:         "creates the ModelServing when none exists",
+			wantReplicas: 1,
+			wantVerbs:    []string{"create"},
+		},
+		{
+			name:         "updates a ModelServing controlled by this LWS",
+			existing:     ownedBy(userMS(), "lws-uid"),
+			wantReplicas: 1,
+			wantVerbs:    []string{"update"},
+		},
+		{
+			name:         "does not touch a ModelServing with no owner",
+			existing:     userMS(),
+			wantErr:      "is not controlled by LeaderWorkerSet team-llm",
+			wantReplicas: 3,
+		},
+		{
+			name:         "does not touch a ModelServing controlled by another LWS with the same name",
+			existing:     ownedBy(userMS(), "older-lws-uid"),
+			wantErr:      "is not controlled by LeaderWorkerSet team-llm",
+			wantReplicas: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var msObjs []runtime.Object
+			if tt.existing != nil {
+				msObjs = append(msObjs, tt.existing)
+			}
+			kthenaClient := kthenafake.NewSimpleClientset(msObjs...)
+			// The LWS status is already up to date in these cases, so the LWS client
+			// is never called and the informer is never started.
+			var lwsClient lwsclientset.Interface
+			lwsFactory := lwsinformers.NewSharedInformerFactory(lwsClient, 0)
+			kthenaFactory := kthenainformers.NewSharedInformerFactory(kthenaClient, 0)
+
+			c, err := NewLWSController(kubefake.NewSimpleClientset(), kthenaClient, lwsClient, lwsFactory, kthenaFactory)
+			require.NoError(t, err)
+			require.NoError(t, lwsFactory.Leaderworkerset().V1().LeaderWorkerSets().Informer().GetIndexer().Add(lws))
+			if tt.existing != nil {
+				require.NoError(t, kthenaFactory.Workload().V1alpha1().ModelServings().Informer().GetIndexer().Add(tt.existing))
+			}
+			kthenaClient.ClearActions()
+
+			err = c.syncHandler(context.Background(), "default/team-llm")
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			var verbs []string
+			for _, action := range kthenaClient.Actions() {
+				if action.GetVerb() == "create" || action.GetVerb() == "update" {
+					verbs = append(verbs, action.GetVerb())
+				}
+			}
+			assert.Equal(t, tt.wantVerbs, verbs)
+
+			got, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Get(context.Background(), "team-llm", metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantReplicas, *got.Spec.Replicas)
 		})
 	}
 }

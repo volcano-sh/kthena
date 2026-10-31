@@ -99,6 +99,21 @@ ServingGroup and Role references and is deferred while partitions, rollout,
 recovery or unresolved history remain, so missing protected ordinals can recover
 after controller restart without introducing a new status/CRD field.
 
+During a Role rollout that changes `workerReplicas`, old and new instances can
+have different sizes. The shared PodGroup temporarily uses the smallest complete
+applied Role template as its scheduling floor, with current replica counts and
+explicit gang minima. Losing a Pod does not lower this historical size. Unknown
+history leaves the existing PodGroup unchanged until it can be resolved. Once
+all instances use the target layout, the PodGroup uses that layout as well.
+This scheduling floor permits larger instances to bind partially; readiness and
+rollout availability still require every member of each instance's own revision.
+It does not express atomic scheduling of arbitrary heterogeneous resource sets.
+
+In-place image updates use the same resolved revision identities and effective
+Role comparisons, including scheduler and applicable plugin inputs. Completing
+an update requires observing all expected members, so an informer delay cannot
+advance the unit's revision while a historical worker is still missing.
+
 ## Example
 
 Read the [examples](https://github.com/volcano-sh/kthena/tree/main/examples/model-serving/sample.yaml) to learn more.

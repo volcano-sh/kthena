@@ -196,6 +196,21 @@ func decodeLegacyRevisionRoles(data []byte) ([]workloadv1alpha1.Role, error) {
 	return roles, nil
 }
 
+// ModelServingAtRevision rebuilds ms with the revisioned fields recorded in cr.
+// A ControllerRevision written before v1 revision data records only the Roles.
+func ModelServingAtRevision(ms *workloadv1alpha1.ModelServing, cr *appsv1.ControllerRevision) (*workloadv1alpha1.ModelServing, error) {
+	if cr != nil && cr.Annotations[ControllerRevisionDataVersionAnnotation] == ControllerRevisionDataVersionV1 {
+		return ApplyRevision(ms, cr)
+	}
+	roles, err := GetRolesFromControllerRevision(cr)
+	if err != nil {
+		return nil, err
+	}
+	result := ms.DeepCopy()
+	result.Spec.Template.Roles = roles
+	return result, nil
+}
+
 // CleanupOldControllerRevisions deletes old ControllerRevisions that are no longer in use.
 // In ModelServing, we typically have at most two revisions (CurrentRevision and UpdateRevision),
 // so this cleanup removes all revisions except CurrentRevision and UpdateRevision.

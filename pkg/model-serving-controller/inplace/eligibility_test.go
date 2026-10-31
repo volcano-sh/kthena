@@ -246,14 +246,21 @@ func TestOnlyRoleImagesChanged(t *testing.T) {
 			want:     true,
 		},
 		{
-			name: "changes in another Role and outside the Roles",
+			name: "changes in another Role do not affect this Role",
 			mutate: func(ms *workloadv1alpha1.ModelServing) {
-				ms.Spec.SchedulerName = "default-scheduler"
 				ms.Spec.Template.Roles[1].EntryTemplate.Spec.Containers[0].Env[0].Value = "m2"
 				setEntryImage(ms, 0, "example.com/engine:v2")
 			},
 			roleName: "decode",
 			want:     true,
+		},
+		{
+			name: "scheduler change affects this Role",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.SchedulerName = "default-scheduler"
+				setEntryImage(ms, 0, "example.com/engine:v2")
+			},
+			roleName: "decode",
 		},
 		{
 			name: "environment change in the Role",

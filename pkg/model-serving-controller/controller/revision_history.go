@@ -30,6 +30,7 @@ import (
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -174,6 +175,64 @@ func (c *ModelServingController) appliedRoleTemplate(ctx context.Context, ms *wo
 	return workloadv1alpha1.Role{}, revision, "", fmt.Errorf("Role %s is absent from applied revision %s", roleName, revision)
 }
 
+// workloadForPodGroup projects the applied layouts without changing the desired
+// spec. A single Volcano subgroup policy has one size for all instances of a
+// Role. During a mixed-layout rollout, retain the smallest applied template as
+// a transitional scheduling floor. This is not a readiness or rollout budget:
+// those still require each instance's complete revision-specific membership.
+func (c *ModelServingController) workloadForPodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, group datastore.ServingGroup) (*workloadv1alpha1.ModelServing, error) {
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type != workloadv1alpha1.RoleRollingUpdate {
+		return c.revisionHistory(ctx, ms).workload(ctx, group.Revision)
+	}
+	projected := ms.DeepCopy()
+	for i, desired := range ms.Spec.Template.Roles {
+		instances, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group.Name, desired.Name)
+		if err != nil {
+			c.revisionHistory(ctx, ms).recordComparisonError(group.Name+"/"+desired.Name+" PodGroup", err)
+			return nil, err
+		}
+		effective := desired
+		found := false
+		for _, instance := range instances {
+			if instance.Status == datastore.RoleDeleting {
+				continue
+			}
+			applied, _, _, err := c.appliedRoleTemplate(ctx, ms, group.Name, desired.Name, instance)
+			if err != nil {
+				c.revisionHistory(ctx, ms).recordComparisonError(group.Name+"/"+instance.Name+" PodGroup", err)
+				return nil, err
+			}
+			if !found || applied.WorkerReplicas < effective.WorkerReplicas {
+				effective = applied
+				found = true
+			}
+		}
+		if !found && len(instances) == 0 && roleReplicas(desired) > 0 {
+			partition, _, err := c.getPartition(rolePartition(ms, desired), roleReplicas(desired))
+			if err != nil {
+				c.revisionHistory(ctx, ms).recordComparisonError(group.Name+"/"+desired.Name+" PodGroup", err)
+				return nil, err
+			}
+			if partition > 0 && ms.Status.CurrentRevision != "" {
+				protected, _, _, err := c.appliedRoleTemplate(ctx, ms, group.Name, desired.Name, datastore.Role{Revision: ms.Status.CurrentRevision})
+				if err != nil {
+					return nil, err
+				}
+				// With no instances yet, use the same protected/unprotected
+				// versions that scaleUpRoles will assign to the missing slots.
+				if partition >= roleReplicas(desired) || protected.WorkerReplicas < effective.WorkerReplicas {
+					effective = protected
+				}
+			}
+		}
+		// Counts and explicit gang minima remain current; missing members must
+		// not reduce the worker count recorded in an instance's history.
+		effective.Replicas = desired.Replicas
+		projected.Spec.Template.Roles[i] = *effective.DeepCopy()
+	}
+	return projected, nil
+}
+
 // rolePodsComplete checks each required identity rather than counting arbitrary
 // same-label Pods. Terminating members still occupy their names, but never
 // supply readiness. A foreign or extra worker cannot stand in for a missing one.
@@ -189,7 +248,7 @@ func rolePodsComplete(ms *workloadv1alpha1.ModelServing, groupName, roleID strin
 	}
 	for ordinal := 0; ordinal <= int(role.WorkerReplicas); ordinal++ {
 		pod := members[utils.GeneratePodName(groupName, roleID, ordinal)]
-		if pod == nil || (requireReady && (pod.DeletionTimestamp != nil || !utils.IsPodRunningAndReady(pod))) {
+		if pod == nil || (requireReady && (pod.DeletionTimestamp != nil || !utils.IsPodRunningAndReady(pod) || inplace.Updating(pod))) {
 			return false
 		}
 	}

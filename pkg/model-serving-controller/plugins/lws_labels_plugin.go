@@ -84,6 +84,11 @@ func (p *LWSLabelsPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+// SupportsInPlaceUpdate is true, because an image patch does not change these labels.
+func (p *LWSLabelsPlugin) SupportsInPlaceUpdate() bool {
+	return true
+}
+
 func getOwningLWSName(ownerRefs []metav1.OwnerReference) (string, bool) {
 	for _, ref := range ownerRefs {
 		if ref.Kind == "LeaderWorkerSet" && ref.Name != "" {

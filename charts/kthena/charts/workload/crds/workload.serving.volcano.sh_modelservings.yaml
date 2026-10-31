@@ -171,7 +171,7 @@ spec:
                   progressDeadlineSeconds:
                     description: |-
                       ProgressDeadlineSeconds is the maximum time for a ServingGroup or Role instance updated in place to become ready on the target image.
-                      After it passes, Pods that are not ready follow the RecoveryPolicy.
+                      After it passes, unfinished Pods are handled according to RecoveryPolicy.
                       It only applies to in-place updates, and defaults to 1800 seconds.
                     format: int32
                     minimum: 60

@@ -168,7 +168,7 @@ type RolloutStrategy struct {
 	UpdateMethod UpdateMethod `json:"updateMethod,omitempty"`
 
 	// ProgressDeadlineSeconds is the maximum time for a ServingGroup or Role instance updated in place to become ready on the target image.
-	// After it passes, Pods that are not ready follow the RecoveryPolicy.
+	// After it passes, unfinished Pods are handled according to RecoveryPolicy.
 	// It only applies to in-place updates, and defaults to 1800 seconds.
 	// +kubebuilder:validation:Minimum=60
 	// +optional
