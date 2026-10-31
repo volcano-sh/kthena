@@ -1794,6 +1794,8 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 		// Assign different deletion costs to pods in different ServingGroups
 		for _, pod := range pods {
+			// Lister objects are shared with informer handlers; mutate a copy.
+			pod = pod.DeepCopy()
 			// Extract ServingGroup index from pod name or labels
 			groupName, exists := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
 			assert.True(t, exists, "Pod should have GroupName label")
