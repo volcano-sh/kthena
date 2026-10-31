@@ -492,6 +492,205 @@ func TestAggregateResources(t *testing.T) {
 	})
 }
 
+func TestAggregateResourcesEffectiveRequests(t *testing.T) {
+	sidecarPolicy := corev1.ContainerRestartPolicyAlways
+	gpu := corev1.ResourceName("nvidia.com/gpu")
+
+	tests := []struct {
+		name     string
+		podSpec  *corev1.PodSpec
+		replicas int
+		expected corev1.ResourceList
+	}{
+		{
+			name: "limits only defaults requests to limits",
+			podSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("4"),
+							gpu:                resource.MustParse("1"),
+						},
+					},
+				}},
+			},
+			replicas: 3,
+			expected: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("12"),
+				gpu:                resource.MustParse("3"),
+			},
+		},
+		{
+			name: "explicit request wins over limit",
+			podSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+						Limits: corev1.ResourceList{
+							corev1.ResourceMemory: resource.MustParse("4Gi"),
+							gpu:                   resource.MustParse("2"),
+						},
+					},
+				}},
+			},
+			replicas: 1,
+			expected: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+				gpu:                   resource.MustParse("2"),
+			},
+		},
+		{
+			name: "sidecar init container adds to regular containers",
+			podSpec: &corev1.PodSpec{
+				InitContainers: []corev1.Container{{
+					Name:          "sidecar",
+					RestartPolicy: &sidecarPolicy,
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+					},
+				}},
+				Containers: []corev1.Container{{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+					},
+				}},
+			},
+			replicas: 2,
+			expected: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("5"),
+			},
+		},
+		{
+			name: "larger regular init container sets the minimum",
+			podSpec: &corev1.PodSpec{
+				InitContainers: []corev1.Container{{
+					Name: "downloader",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("8Gi")},
+					},
+				}},
+				Containers: []corev1.Container{{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+					},
+				}},
+			},
+			replicas: 1,
+			expected: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("8Gi"),
+			},
+		},
+		{
+			name: "pod-level requests override container requests",
+			podSpec: &corev1.PodSpec{
+				Resources: &corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("6")},
+				},
+				Containers: []corev1.Container{{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("2"),
+							gpu:                resource.MustParse("1"),
+						},
+					},
+				}},
+			},
+			replicas: 1,
+			expected: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("6"),
+				gpu:                resource.MustParse("1"),
+			},
+		},
+		{
+			name: "pod-level limits only default pod-level requests to limits",
+			podSpec: &corev1.PodSpec{
+				Resources: &corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("8"),
+						corev1.ResourceMemory: resource.MustParse("16Gi"),
+					},
+				},
+				Containers: []corev1.Container{{Name: "main"}},
+			},
+			replicas: 2,
+			expected: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("16"),
+				corev1.ResourceMemory: resource.MustParse("32Gi"),
+			},
+		},
+		{
+			name: "pod-level limits with container requests default pod-level requests to container requests",
+			podSpec: &corev1.PodSpec{
+				Resources: &corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("8"),
+						corev1.ResourceMemory: resource.MustParse("16Gi"),
+					},
+				},
+				Containers: []corev1.Container{
+					{
+						Name: "main",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+						},
+					},
+					{
+						Name: "helper",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+						},
+					},
+				},
+			},
+			replicas: 1,
+			expected: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("3"),
+				corev1.ResourceMemory: resource.MustParse("16Gi"),
+			},
+		},
+		{
+			name: "pod-level hugepages limit wins over container hugepages",
+			podSpec: &corev1.PodSpec{
+				Resources: &corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{"hugepages-2Mi": resource.MustParse("1Gi")},
+				},
+				Containers: []corev1.Container{{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{"hugepages-2Mi": resource.MustParse("512Mi")},
+					},
+				}},
+			},
+			replicas: 1,
+			expected: corev1.ResourceList{
+				"hugepages-2Mi": resource.MustParse("1Gi"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := NewManager(nil, nil, apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD()), nil)
+			original := tt.podSpec.DeepCopy()
+
+			total := manager.aggregateResources(corev1.ResourceList{}, tt.podSpec, tt.replicas)
+
+			assert.Len(t, total, len(tt.expected))
+			for name, want := range tt.expected {
+				got := total[name]
+				assert.True(t, want.Equal(got), "resource %s: want %s, got %s", name, want.String(), got.String())
+			}
+			// The template comes from the informer cache and must not be mutated.
+			assert.Equal(t, original, tt.podSpec)
+		})
+	}
+}
+
 func TestGetExistingPodGroups(t *testing.T) {
 	// Setup test objects
 	modelServing := &workloadv1alpha1.ModelServing{

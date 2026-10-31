@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
+	resourcehelper "k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	batchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
@@ -382,27 +384,79 @@ func (m *Manager) calculateRequirements(ms *workloadv1alpha1.ModelServing) (int,
 	return minMember, minRoleMember, minResources
 }
 
-// aggregateResources aggregates resource requirements from a pod spec
+// aggregateResources aggregates the effective resource requests of a pod built from podSpec, multiplied by replicas
 func (m *Manager) aggregateResources(total corev1.ResourceList, podSpec *corev1.PodSpec, replicas int) corev1.ResourceList {
 	if total == nil {
 		total = corev1.ResourceList{}
 	}
 
-	for _, container := range podSpec.Containers {
-		for resourceName, quantity := range container.Resources.Requests {
-			quantityCopy := quantity.DeepCopy()
-			quantityCopy.Mul(int64(replicas))
+	pod := &corev1.Pod{Spec: *podSpec.DeepCopy()}
+	defaultRequestsFromLimits(pod.Spec.Containers)
+	defaultRequestsFromLimits(pod.Spec.InitContainers)
+	defaultPodRequests(pod)
 
-			if existing, exists := total[resourceName]; exists {
-				existing.Add(quantityCopy)
-				total[resourceName] = existing
-			} else {
-				total[resourceName] = quantityCopy
-			}
+	// PodRequests accounts for sidecars, init containers, pod-level resources and overhead the same way kube-scheduler does.
+	for resourceName, quantity := range resourcehelper.PodRequests(pod, resourcehelper.PodResourcesOptions{}) {
+		quantityCopy := quantity.DeepCopy()
+		quantityCopy.Mul(int64(replicas))
+
+		if existing, exists := total[resourceName]; exists {
+			existing.Add(quantityCopy)
+			total[resourceName] = existing
+		} else {
+			total[resourceName] = quantityCopy
 		}
 	}
 
 	return total
+}
+
+// defaultRequestsFromLimits sets the request of each resource that has a limit but no request to that limit
+func defaultRequestsFromLimits(containers []corev1.Container) {
+	for i := range containers {
+		resources := &containers[i].Resources
+		for resourceName, limit := range resources.Limits {
+			if _, exists := resources.Requests[resourceName]; exists {
+				continue
+			}
+			if resources.Requests == nil {
+				resources.Requests = corev1.ResourceList{}
+			}
+			resources.Requests[resourceName] = limit.DeepCopy()
+		}
+	}
+}
+
+// defaultPodRequests mirrors defaultPodRequests in k8s.io/kubernetes/pkg/apis/core/v1/defaults.go.
+func defaultPodRequests(pod *corev1.Pod) {
+	if pod.Spec.Resources == nil || len(pod.Spec.Resources.Limits) == 0 {
+		return
+	}
+
+	podReqs := pod.Spec.Resources.Requests
+	if podReqs == nil {
+		podReqs = corev1.ResourceList{}
+	}
+
+	for name, quantity := range resourcehelper.AggregateContainerRequests(pod, resourcehelper.PodResourcesOptions{}) {
+		if _, exists := podReqs[name]; exists || !resourcehelper.IsSupportedPodLevelResource(name) {
+			continue
+		}
+		if strings.HasPrefix(string(name), corev1.ResourceHugePagesPrefix) {
+			continue
+		}
+		podReqs[name] = quantity.DeepCopy()
+	}
+
+	for name, limit := range pod.Spec.Resources.Limits {
+		if _, exists := podReqs[name]; !exists && resourcehelper.IsSupportedPodLevelResource(name) {
+			podReqs[name] = limit.DeepCopy()
+		}
+	}
+
+	if len(podReqs) > 0 {
+		pod.Spec.Resources.Requests = podReqs
+	}
 }
 
 // GenerateTaskName generates task name
