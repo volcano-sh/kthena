@@ -106,10 +106,10 @@ spec:
     args:
       maxWaitingRequests: 50
   plugins:
-    Filter:
+    filter:
       enabled:
       - least-request
-    Score:
+    score:
       enabled:
       - name: prefix-cache
         weight: 3
@@ -125,6 +125,31 @@ spec:
     loadBalancer:
       schedulerProfile: cache-heavy-profile   # unset → global scheduler config
 ```
+
+### How a profile relates to the global ConfigMap
+
+A SchedulerProfile is a complete plugin combination. For a ModelServer
+that references a profile, the global chain does not run at all for that
+ModelServer's requests:
+
+- Plugins not listed in the profile do not run — even if the global
+  ConfigMap enables them.
+- Plugins listed without a `pluginConfig` entry run with their built-in
+  defaults, not the args from the global ConfigMap.
+
+The fallback to the global chain applies only to ModelServers without a
+(resolvable) profile reference. Users migrating from the global config
+must copy every plugin and arg they rely on into the profile — nothing
+carries over. This differs from the semantics discussed for the
+field-based approach in #1899, where a per-ModelServer setting adjusted
+a single knob on top of the global config.
+
+The two also differ in validation strictness, matching their validation
+layers: the ConfigMap keeps the existing lenient validation (the checks
+that would abort startup), whose error is surfaced at startup as today;
+a profile uses the stricter validation — full checks — and a runtime
+build failure falls back (to the global chain on create, to the previous
+chain on update) instead of degrading silently.
 
 ### Why a referenced CRD instead of extending ModelServer
 
@@ -142,15 +167,15 @@ spec:
 1. **Schema (apiserver)**: field types, `weight > 0`, name lengths —
    from kubebuilder markers on the CRD.
 2. **Validating webhook (router)**: two kinds of checks.
-   - *Structural* (webhook-local): duplicate plugin entries, score
-     weight ranges.
-   - *Plugin-dependent*: plugin names must be registered, args must pass
-     each plugin's validator, plugins must support their declared role
-     (filter vs score), and the random plugin must be the only score
-     plugin (mirroring `handleRandomPluginConflicts` for the global
-     config). These checks are delegated to the plugins package — the
-     single source of truth for the plugin set — so the webhook does not
-     depend on the scheduling engine.
+    - *Structural* (webhook-local): duplicate plugin entries, score
+      weight ranges.
+    - *Plugin-dependent*: plugin names must be registered, args must pass
+      each plugin's validator, plugins must support their declared role
+      (filter vs score), and the random plugin must be the only score
+      plugin (mirroring `handleRandomPluginConflicts` for the global
+      config). These checks are delegated to the plugins package — the
+      single source of truth for the plugin set — so the webhook does not
+      depend on the scheduling engine.
 3. **Chain construction (runtime)**: the last line of defense when the
    ChainManager materializes a profile into a plugin chain.
 
@@ -159,7 +184,7 @@ Plugin extensibility note: plugin args are intentionally free-form
 schemas cannot express per-discriminant sub-structures (a field's shape
 cannot be selected by another field's value), which is exactly why the
 ecosystem pairs such blobs with validating webhooks — the trade-off is
-documented here rather than hidden.
+documented here.
 
 ### Plugin registration (single source of truth)
 
@@ -177,6 +202,42 @@ validated anywhere else:
 Adding a plugin means adding the plugin implementation plus one entry
 here; registration, validation, role capability and the known-plugin set
 all follow automatically.
+
+### Plugin-set-derived state lives on the chain
+
+Two pieces of scheduler state are derived from the plugin set rather than
+configured directly; with per-profile chains they must be derived per
+chain, not globally:
+
+- `postScheduleHooks` — the score plugins that also implement
+  `PostScheduleHook`; already carried on the chain.
+- `syncOnFlight` — whether scheduling must pull on-flight counts from
+  Redis first (required by least-request scoring under multiple router
+  replicas); derived at chain-build time from whether this chain's plugin
+  set includes least-request, and carried on the chain. A profile that
+  enables least-request while the global config does not now syncs
+  correctly. Redis absence degrades gracefully: `SyncOnFlightCounts` is a
+  no-op without a Redis-backed counter, and the chain falls back to
+  local-only on-flight counts.
+
+### Plugin lifecycle
+
+Plugin instances are rebuilt whenever a profile is updated, so they must
+not own long-lived state:
+
+1. **Shared state moves out of plugin instances.** The prefix-cache and
+   KV-block indexes, the KV event subscriber and the gauge provider are
+   created once per router and shared by all chains; chains hold only
+   per-profile args. Tuning a profile's args retains the learned cache
+   data, and a pod is tracked by one index instead of one per
+   profile. With this change the current plugins hold no instance-local
+   resources.
+
+2. **A Close hook remains as the retirement path** for any
+   instance-local resources — including future plugins whose background
+   work is parameterized by args and cannot be shared. The ChainManager
+   calls it on a replaced chain once the requests admitted with it have
+   finished their post hooks.
 
 ### Chain management and resolution
 
@@ -235,6 +296,42 @@ flowchart TD
   ModelServers resolve to no chain, and both `Schedule` and
   `RunPostHooks` fall back to the global chain (warning log); profile
   deletion is not blocked.
+
+### Failure handling when building plugin chains
+
+Each plugin's validation method (see
+[Plugin registration (single source of truth)](#plugin-registration-single-source-of-truth))
+returns the error and owns two validation modes. Lenient mode validates
+what the ConfigMap config validates today (the conditions that would
+abort startup); the global chain runs it before constructing plugins,
+and the upper layer aborts startup as today. Strict mode validates
+everything; the profile chain runs it before constructing plugins, and a
+failure rejects the chain. The constructors no longer carry validation
+logic, so their `Fatalf` calls become unreachable on both paths.
+
+Chain building is triggered when a SchedulerProfile is created or
+updated, and its failures fall into two cases:
+
+- Chain build failure: the profile's args fail strict validation. The
+  router falls back instead of taking the new chain: on create it uses
+  the global chain and caches nothing; on update it keeps the previously
+  built chain.
+- Dangling reference: a referenced profile is deleted (or not yet
+  created), so the chain cannot be resolved, and the ModelServer falls
+  back to the global chain.
+
+Both failures surface as a `SchedulerProfileResolved` condition on the
+ModelServer's status:
+
+```yaml
+status:
+  conditions:
+  - type: SchedulerProfileResolved
+    status: "False"
+    reason: ProfileResolutionFailed     # or ProfileNotFound for a dangling reference
+    message: 'invalid args for plugin "least-request": maxWaitingRequests must be positive'
+    lastTransitionTime: "2026-10-31T08:12:00Z"
+```
 
 ## Alternatives
 
