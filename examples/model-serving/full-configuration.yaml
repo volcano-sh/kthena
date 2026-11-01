@@ -24,6 +24,11 @@ spec:
         target: All
   rolloutStrategy:
     type: ServingGroupRollingUpdate
+    # Recreate (default) or InPlace.
+    updateMethod: Recreate
+    ## For use with Inplace only.
+    progressDeadlineSeconds: 1800
+    # With RoleRollingUpdate, remove this block and set the same fields inline on each Role instead.
     rollingUpdateConfiguration:
       maxUnavailable: 1
       maxSurge: 0
@@ -37,16 +42,21 @@ spec:
       minRoleReplicas:
         prefill: 1
         decode: 1
+    # The prerequisite for using networkTopology is that the HyperNode resource object must exist on the Volcano side.    
     networkTopology:
       groupPolicy:
-        mode: soft
+        mode: hard
         highestTierAllowed: 2
       rolePolicy:
-        mode: soft
+        mode: hard
         highestTierAllowed: 1
     roles:
       - name: prefill
         replicas: 1
+        # Role-level rolling update settings, used only when rolloutStrategy.type is RoleRollingUpdate.
+        # maxUnavailable: 1
+        # maxSurge: 0
+        # partition: 0
         entryTemplate:
           metadata:
             labels:
@@ -82,6 +92,10 @@ spec:
                     cpu: "0.1"
       - name: decode
         replicas: 1
+        # Role-level rolling update settings, used only when rolloutStrategy.type is RoleRollingUpdate.
+        # maxUnavailable: 1
+        # maxSurge: 0
+        # partition: 0
         entryTemplate:
           metadata:
             labels:

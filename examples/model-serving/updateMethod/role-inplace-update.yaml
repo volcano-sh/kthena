@@ -1,26 +1,27 @@
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:
-  name: sample
+  name: sample-role-inplace
   namespace: default
 spec:
   schedulerName: volcano
-  replicas: 4  # inferGroup replicas
+  replicas: 1  # inferGroup replicas
+  recoveryPolicy: RoleRecreate
   rolloutStrategy:
-    type: ServingGroupRollingUpdate
-    rollingUpdateConfiguration:
-      maxUnavailable: 0
-      maxSurge: 1
+    type: RoleRollingUpdate
+    updateMethod: InPlace
+    progressDeadlineSeconds: 1800
   template:
     restartGracePeriodSeconds: 60
     roles:
       - name: prefill
-        replicas: 1       # role replicas, for example, 1P1D
+        replicas: 1
+        maxUnavailable: 1
         entryTemplate:
           spec:
             containers:
               - name: leader
-                image: nginx
+                image: nginx  # change only the image, for example to nginx:1.27, to trigger an in-place update
                 ports:
                   - containerPort: 8080
         workerReplicas: 1
@@ -32,7 +33,8 @@ spec:
                 ports:
                   - containerPort: 8080
       - name: decode
-        replicas: 1  # role replicas, for example, 1P1D
+        replicas: 1
+        maxUnavailable: 1
         entryTemplate:
           spec:
             containers:
