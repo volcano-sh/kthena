@@ -1783,6 +1783,9 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 		// Assign different deletion costs to pods in different ServingGroups
 		for _, pod := range pods {
+			// Copy the cached pod before changing it; the informer handlers read the same object.
+			pod = pod.DeepCopy()
+
 			// Extract ServingGroup index from pod name or labels
 			groupName, exists := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
 			assert.True(t, exists, "Pod should have GroupName label")
