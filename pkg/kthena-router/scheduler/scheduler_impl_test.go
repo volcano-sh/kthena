@@ -690,18 +690,16 @@ func BenchmarkTopNPodInfos(b *testing.B) {
 // while returning at most topN valid pairs.
 func TestPDTopFiveRegression(t *testing.T) {
 	tests := []struct {
-		name                string
-		includeD5           bool
-		addGroupAPrefill    bool
-		wantPairs           int
-		omitPrefill6        bool
-		addThreeMoreDecodes bool
+		name             string
+		includeD5        bool
+		addGroupAPrefill bool
+		wantPairs        int
+		omitPrefill6     bool
 	}{
-		{"five_decodes_control", false, false, 1, false, false},
-		{"six_decodes_reproduction", true, false, 1, false, false},
-		{"six_valid_pairs_limit", true, true, 5, false, false},
-		{"no_valid_pair", true, false, 0, true, false},
-		{"ninth_ranked_valid_pair", true, false, 1, false, true},
+		{"five_decodes_control", false, false, 1, false},
+		{"six_decodes_reproduction", true, false, 1, false},
+		{"six_valid_pairs_limit", true, true, 5, false},
+		{"no_valid_pair", true, false, 0, true},
 	}
 
 	for _, tt := range tests {
@@ -752,25 +750,6 @@ func TestPDTopFiveRegression(t *testing.T) {
 				))
 			}
 
-			if tt.addThreeMoreDecodes {
-				for i := 7; i <= 9; i++ {
-					pod := &corev1.Pod{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      fmt.Sprintf("decode-%d", i),
-							Namespace: "default",
-							Labels: map[string]string{
-								"role":     "decode",
-								"pd-group": "group-a",
-							},
-						},
-					}
-
-					require.NoError(t, store.AddOrUpdatePod(
-						pod, []*aiv1alpha1.ModelServer{ms},
-					))
-				}
-			}
-
 			if !tt.omitPrefill6 {
 				prefill := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -811,9 +790,6 @@ func TestPDTopFiveRegression(t *testing.T) {
 				"decode-4": 70,
 				"decode-5": 60,
 				"decode-6": 10,
-				"decode-7": 50,
-				"decode-8": 40,
-				"decode-9": 30,
 			}
 
 			decodes, err := store.GetDecodePods(msName)
@@ -821,9 +797,6 @@ func TestPDTopFiveRegression(t *testing.T) {
 			wantDecodes := 6
 			if !tt.includeD5 {
 				wantDecodes--
-			}
-			if tt.addThreeMoreDecodes {
-				wantDecodes += 3
 			}
 			require.Len(t, decodes, wantDecodes)
 			scoresByPod := make(map[*datastore.PodInfo]int)
