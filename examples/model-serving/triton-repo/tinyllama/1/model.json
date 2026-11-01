@@ -1,5 +1,5 @@
 {
-  "model": "Qwen/Qwen3-0.6B",
+  "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
   "disable_log_requests": true,
   "gpu_memory_utilization": 0.85,
   "enable_prefix_caching": true

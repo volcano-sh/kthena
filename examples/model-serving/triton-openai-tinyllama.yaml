@@ -1,4 +1,5 @@
 # Triton OpenAI frontend (vLLM backend). Pair with ModelServer-triton.yaml.
+# Matches the L40 validation model: TinyLlama-1.1B-Chat-v1.0 (OpenAI id: tinyllama).
 #
 # Standard Triton flow:
 #   1. Prepare model repository ahead of time (see ../triton-repo/).
@@ -18,7 +19,7 @@
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:
-  name: triton-qwen-06b
+  name: triton-tinyllama
   namespace: default
 spec:
   schedulerName: volcano
@@ -41,7 +42,7 @@ spec:
                   - --model-repository
                   - /models/triton-repo
                   - --tokenizer
-                  - Qwen/Qwen3-0.6B
+                  - TinyLlama/TinyLlama-1.1B-Chat-v1.0
                   - --backend
                   - vllm
                   - --host

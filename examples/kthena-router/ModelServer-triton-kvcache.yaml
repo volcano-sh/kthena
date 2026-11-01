@@ -3,27 +3,27 @@
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelServer
 metadata:
-  name: triton-qwen-06b-kv
+  name: triton-tinyllama-kv
   namespace: default
 spec:
   inferenceEngine: Triton
-  model: qwen3-06b
+  model: tinyllama
   workloadPort:
     port: 9000
   workloadSelector:
     matchLabels:
-      modelserving.volcano.sh/name: triton-qwen-06b-kv
+      modelserving.volcano.sh/name: triton-tinyllama-kv
   trafficPolicy:
     timeout: 120s
 ---
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelRoute
 metadata:
-  name: triton-qwen-06b-kv
+  name: triton-tinyllama-kv
   namespace: default
 spec:
-  modelName: qwen3-06b
+  modelName: tinyllama
   rules:
     - name: default
       targetModels:
-        - modelServerName: triton-qwen-06b-kv
+        - modelServerName: triton-tinyllama-kv

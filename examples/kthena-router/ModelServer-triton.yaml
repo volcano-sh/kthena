@@ -1,17 +1,17 @@
-# Pair with examples/model-serving/triton-openai-qwen.yaml
+# Pair with examples/model-serving/triton-openai-tinyllama.yaml
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelServer
 metadata:
-  name: triton-qwen-06b
+  name: triton-tinyllama
   namespace: default
 spec:
   workloadSelector:
     matchLabels:
-      modelserving.volcano.sh/name: triton-qwen-06b
+      modelserving.volcano.sh/name: triton-tinyllama
   workloadPort:
     port: 9000
   # Must match the Triton model repository folder / OpenAI model id.
-  model: qwen3-06b
+  model: tinyllama
   inferenceEngine: Triton
   trafficPolicy:
     timeout: 120s
@@ -19,11 +19,11 @@ spec:
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelRoute
 metadata:
-  name: triton-qwen-06b
+  name: triton-tinyllama
   namespace: default
 spec:
-  modelName: qwen3-06b
+  modelName: tinyllama
   rules:
     - name: default
       targetModels:
-        - modelServerName: triton-qwen-06b
+        - modelServerName: triton-tinyllama
