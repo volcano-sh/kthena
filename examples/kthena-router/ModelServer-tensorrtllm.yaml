@@ -1,0 +1,15 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: trtllm-tinyllama
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: trtllm-tinyllama
+  workloadPort:
+    port: 8000
+  model: "TinyLlama-1.1B-Chat-v1.0"
+  inferenceEngine: "TensorRTLLM"
+  trafficPolicy:
+    timeout: 120s

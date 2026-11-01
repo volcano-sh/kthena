@@ -23,6 +23,9 @@ class EngineType(Enum):
     VLLM = "vllm"
     SGLANG = "sglang"
     VLLM_DISAGGREGATED = "vllmdisaggregated"
+    # trtllm-serve /metrics is JSON (not Prometheus). Router scrapes it
+    # directly; runtime accepts the engine name with empty rename rules.
+    TENSORRTLLM = "tensorrtllm"
 
 
 class StandardMetricNames:
@@ -74,6 +77,8 @@ STANDARD_RULES: Dict[str, List[MetricOperator]] = {
             StandardMetricNames.E2E_REQUEST_LATENCY_SECONDS,
         ),
     ],
+    # Empty: runtime metrics rewrite expects Prometheus text; TRT-LLM uses JSON.
+    EngineType.TENSORRTLLM.value: [],
 }
 
 
@@ -95,6 +100,12 @@ class MetricStandard:
             return EngineType.VLLM
         if engine.lower() == EngineType.SGLANG.value:
             return EngineType.SGLANG
+        if engine.lower() in {
+            EngineType.TENSORRTLLM.value,
+            "tensorrt-llm",
+            "trtllm",
+        }:
+            return EngineType.TENSORRTLLM
         supported_engines = list(STANDARD_RULES.keys())
         raise UnsupportedEngineError(
             f"Unsupported engine: {engine}. "

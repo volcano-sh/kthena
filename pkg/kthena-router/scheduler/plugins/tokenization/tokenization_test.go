@@ -432,7 +432,7 @@ func TestVLLMAdapter(t *testing.T) {
 	adapter := newVLLMAdapter("test-model")
 
 	// Test GetTokenizePath returns a non-empty path
-	path := adapter.GetTokenizePath()
+	path := adapter.GetTokenizePath(CompletionInput)
 	if path == "" {
 		t.Error("GetTokenizePath should return a non-empty path")
 	}
@@ -518,12 +518,54 @@ func TestVLLMAdapter(t *testing.T) {
 	})
 }
 
+// Test TensorRT-LLM render adapter
+func TestTensorRTLLMAdapter(t *testing.T) {
+	adapter := newTensorRTLLMAdapter("test-model")
+
+	if adapter.GetTokenizePath(ChatInput) != "/v1/chat/completions/render" {
+		t.Errorf("unexpected chat render path %q", adapter.GetTokenizePath(ChatInput))
+	}
+	if adapter.GetTokenizePath(CompletionInput) != "/v1/completions/render" {
+		t.Errorf("unexpected completion render path %q", adapter.GetTokenizePath(CompletionInput))
+	}
+
+	t.Run("Chat request", func(t *testing.T) {
+		input := TokenizeInput{
+			Type: ChatInput,
+			Messages: []common.Message{
+				{Role: "user", Content: "hi"},
+			},
+		}
+		result, err := adapter.PrepareTokenizeRequest(input)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		req, ok := result.(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected map request, got %T", result)
+		}
+		if req["model"] != "test-model" {
+			t.Errorf("expected model test-model, got %v", req["model"])
+		}
+	})
+
+	t.Run("Parse token_ids", func(t *testing.T) {
+		result, err := adapter.ParseTokenizeResponse([]byte(`{"token_ids":[1,2,3],"messages":[]}`))
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if result.Count != 3 || len(result.Tokens) != 3 {
+			t.Fatalf("unexpected tokenize result: %+v", result)
+		}
+	})
+}
+
 // Test SGLang adapter
 func TestSGLangAdapter(t *testing.T) {
 	adapter := newSGLangAdapter("test-model")
 
-	if adapter.GetTokenizePath() != "/tokenize" {
-		t.Errorf("Expected tokenize path '/tokenize', got %q", adapter.GetTokenizePath())
+	if adapter.GetTokenizePath(CompletionInput) != "/tokenize" {
+		t.Errorf("Expected tokenize path '/tokenize', got %q", adapter.GetTokenizePath(CompletionInput))
 	}
 
 	t.Run("Completion request", func(t *testing.T) {
@@ -650,6 +692,9 @@ func TestNormalizeEngine(t *testing.T) {
 		{"SGLang", EngineSGLang, false},
 		{"sglang", EngineSGLang, false},
 		{"SGLANG", EngineSGLang, false},
+		{"TensorRTLLM", EngineTensorRTLLM, false},
+		{"tensorrtllm", EngineTensorRTLLM, false},
+		{"TENSORRTLLM", EngineTensorRTLLM, false},
 		{"", "", true},
 		{"unknown", "", true},
 	}
@@ -683,6 +728,7 @@ func TestNewRemoteTokenizerEngineDispatch(t *testing.T) {
 	const (
 		wantVLLM adapterKind = iota
 		wantSGLang
+		wantTensorRTLLM
 		wantError
 	)
 
@@ -696,6 +742,8 @@ func TestNewRemoteTokenizerEngineDispatch(t *testing.T) {
 		{name: "default (empty)", engine: "", want: wantError},
 		{name: "sglang", engine: "sglang", want: wantSGLang},
 		{name: "sglang mixed case", engine: "SGLang", want: wantSGLang},
+		{name: "tensorrtllm", engine: "tensorrtllm", want: wantTensorRTLLM},
+		{name: "tensorrtllm mixed case", engine: "TensorRTLLM", want: wantTensorRTLLM},
 		{name: "unsupported", engine: "tgi", want: wantError},
 	}
 
@@ -731,6 +779,10 @@ func TestNewRemoteTokenizerEngineDispatch(t *testing.T) {
 			case wantSGLang:
 				if _, ok := impl.adapter.(*sglangAdapter); !ok {
 					t.Errorf("expected *sglangAdapter, got %T", impl.adapter)
+				}
+			case wantTensorRTLLM:
+				if _, ok := impl.adapter.(*tensorrtllmAdapter); !ok {
+					t.Errorf("expected *tensorrtllmAdapter, got %T", impl.adapter)
 				}
 			}
 		})

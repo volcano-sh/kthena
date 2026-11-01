@@ -7,9 +7,12 @@ Kthena Runtime is a lightweight sidecar service designed to standardize Promethe
 - Metrics standardization: fetch native metrics from the engine's /metrics endpoint, rename them to unified Kthena metrics according to rules.
 - LoRA lifecycle management: simple HTTP APIs to download+load and unload LoRA adapters for dynamic enable/disable.
 - Model downloading: supports downloading models from S3/OBS/PVC/HuggingFace to a local path.
-- KV cache event ingestion: for vLLM engines, subscribes to the ZMQ `kv-events` stream and publishes standardized token block hashes, enabling the router's [`kvcache-aware`](kvcache-aware.md) score plugin. Two sync modes are supported (env `KV_EVENT_SYNC_MODE`):
-  - `redis` (default): block hashes are written into Redis and queried by the router per request.
-  - `memory`: router instances register with the runtime via `POST /kvcache/routers/register` and keep the request open; the runtime streams KV events (starting with its full block index) back in the response, so the router can score from its local in-memory index without Redis.
+- KV cache event ingestion: publishes standardized token block hashes for the router's [`kvcache-aware`](kvcache-aware.md) score plugin.
+  - vLLM / SGLang: subscribe to the engine ZMQ `kv-events` stream.
+  - TensorRT-LLM (`--engine tensorrtllm`): poll buffered `POST /kv_cache_events` and normalize into the same vLLM-compatible handlers.
+  - Two sync modes (env `KV_EVENT_SYNC_MODE`):
+    - `redis` (default): block hashes are written into Redis and queried by the router per request.
+    - `memory`: router instances register with the runtime via `POST /kvcache/routers/register` and keep the request open; the runtime streams KV events (starting with its full block index) back in the response, so the router can score from its local in-memory index without Redis.
 
 Notes:
 

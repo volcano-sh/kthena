@@ -111,6 +111,7 @@ spec:
                 enum:
                 - vLLM
                 - SGLang
+                - TensorRTLLM
                 type: string
               kvConnector:
                 description: KVConnector specifies the KV connector configuration
