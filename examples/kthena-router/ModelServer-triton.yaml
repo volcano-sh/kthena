@@ -1,0 +1,29 @@
+# Pair with examples/model-serving/triton-openai-qwen.yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: triton-qwen-06b
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      modelserving.volcano.sh/name: triton-qwen-06b
+  workloadPort:
+    port: 9000
+  # Must match the Triton model repository folder / OpenAI model id.
+  model: qwen3-06b
+  inferenceEngine: Triton
+  trafficPolicy:
+    timeout: 120s
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: triton-qwen-06b
+  namespace: default
+spec:
+  modelName: qwen3-06b
+  rules:
+    - name: default
+      targetModels:
+        - modelServerName: triton-qwen-06b

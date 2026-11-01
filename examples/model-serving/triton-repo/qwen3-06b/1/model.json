@@ -1,0 +1,6 @@
+{
+  "model": "Qwen/Qwen3-0.6B",
+  "disable_log_requests": true,
+  "gpu_memory_utilization": 0.85,
+  "enable_prefix_caching": true
+}

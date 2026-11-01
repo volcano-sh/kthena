@@ -1,0 +1,12 @@
+{
+  "model": "Qwen/Qwen3-0.6B",
+  "disable_log_requests": true,
+  "gpu_memory_utilization": 0.85,
+  "enable_prefix_caching": true,
+  "kv_events_config": {
+    "enable_kv_cache_events": true,
+    "publisher": "zmq",
+    "endpoint": "tcp://127.0.0.1:5557",
+    "topic": "kv-events"
+  }
+}

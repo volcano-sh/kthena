@@ -116,9 +116,8 @@ func TestNIXLConnectorProxy(t *testing.T) {
 			t.Error("Expected decode request body to be prepared")
 		} else {
 			fmt.Println("Decode request body:", nixlConn.decodeRequestBody)
-			// Decode request should have include_usage set for non-streaming requests
-			if includeUsage, ok := nixlConn.decodeRequestBody["include_usage"]; !ok || includeUsage != true {
-				t.Errorf("Expected decode request body include_usage to be true, got %v", includeUsage)
+			if _, hasIncludeUsage := nixlConn.decodeRequestBody["include_usage"]; hasIncludeUsage {
+				t.Errorf("Expected decode request body to omit top-level include_usage, got %v", nixlConn.decodeRequestBody["include_usage"])
 			}
 			// Should preserve original max_tokens
 			if maxTokens, ok := nixlConn.decodeRequestBody["max_tokens"]; !ok {

@@ -1,0 +1,29 @@
+# Pair with examples/model-serving/gpu-kvcache-aware-triton.yaml
+# Enable router Score plugin kvcache-aware (+ tokenizerService / tritonTokenizerPort).
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: triton-qwen-06b-kv
+  namespace: default
+spec:
+  inferenceEngine: Triton
+  model: qwen3-06b
+  workloadPort:
+    port: 9000
+  workloadSelector:
+    matchLabels:
+      modelserving.volcano.sh/name: triton-qwen-06b-kv
+  trafficPolicy:
+    timeout: 120s
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: triton-qwen-06b-kv
+  namespace: default
+spec:
+  modelName: qwen3-06b
+  rules:
+    - name: default
+      targetModels:
+        - modelServerName: triton-qwen-06b-kv

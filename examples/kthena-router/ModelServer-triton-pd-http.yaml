@@ -1,0 +1,37 @@
+# Triton PD via HTTP KV connector (same as vLLM; not SGLang bootstrap).
+# Router CRD only — still need prefill/decode ModelServing with disagg HTTP support.
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: triton-pd-http
+  namespace: default
+spec:
+  inferenceEngine: Triton
+  model: qwen3-06b
+  workloadPort:
+    port: 9000
+  workloadSelector:
+    matchLabels:
+      modelserving.volcano.sh/name: triton-pd
+    pdGroup:
+      groupKey: modelserving.volcano.sh/group-name
+      prefillLabels:
+        modelserving.volcano.sh/role: prefill
+      decodeLabels:
+        modelserving.volcano.sh/role: decode
+  kvConnector:
+    type: http
+  trafficPolicy:
+    timeout: 120s
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: triton-pd-http
+  namespace: default
+spec:
+  modelName: qwen3-06b
+  rules:
+    - name: default
+      targetModels:
+        - modelServerName: triton-pd-http

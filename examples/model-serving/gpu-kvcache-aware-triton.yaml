@@ -1,0 +1,117 @@
+# Triton + runtime (--engine triton) for kvcache-aware routing.
+# Pair with ModelServer-triton-kvcache.yaml.
+#
+# Standard Triton flow (same as triton-openai-qwen.yaml):
+#   mount a prebuilt model repository (see ../triton-repo-kv/), then start the
+#   OpenAI frontend. KV ZMQ is configured in model.json, not at container start.
+#
+# Populate PVC triton-model-repository-kv from examples/model-serving/triton-repo-kv/
+# before apply (or change the volume to hostPath).
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: triton-qwen-06b-kv
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  recoveryPolicy: ServingGroupRecreate
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: server
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: server
+                image: nvcr.io/nvidia/tritonserver:25.08-vllm-python-py3
+                imagePullPolicy: IfNotPresent
+                command: ["python3"]
+                args:
+                  - /opt/tritonserver/python/openai/openai_frontend/main.py
+                  - --model-repository
+                  - /models/triton-repo
+                  - --tokenizer
+                  - Qwen/Qwen3-0.6B
+                  - --backend
+                  - vllm
+                  - --host
+                  - 0.0.0.0
+                  - --openai-port
+                  - "9000"
+                env:
+                  - name: HF_HOME
+                    value: /models/hf-cache
+                ports:
+                  - name: openai
+                    containerPort: 9000
+                volumeMounts:
+                  - name: model-repository
+                    mountPath: /models/triton-repo
+                    readOnly: true
+                  - name: hf-cache
+                    mountPath: /models/hf-cache
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                readinessProbe:
+                  httpGet:
+                    path: /v1/models
+                    port: 9000
+                  initialDelaySeconds: 60
+                  periodSeconds: 10
+                  failureThreshold: 60
+              - name: runtime
+                image: ghcr.io/volcano-sh/runtime:latest
+                imagePullPolicy: IfNotPresent
+                args:
+                  - --port
+                  - "8900"
+                  - --engine
+                  - triton
+                  - --engine-base-url
+                  - http://localhost:9000
+                  - --engine-metrics-path
+                  - /metrics
+                  - --pod
+                  - $(POD_NAME).$(NAMESPACE)
+                  - --model
+                  - qwen3-06b
+                env:
+                  - name: POD_NAME
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.name
+                  - name: NAMESPACE
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.namespace
+                  - name: REDIS_HOST
+                    value: redis-server.kthena-system.svc.cluster.local
+                  - name: REDIS_PORT
+                    value: "6379"
+                  - name: VLLM_ZMQ_ENDPOINT
+                    value: tcp://127.0.0.1:5557
+                ports:
+                  - containerPort: 8900
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8900
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+            volumes:
+              - name: model-repository
+                persistentVolumeClaim:
+                  claimName: triton-model-repository-kv
+              - name: hf-cache
+                emptyDir:
+                  sizeLimit: 50Gi
+              - name: shared-mem
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 8Gi
+        workerReplicas: 0

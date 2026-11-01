@@ -321,30 +321,20 @@ func copyResponseHeaders(c *gin.Context, headers http.Header) {
 // AddTokenUsage adds token usage to the request body if it is not already present
 // should be used for decode requests or non PD disaggregated mode
 func AddTokenUsage(c *gin.Context, reqBody map[string]interface{}) map[string]interface{} {
-	// Chat Completions can opt into usage reporting via stream_options.include_usage
-	// (streaming) or include_usage (non-streaming), injected below. The Responses
-	// API has no equivalent request-side flag and always returns usage in the
-	// response body or terminal stream event, so neither field must be injected
-	// here. This guard covers the nixl/sglang PD decode paths, which call
-	// AddTokenUsage directly.
+	// Responses API has no request-side usage flag. Streaming Chat Completions
+	// opt in via stream_options.include_usage; non-streaming already returns
+	// usage by default and must not get a top-level include_usage field (not in
+	// the OpenAI schema; rejected by strict frontends such as Triton).
 	if c != nil && c.Request != nil && isResponsesRequest(c, c.Request) {
 		return reqBody
 	}
-	// Check if streaming is enabled
 	if isStreamingRequest(reqBody) {
 		if !isTokenUsageEnabled(reqBody) {
-			// For streaming requests, add stream_options to include token usage
 			reqBody["stream_options"] = map[string]interface{}{
 				"include_usage": true,
 			}
-			// add stream token usage to context
 			c.Set(common.TokenUsageKey, true)
 		}
-	} else {
-		// For non-streaming requests, ensure we request usage information
-		// Most OpenAI-compatible APIs return usage by default for non-streaming,
-		// but we can be explicit about it
-		reqBody["include_usage"] = true
 	}
 	return reqBody
 }
