@@ -684,3 +684,214 @@ func BenchmarkTopNPodInfos(b *testing.B) {
 		}
 	}
 }
+
+// TestPDTopFiveRegression verifies that PD scheduling continues
+// past high-scoring Decode Pods without usable Prefill partners,
+// while returning at most topN valid pairs.
+func TestPDTopFiveRegression(t *testing.T) {
+	tests := []struct {
+		name                string
+		includeD5           bool
+		addGroupAPrefill    bool
+		wantPairs           int
+		omitPrefill6        bool
+		addThreeMoreDecodes bool
+	}{
+		{"five_decodes_control", false, false, 1, false, false},
+		{"six_decodes_reproduction", true, false, 1, false, false},
+		{"six_valid_pairs_limit", true, true, 5, false, false},
+		{"no_valid_pair", true, false, 0, true, false},
+		{"ninth_ranked_valid_pair", true, false, 1, false, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := datastore.New()
+			pd := &aiv1alpha1.PDGroup{
+				GroupKey:      "pd-group",
+				DecodeLabels:  map[string]string{"role": "decode"},
+				PrefillLabels: map[string]string{"role": "prefill"},
+			}
+			msName := types.NamespacedName{
+				Namespace: "default",
+				Name:      "test-model-server",
+			}
+			ms := &aiv1alpha1.ModelServer{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: msName.Namespace,
+					Name:      msName.Name,
+				},
+				Spec: aiv1alpha1.ModelServerSpec{
+					WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+						PDGroup: pd,
+					},
+				},
+			}
+			require.NoError(t, store.AddOrUpdateModelServer(ms, nil))
+
+			for i := 1; i <= 6; i++ {
+				if i == 5 && !tt.includeD5 {
+					continue
+				}
+				group := "group-a"
+				if i == 6 {
+					group = "group-b"
+				}
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      fmt.Sprintf("decode-%d", i),
+						Namespace: "default",
+						Labels: map[string]string{
+							"role":     "decode",
+							"pd-group": group,
+						},
+					},
+				}
+				require.NoError(t, store.AddOrUpdatePod(
+					pod, []*aiv1alpha1.ModelServer{ms},
+				))
+			}
+
+			if tt.addThreeMoreDecodes {
+				for i := 7; i <= 9; i++ {
+					pod := &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      fmt.Sprintf("decode-%d", i),
+							Namespace: "default",
+							Labels: map[string]string{
+								"role":     "decode",
+								"pd-group": "group-a",
+							},
+						},
+					}
+
+					require.NoError(t, store.AddOrUpdatePod(
+						pod, []*aiv1alpha1.ModelServer{ms},
+					))
+				}
+			}
+
+			if !tt.omitPrefill6 {
+				prefill := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "prefill-6",
+						Namespace: "default",
+						Labels: map[string]string{
+							"role":     "prefill",
+							"pd-group": "group-b",
+						},
+					},
+				}
+				require.NoError(t, store.AddOrUpdatePod(
+					prefill, []*aiv1alpha1.ModelServer{ms},
+				))
+			}
+
+			if tt.addGroupAPrefill {
+				prefillA := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "prefill-a",
+						Namespace: "default",
+						Labels: map[string]string{
+							"role":     "prefill",
+							"pd-group": "group-a",
+						},
+					},
+				}
+
+				require.NoError(t, store.AddOrUpdatePod(
+					prefillA,
+					[]*aiv1alpha1.ModelServer{ms},
+				))
+			}
+			fixedScores := map[string]int{
+				"decode-1": 100,
+				"decode-2": 90,
+				"decode-3": 80,
+				"decode-4": 70,
+				"decode-5": 60,
+				"decode-6": 10,
+				"decode-7": 50,
+				"decode-8": 40,
+				"decode-9": 30,
+			}
+
+			decodes, err := store.GetDecodePods(msName)
+			require.NoError(t, err)
+			wantDecodes := 6
+			if !tt.includeD5 {
+				wantDecodes--
+			}
+			if tt.addThreeMoreDecodes {
+				wantDecodes += 3
+			}
+			require.Len(t, decodes, wantDecodes)
+			scoresByPod := make(map[*datastore.PodInfo]int)
+
+			for _, pod := range decodes {
+				name := pod.GetPodNamespacedName().Name
+				score, found := fixedScores[name]
+				require.True(t, found)
+				scoresByPod[pod] = score
+			}
+			scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+			scheduler.scorePlugins = []*scorePlugin{
+				{
+					plugin: &partialScorer{
+						scores: scoresByPod,
+					},
+					weight: 1,
+				},
+			}
+
+			ctx := &framework.Context{
+				ModelServerName: msName,
+				PDGroup:         pd,
+				Prompt:          &common.ChatMessage{},
+			}
+
+			scores := scheduler.RunScorePlugins(decodes, ctx)
+			ranked := TopNPodInfos(scores, len(decodes))
+
+			require.Equal(t, "decode-6",
+				ranked[len(ranked)-1].Pod.Name)
+
+			t.Logf("D6 rank: %d out of %d",
+				len(ranked), len(ranked))
+			pods, err := store.GetPodsByModelServer(msName)
+			require.NoError(t, err)
+
+			err = scheduler.Schedule(ctx, pods)
+			if tt.omitPrefill6 {
+				require.ErrorContains(t, err,
+					"no valid prefill-decode pod pairs found")
+				require.Empty(t, ctx.DecodePods)
+				require.Empty(t, ctx.PrefillPods)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Len(t, ctx.DecodePods, tt.wantPairs)
+			require.Len(t, ctx.PrefillPods, tt.wantPairs)
+
+			if tt.addGroupAPrefill {
+				for i := 0; i < 5; i++ {
+					require.Equal(t,
+						fmt.Sprintf("decode-%d", i+1),
+						ctx.DecodePods[i].Pod.Name)
+
+					require.Equal(t,
+						"prefill-a",
+						ctx.PrefillPods[i].Pod.Name)
+				}
+			} else {
+				require.Equal(t,
+					"decode-6",
+					ctx.DecodePods[0].Pod.Name)
+				require.Equal(t,
+					"prefill-6",
+					ctx.PrefillPods[0].Pod.Name)
+			}
+		})
+	}
+}
