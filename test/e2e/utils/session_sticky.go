@@ -149,6 +149,13 @@ func SessionStickyRolloutRestartRouterAndWait(
 	if dep.Spec.Replicas != nil {
 		want = *dep.Spec.Replicas
 	}
+	selector := metav1.FormatLabelSelector(dep.Spec.Selector)
+	prePods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	require.NoError(t, err)
+	prePodNames := make(map[string]bool, len(prePods.Items))
+	for _, pod := range prePods.Items {
+		prePodNames[pod.Name] = true
+	}
 	patch := []byte(fmt.Sprintf(
 		`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"%s"}}}}}`,
 		time.Now().UTC().Format(time.RFC3339Nano),
@@ -169,6 +176,19 @@ func SessionStickyRolloutRestartRouterAndWait(
 		s := d.Status
 		return s.Replicas == wantReplicas && s.ReadyReplicas == wantReplicas && s.UpdatedReplicas == wantReplicas
 	}, 5*time.Minute, 750*time.Millisecond, "kthena-router deployment not settled (replicas/ready/updated vs spec)")
+	// A replaced pod stops serving at once, but the webhook Service can route to it until the pod is gone.
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if prePodNames[pod.Name] {
+				return false
+			}
+		}
+		return true
+	}, scalingTimeout, 750*time.Millisecond, "pre-restart kthena-router pods were not removed after rollout")
 	require.NoError(t, WaitForKthenaRouterModelRouteValidatingWebhook(ctx, kthenaClient, testNamespace, webhookProbeModelServer, "ss-webhook-probe-", 3*time.Second, 4*time.Minute, t.Logf),
 		"kthena-router ModelRoute validating webhook did not become ready after router rollout")
 }
