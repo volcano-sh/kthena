@@ -193,7 +193,7 @@ _Appears in:_
 | --- | --- |
 | `vLLM` | https://github.com/vllm-project/vllm<br /> |
 | `SGLang` | https://github.com/sgl-project/sglang<br /> |
-| `TensorRTLLM` | https://github.com/NVIDIA/TensorRT-LLM<br />Requires trtllm-serve OpenAI server (/v1/*); /metrics returns JSON iteration stats.<br /> |
+| `TensorRTLLM` | https://github.com/NVIDIA/TensorRT-LLM<br />Requires trtllm-serve OpenAI server (/v1/*); metrics are JSON /metrics.<br /> |
 
 
 #### KVConnectorSpec
