@@ -1,5 +1,3 @@
-# Triton PD via HTTP KV connector (same as vLLM; not SGLang bootstrap).
-# Router CRD only — still need prefill/decode ModelServing with disagg HTTP support.
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelServer
 metadata:

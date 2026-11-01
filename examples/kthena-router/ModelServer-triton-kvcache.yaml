@@ -1,5 +1,3 @@
-# Pair with examples/model-serving/gpu-kvcache-aware-triton.yaml
-# Enable router Score plugin kvcache-aware (+ tokenizerService / tritonTokenizerPort).
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelServer
 metadata:

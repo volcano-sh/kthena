@@ -1,21 +1,3 @@
-# Triton OpenAI frontend (vLLM backend). Pair with ModelServer-triton.yaml.
-# Matches the L40 validation model: TinyLlama-1.1B-Chat-v1.0 (OpenAI id: tinyllama).
-#
-# Standard Triton flow:
-#   1. Prepare model repository ahead of time (see ../triton-repo/).
-#   2. Mount it read-only at /models/triton-repo.
-#   3. Start only the OpenAI frontend — do not generate config.pbtxt at runtime.
-#
-# Populate the PVC (or switch the volume to hostPath) before apply:
-#   kubectl create -f - <<EOF
-#   apiVersion: v1
-#   kind: PersistentVolumeClaim
-#   metadata: { name: triton-model-repository }
-#   spec:
-#     accessModes: [ReadWriteOnce]
-#     resources: { requests: { storage: 1Gi } }
-#   EOF
-#   # then copy examples/model-serving/triton-repo/ into the volume
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:

@@ -1,13 +1,3 @@
-# Triton + runtime (--engine triton) for kvcache-aware routing.
-# Pair with ModelServer-triton-kvcache.yaml.
-# Matches the L40 validation model: TinyLlama-1.1B-Chat-v1.0 (OpenAI id: tinyllama).
-#
-# Standard Triton flow (same as triton-openai-tinyllama.yaml):
-#   mount a prebuilt model repository (see ../triton-repo-kv/), then start the
-#   OpenAI frontend. KV ZMQ is configured in model.json, not at container start.
-#
-# Populate PVC triton-model-repository-kv from examples/model-serving/triton-repo-kv/
-# before apply (or change the volume to hostPath).
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:

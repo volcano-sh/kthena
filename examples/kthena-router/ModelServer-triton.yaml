@@ -1,4 +1,3 @@
-# Pair with examples/model-serving/triton-openai-tinyllama.yaml
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelServer
 metadata:
@@ -10,7 +9,6 @@ spec:
       modelserving.volcano.sh/name: triton-tinyllama
   workloadPort:
     port: 9000
-  # Must match the Triton model repository folder / OpenAI model id.
   model: tinyllama
   inferenceEngine: Triton
   trafficPolicy:
