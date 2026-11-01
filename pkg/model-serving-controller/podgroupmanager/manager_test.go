@@ -1591,3 +1591,61 @@ func TestUpdatePodGroupNetworkTopologyBehavior(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdatePodGroupIfNeededListerAccess verifies that updatePodGroupIfNeeded reads
+// the PodGroup lister under the manager lock and handles a lister cleared by
+// PodGroup CRD deletion.
+func TestUpdatePodGroupIfNeededListerAccess(t *testing.T) {
+	pg := &schedulingv1beta1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pg",
+			Namespace: "default",
+		},
+		Spec: schedulingv1beta1.PodGroupSpec{MinMember: 1},
+	}
+	ms := newMinimalMS("")
+	crd := testhelper.CreatePodGroupCRD()
+
+	// newManager starts the PodGroup informer, as the PodGroup CRD exists.
+	newManager := func(t *testing.T) *Manager {
+		fakeVolcano := volcanofake.NewSimpleClientset(pg.DeepCopy())
+		fakeApiext := apiextfake.NewSimpleClientset(crd)
+		mgr := NewManager(nil, fakeVolcano, fakeApiext, nil)
+		t.Cleanup(mgr.stopPodGroupInformer)
+		assert.NotNil(t, mgr.GetPodGroupLister())
+		return mgr
+	}
+
+	t.Run("lister cleared by CRD delete returns error", func(t *testing.T) {
+		mgr := newManager(t)
+		mgr.handlePodGroupCRDDelete(crd)
+
+		var err error
+		assert.NotPanics(t, func() {
+			err = mgr.updatePodGroupIfNeeded(context.Background(), pg, ms)
+		})
+		assert.ErrorIs(t, err, errPodGroupInformerNotInitialized)
+	})
+
+	// Run with -race: the CRD delete clears the lister under the lock while
+	// updatePodGroupIfNeeded reads it in another goroutine.
+	t.Run("CRD delete during update", func(t *testing.T) {
+		mgr := newManager(t)
+
+		var err error
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			assert.NotPanics(t, func() {
+				err = mgr.updatePodGroupIfNeeded(context.Background(), pg, ms)
+			})
+		}()
+		mgr.handlePodGroupCRDDelete(crd)
+		<-done
+
+		// The update either read the lister before the delete or saw it cleared.
+		if err != nil {
+			assert.ErrorIs(t, err, errPodGroupInformerNotInitialized)
+		}
+	})
+}
