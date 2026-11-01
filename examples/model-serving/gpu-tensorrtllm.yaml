@@ -42,10 +42,6 @@ spec:
                       --port 8000 \
                       --backend pytorch \
                       --extra_llm_api_options /tmp/extra_llm_api_options.yaml
-                env:
-                  # Optional prototype tokenize endpoints for KV-aware routers.
-                  - name: TRTLLM_ENABLE_RENDER_ENDPOINTS
-                    value: "1"
                 volumeMounts:
                   - name: models
                     mountPath: /models
