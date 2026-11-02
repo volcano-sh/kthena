@@ -1,15 +1,18 @@
-# Scheduler Profile: Per-ModelServer Plugin Combinations
-
+---
+title: "Scheduler Profile: Per-ModelServer Plugin Combinations"
 authors:
 - "@0xjasoncao"
 reviewers:
 - "@YaoZengzeng"
 - TBD
-
 approvers:
 - TBD
 
 creation-date: 2026-10-30
+
+---
+
+## Scheduler Profile: Per-ModelServer Plugin Combinations
 
 ## Summary
 
@@ -140,36 +143,10 @@ carries over. This differs from the semantics discussed for the
 field-based approach in #1899, where a per-ModelServer setting adjusted
 a single knob on top of the global config.
 
-**Stateful plugins draw a hard line.** prefix-cache and kvcache-aware
-own long-lived shared resources — a prefix index, a KV block index, a KV
-event subscriber and GC goroutines — created once per router and shared
-by every chain. Each of these resources is created from exactly one
-set of args (`maxHashCacheSize`, `maxBlocksPerPod`, `runtimePort`,
-`indexMode`), so a shared store has one capacity, a shared subscriber
-dials one port, and the index mode must match how the sidecars actually
-publish their cache data. Per-profile values for these args would
-either silently stop working or query an empty backend. Their boundary
-is therefore:
-
-- **Global ConfigMap**: the only place these plugins' args are
-  configured. The shared instances are built from them at router
-  startup and exist regardless of whether the global chain enables
-  these plugins, so a profile can reference them even when the global
-  chain does not.
-- **SchedulerProfile**: cannot configure their args — the validating
-  webhook rejects any `pluginConfig` entry for a stateful plugin. A
-  profile can still enable them in `plugins.filter`/`plugins.score`
-  and set their weight: the plugin instance is shared, and the weight
-  lives on the chain, so two profiles can give the same prefix-cache
-  instance different weights.
-- **blockSizeToHash in particular** decides how prompts are cut into
-  blocks and hashed — a hash written under blockSize=64 is never
-  matched by a query under blockSize=32, so per-profile block sizes
-  cannot share the index anyway.
-
-Stateless plugins (least-request, least-latency, gpu-usage, random,
-lora-affinity) hold no shared state; their args are plain behavior
-knobs and are configured per profile as usual.
+Each profile chain builds its own plugin instances from its own args
+(see [Plugin lifecycle](#plugin-lifecycle)), so every plugin's args —
+including the stateful prefix-cache and kvcache-aware — take effect per
+profile.
 
 ### Why a referenced CRD instead of extending ModelServer
 
@@ -242,22 +219,23 @@ chain, not globally:
 
 ### Plugin lifecycle
 
-Plugin instances are rebuilt whenever a profile is updated, so they must
-not own long-lived state:
+Each profile chain builds its own plugin instances and rebuilds them on
+every profile update. This keeps the instances simple, but two trade-offs
+are accepted for now:
 
-1. **Shared state moves out of plugin instances.** The prefix-cache and
-   KV-block indexes, the KV event subscriber and the gauge provider are
-   created once per router and shared by all chains; chains hold only
-   per-profile args. Tuning a profile's args retains the learned cache
-   data, and a pod is tracked by one index instead of one per
-   profile. With this change the current plugins hold no instance-local
-   resources.
+- `RegisterCallback` has no unregister, so profile updates leak the old
+  instances' Pod callbacks and background goroutines (the GC loop, the
+  KV event subscriber). A **Close hook** on replaced chains is the
+  planned fix; it runs when a chain is replaced by a rebuild.
+  Closing only stops background work (goroutines, callbacks) — the
+  closed instance stays usable for in-flight requests' post hooks, since
+  the object outlives the swap.
+- Tuning a profile's args discards the learned cache data of its
+  instances; the cache warms up again as traffic flows.
 
-2. **A Close hook remains as the retirement path** for any
-   instance-local resources — including future plugins whose background
-   work is parameterized by args and cannot be shared. The ChainManager
-   calls it on a replaced chain once the requests admitted with it have
-   finished their post hooks.
+Both are low-frequency costs (profile updates are rare operations) and
+can be revisited with a shared-resource design if they matter in
+practice.
 
 ### Chain management and resolution
 
@@ -273,11 +251,14 @@ chain-agnostic — it consumes whatever chain the request context carries.
    and atomically swap it into an internal cache.
 3. `doLoadbalance` resolves the chain once per request — the
    ModelServer's profile reference is looked up in the ChainManager —
-   and carries it on the request context (`ctx.ScheduleChain`).
+   and carries it on the request context (`ctx.ScheduleChain`). A
+   ModelServer without a profile reference uses the global chain; a
+   ModelServer whose reference cannot be resolved fails its requests
+   directly.
 4. `Schedule` consumes the context chain for filtering and scoring;
    `RunPostHooks` (after dispatch) reuses the same chain for post-schedule
    bookkeeping (e.g. prefix-cache recording). When no chain is on the
-   context, both fall back to the global chain.
+   context (no profile reference), both fall back to the global chain.
 
 The full flow:
 
@@ -295,13 +276,16 @@ flowchart TD
 
 Per-request resolution (data plane) — `doLoadbalance` resolves once against
 the profile chain cache and carries the result on the request context;
-`Schedule` falls back to the global chain when no chain was resolved:
+`Schedule` falls back to the global chain only when the ModelServer has no
+profile reference. A broken reference fails the request instead of
+falling back:
 
 ```mermaid
 flowchart TD
     R["doLoadbalance"] --> RES{"resolve: ModelServer → schedulerProfile"}
+    RES -- "no reference" --> G["global chain (router ConfigMap)"]
     RES -- "hit: profile chain built" --> SET["ctx.ScheduleChain = chain"]
-    RES -- "miss: no reference / unknown profile" --> G["global chain (router ConfigMap)"]
+    RES -- "broken reference: build failed / profile deleted" --> FAIL["request fails: 503 + reason"]
     SET --> SCH["Schedule: filters → scores"]
     G --> SCH
     SCH --> H["RunPostHooks: post-schedule bookkeeping (same chain via ctx)"]
@@ -313,9 +297,10 @@ flowchart TD
   requests already scheduled finish on the chain they were admitted
   with (the resolved chain travels on the request context).
 - Profile deletion: the chain is removed from the cache; referencing
-  ModelServers resolve to no chain, and both `Schedule` and
-  `RunPostHooks` fall back to the global chain (warning log); profile
-  deletion is not blocked.
+  ModelServers cannot resolve their reference anymore, so their requests
+  fail directly (503 with a reason) until the reference is updated or
+  removed; the condition on ModelServerStatus records the cause. Profile
+  deletion itself is not blocked.
 
 ### Failure handling when building plugin chains
 
@@ -331,13 +316,13 @@ chain keeps its existing ConfigMap handling unchanged.
 Chain building is triggered when a SchedulerProfile is created or
 updated, and its failures fall into two cases:
 
-- Chain build failure: the profile's args fail validation. The
-  router falls back instead of taking the new chain: on create it uses
-  the global chain and caches nothing; on update it keeps the previously
-  built chain.
+- Chain build failure: the profile's args fail validation. On create,
+  the chain is not cached and requests to referencing ModelServers fail
+  directly (503 with the reason). On update, the previously built chain
+  keeps serving, and the failed rebuild is recorded on the condition.
 - Dangling reference: a referenced profile is deleted (or not yet
-  created), so the chain cannot be resolved, and the ModelServer falls
-  back to the global chain.
+  created), so the chain cannot be resolved, and requests to
+  referencing ModelServers fail directly.
 
 Both failures surface as a `SchedulerProfileResolved` condition on the
 ModelServer's status:
