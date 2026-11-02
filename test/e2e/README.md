@@ -59,6 +59,16 @@ The GitHub Actions E2E workflow runs the same category targets in parallel by us
 
 The workflow only runs for pull requests that touch runtime, chart, test, or E2E workflow paths. Documentation-only changes outside those paths should not trigger this workflow.
 
+The controller-manager target runs two Go test processes sequentially in the same
+job: `TestModelCR*` covers ModelBooster, and its complement covers the remaining
+controller tests. Both groups keep the 20-minute Go timeout and run without result
+caching. The real vLLM lifecycle includes a long Pod termination grace period;
+separating its test process prevents that time from consuming the other group's
+budget. Each process uses the existing `TestMain` installation and namespace
+cleanup. The second group still runs if the first fails, and either failure makes
+the target fail. All tests and their assertions remain enabled, and the CI job's
+50-minute limit is unchanged.
+
 Each category installs only the external CRDs it needs:
 
 | Category | Additional CRDs |
