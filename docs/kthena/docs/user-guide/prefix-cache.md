@@ -54,7 +54,9 @@ As a result, two prompts share the hash of block `n` only if they are identical 
 
 ### Scoring pods
 
-For each request, the plugin scores the pods that passed the Filter plugins:
+The plugin scores the pods that passed the Filter plugins. Requests pinned by a [session sticky](./session-sticky) binding skip this step; see [Limitations](#limitations).
+
+For each scored request:
 
 1. It looks up the prompt's block hashes in the cache, starting from the last block. Because the hashes are chained, a hit on block `n` means blocks `1` to `n` also match, so the first hit for a pod is its longest match.
 2. A matching pod scores `matched blocks / hashed blocks * 100`, rounded down to an integer between 0 and 100. For example, a 2,000-byte prompt hashes into 32 blocks; a pod that was sent the first 24 of them scores 75.
@@ -71,6 +73,7 @@ After a request to a pod succeeds, the plugin records the prompt's block hashes 
 
 - If a request to a pod fails, nothing is recorded for that pod. If no response has been sent to the client yet, the router tries the next best pod and records that one if it succeeds.
 - Recording happens after the response completes, which for a streaming response is after the stream ends. Requests with the same new prefix that arrive before then cannot be matched to that pod yet.
+- A request pinned by a session sticky binding was never scored, so nothing is recorded for it.
 
 ### Eviction
 
@@ -152,7 +155,7 @@ The restart also clears the prefix cache, so match ratios start from 0 again.
 
 - **Prefix coverage** (`blockSizeToHash * maxBlocksToMatch`, 8,192 bytes by default). The plugin only sees this much of each prompt. If your prompts share a long common part, such as a system prompt, few-shot examples or a document, and differ after it, the coverage must reach past the common part. Otherwise every request looks the same to the plugin: all pods that served any of them match fully, and the plugin cannot tell different conversations apart. Raise `maxBlocksToMatch` to cover more text.
 - **`blockSizeToHash`**. Smaller blocks find a match closer to the exact point where two prompts differ, but each prompt produces more blocks, which costs more hashing per request and more cache entries. The default of 64 bytes is roughly the 16-token KV block of vLLM at about 4 characters per token.
-- **`maxHashCacheSize`**. Each request adds up to `maxBlocksToMatch` new entries to the selected pod; blocks the pod already has only refresh their position. With the defaults, a pod holds about 50000 / 128 ≈ 390 completely different full-length prompts before it starts evicting. Shared prefixes are stored once per pod, so real workloads usually fit more. Raise it if evictions grow steadily while the match ratio stays low.
+- **`maxHashCacheSize`**. Each scored request adds up to `maxBlocksToMatch` new entries to the selected pod; blocks the pod already has only refresh their position. With the defaults, a pod holds about 50000 / 128 ≈ 390 completely different full-length prompts before it starts evicting. Shared prefixes are stored once per pod, so real workloads usually fit more. Raise it if evictions grow steadily while the match ratio stays low.
 - **`topKMatches`**. Only this many pods are rewarded for a match. When a popular prefix is held by more pods than `topKMatches`, the rest score 0 for it. Raise it toward the number of model pods to let the load-based plugins choose among every pod that holds the prefix, or lower it to concentrate each prefix on fewer pods.
 - **Weight**. Raising the weight trades load balance for cache hits. The `least-request` Filter, enabled in the Helm chart, still removes pods whose waiting queue has reached `maxWaitingRequests` before scoring, so a high weight does not send requests to a pod that is already backed up.
 
@@ -164,6 +167,7 @@ The plugin is lightweight and has no dependencies, but its view of the KV cache 
 - **It is local to each router replica.** Replicas do not share their caches. With several replicas, each one builds its own view from the requests it handled, so the same prefix routed through two replicas may end up on different pods.
 - **It is lost when the router restarts.** A new router process starts with an empty cache.
 - **It matches bytes, not tokens.** The blocks do not line up with the engine's token blocks, and only the first `blockSizeToHash * maxBlocksToMatch` bytes of each prompt are considered.
+- **It does not see requests pinned by a session sticky binding.** With [session sticky](./session-sticky), if the bound pod or Prefill/Decode pair still passes the Filter plugins, the request goes to it without running any score plugin, so this plugin neither scores nor records it. The match ratio metric and the dashboard hit rate therefore cover only the requests that were scored, such as the first request of a session. The plugin also misses the longer prefixes of later turns: when a binding expires, the pod that served the conversation only matches the request that created the binding, so it scores lower than its real cache would justify.
 
 Choosing between `prefix-cache` and `kvcache-aware`:
 
@@ -197,7 +201,7 @@ The score-plugin dashboard at [`examples/observability/kthena-router-score-plugi
 
 ### 3. Check Per-Pod Scores in the Router Logs
 
-When the router runs with `--v=4`, the scheduler logs every score plugin's result for each request:
+When the router runs with `--v=4`, the scheduler logs every score plugin's result for each scored request:
 
 ```bash
 kubectl logs deployment/kthena-router -n <namespace> | grep -A5 "ScorePlugin: prefix-cache"
@@ -231,6 +235,8 @@ curl http://<router-address>/v1/chat/completions \
 
 On the first request, every pod's `prefix-cache` score is 0 because nothing is recorded yet. On the second, with a single router replica, the pod that served the first request scores 100. The request still goes to the pod with the highest total score, so a busy pod can lose to an idle one.
 
+If the ModelServer uses [session sticky](./session-sticky), send these requests without a session key. With the same key, the second request is pinned to the bound pod and logs no scores.
+
 ## Troubleshooting
 
 | Symptom                                                                    | Possible Cause                                                                                   | Resolution                                                                                                                 |
@@ -246,3 +252,4 @@ On the first request, every pod's `prefix-cache` score is 0 because nothing is r
 | Evictions grow steadily and the match ratio stays low                      | `maxHashCacheSize` is too small for the number of distinct prompts per pod                        | Raise `maxHashCacheSize`                                                                                                    |
 | Match ratio is always close to 1, but requests spread across many pods     | The shared prefix is longer than the prefix coverage, so all requests look the same              | Raise `maxBlocksToMatch` so the coverage reaches past the shared part                                                       |
 | High match ratio, but requests do not go to the matching pod               | The plugin's weight is small next to the other score plugins, or the matching pod was filtered out as overloaded | Check per-pod scores at `--v=4`, and raise the `prefix-cache` weight if needed                                              |
+| Later requests of a session log no `prefix-cache` score at `--v=4`         | Session sticky pinned them, so no score plugin ran                                               | Expected; see [Limitations](#limitations)                                                                                   |
