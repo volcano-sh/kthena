@@ -2594,6 +2594,18 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			if group.Revision != "" {
 				referencedRevisions = append(referencedRevisions, group.Revision)
 			}
+			// Role mode can advance the group while unchanged Roles still use older history.
+			roles, err := c.store.GetRolesByGroup(utils.GetNamespaceName(latestMS), group.Name)
+			if err != nil {
+				return fmt.Errorf("collect Role revision references for %s: %w", group.Name, err)
+			}
+			for _, instances := range roles {
+				for _, role := range instances {
+					if role != nil && role.Revision != "" {
+						referencedRevisions = append(referencedRevisions, role.Revision)
+					}
+				}
+			}
 			if group.Status == datastore.ServingGroupDeleting {
 				// Scaling -> Running or
 				// Creating -> Running
@@ -3047,6 +3059,29 @@ func (c *ModelServingController) createPodsByRole(ctx context.Context, role work
 }
 
 func (c *ModelServingController) createPodsByRoleWithContext(ctx context.Context, role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, roleIndex, servingGroupOrdinal int, revision, roleTemplateHash string, chain *plugins.Chain) error {
+	// Pod rendering mutates nested container fields; never alter revision inputs.
+	role = *role.DeepCopy()
+	// A Role-only recreate may introduce a target without scaling a ServingGroup
+	// or starting an in-place patch. Persist it before any dependent Pod CREATE.
+	// Missing historical snapshots still fail in the resolver; never forge them
+	// from the current spec. Existing immutable snapshots are left unchanged.
+	if revision == utils.ModelServingRevision(ms) {
+		stored, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revision)
+		if err != nil {
+			return fmt.Errorf("read Role target revision: %w", err)
+		}
+		if stored != nil {
+			owner := metav1.GetControllerOf(stored)
+			if stored.Namespace != ms.Namespace || owner == nil || owner.APIVersion != workloadv1alpha1.SchemeGroupVersion.String() || owner.Kind != workloadv1alpha1.ModelServingKind.Kind || owner.Name != ms.Name || owner.UID != ms.UID {
+				return fmt.Errorf("Role target revision %s is not controlled by ModelServing %s/%s", stored.Name, ms.Namespace, ms.Name)
+			}
+		}
+		if stored == nil {
+			if _, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, revision, ms.Spec.Template.Roles); err != nil {
+				return fmt.Errorf("persist Role target revision before Pod creation: %w", err)
+			}
+		}
+	}
 	servingGroupName := utils.GenerateServingGroupName(ms.Name, servingGroupOrdinal)
 	roleID := utils.GenerateRoleID(role.Name, roleIndex)
 	entryPod := utils.GenerateEntryPod(role, ms, servingGroupName, roleID, revision, roleTemplateHash)

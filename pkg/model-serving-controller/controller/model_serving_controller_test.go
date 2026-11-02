@@ -9576,3 +9576,156 @@ func TestResolveRoleTemplateHash_ReturnsEmptyWhenControllerRevisionNotFound(t *t
 	hash := controller.resolveRoleTemplateHash(ms, roleName, pod)
 	assert.Equal(t, "", hash)
 }
+
+// A group can converge to the new revision while an unchanged Role still uses
+// an older snapshot. Both store-only and observed Pod references must survive GC.
+func TestStatusGCPreservesUnchangedRoleHistory(t *testing.T) {
+	for _, livePods := range []bool{false, true} {
+		t.Run(fmt.Sprintf("live-pods=%t", livePods), func(t *testing.T) {
+			ctx := context.Background()
+			old := createStandardModelServing("mixed-history", 2, 1)
+			old.UID = "mixed-ms-uid"
+			old.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+			old.Spec.Template.Roles = []workloadv1alpha1.Role{
+				{Name: "prefill", Replicas: ptr.To[int32](1), EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v1"}}}}},
+				{Name: "decode", Replicas: ptr.To[int32](1), EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v1"}}}}},
+			}
+			current := old.DeepCopy()
+			current.Generation = 2
+			current.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "v2"
+			oldRevision, target := utils.ModelServingRevision(old), utils.ModelServingRevision(current)
+			current.Status.CurrentRevision, current.Status.UpdateRevision = oldRevision, oldRevision
+			kube := kubefake.NewSimpleClientset()
+			client := kthenafake.NewSimpleClientset(current)
+			c, err := NewModelServingController(kube, client, volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+			require.NoError(t, err)
+			require.NoError(t, c.modelServingsInformer.GetIndexer().Add(current))
+			for _, pair := range []struct {
+				ms  *workloadv1alpha1.ModelServing
+				rev string
+			}{{old, oldRevision}, {current, target}} {
+				_, err := utils.CreateControllerRevision(ctx, kube, pair.ms, pair.rev, pair.ms.Spec.Template.Roles)
+				require.NoError(t, err)
+			}
+			key := utils.GetNamespaceName(current)
+			for index := 0; index < 2; index++ {
+				group := utils.GenerateServingGroupName(current.Name, index)
+				c.store.AddServingGroup(key, index, target)
+				for _, role := range current.Spec.Template.Roles {
+					revision := target
+					if role.Name == "decode" {
+						revision = oldRevision
+					}
+					id := utils.GenerateRoleID(role.Name, 0)
+					c.store.AddRole(key, group, role.Name, id, revision, utils.CalRoleTemplateHash(role))
+					require.NoError(t, c.store.UpdateRoleStatus(key, group, role.Name, id, datastore.RoleRunning))
+					if livePods {
+						pod := utils.GenerateEntryPod(role, current, group, id, revision, utils.CalRoleTemplateHash(role))
+						pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(current, workloadv1alpha1.ModelServingKind)}
+						_, err := kube.CoreV1().Pods(current.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+						require.NoError(t, err)
+					}
+				}
+				require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+			}
+			require.NoError(t, c.UpdateModelServingStatus(current, target))
+			actual, err := client.WorkloadV1alpha1().ModelServings(current.Namespace).Get(ctx, current.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, target, actual.Status.CurrentRevision)
+			require.Equal(t, int32(2), actual.Status.AvailableReplicas)
+			historical, err := c.modelServingForRevision(ctx, current, oldRevision)
+			require.NoError(t, err, "unchanged decode must remain resolvable after status-driven GC")
+			require.Equal(t, "v1", historical.Spec.Template.Roles[1].EntryTemplate.Spec.Containers[0].Image)
+		})
+	}
+}
+
+func TestRoleCreatePersistsTargetBeforePodWrite(t *testing.T) {
+	for _, failSnapshot := range []bool{false, true} {
+		t.Run(fmt.Sprint(failSnapshot), func(t *testing.T) {
+			ctx := context.Background()
+			kube := kubefake.NewSimpleClientset()
+			c, err := NewModelServingController(kube, kthenafake.NewSimpleClientset(), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+			require.NoError(t, err)
+			ms := createStandardModelServing("role-target", 1, 1)
+			ms.UID = "role-target-uid"
+			revision := utils.ModelServingRevision(ms)
+			if failSnapshot {
+				kube.PrependReactor("create", "controllerrevisions", func(kubetesting.Action) (bool, runtime.Object, error) {
+					return true, nil, fmt.Errorf("injected snapshot persistence failure")
+				})
+			}
+			input := ms.DeepCopy()
+			err = c.CreatePodsByRole(ctx, ms.Spec.Template.Roles[0], ms, 0, 0, revision, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]))
+			require.Equal(t, input.Spec, ms.Spec, "Pod rendering must preserve immutable revision inputs")
+			if failSnapshot {
+				require.ErrorContains(t, err, "injected snapshot persistence failure")
+			} else {
+				require.NoError(t, err)
+				cr, getErr := utils.GetControllerRevision(ctx, kube, ms, revision)
+				require.NoError(t, getErr)
+				require.NotNil(t, cr)
+				original := cr.DeepCopy()
+				ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+				require.Equal(t, revision, utils.ModelServingRevision(ms))
+				require.NoError(t, c.CreatePodsByRole(ctx, ms.Spec.Template.Roles[0], ms, 1, 0, revision, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])))
+				cr, getErr = utils.GetControllerRevision(ctx, kube, ms, revision)
+				require.NoError(t, getErr)
+				require.Equal(t, original, cr, "count-only scale must not rewrite or reject an immutable snapshot")
+			}
+			snapshotIndex, podIndex := -1, -1
+			for index, action := range kube.Actions() {
+				if action.GetVerb() != "create" {
+					continue
+				}
+				switch action.GetResource().Resource {
+				case "controllerrevisions":
+					snapshotIndex = index
+				case "pods":
+					if podIndex == -1 {
+						podIndex = index
+					}
+				}
+			}
+			require.NotEqual(t, -1, snapshotIndex)
+			if failSnapshot {
+				require.Equal(t, -1, podIndex, "failed persistence must prevent every dependent Pod CREATE")
+			} else {
+				require.Greater(t, podIndex, snapshotIndex)
+			}
+		})
+	}
+}
+
+func TestRoleTargetRejectsForeignSnapshotReuseRace(t *testing.T) {
+	ctx := context.Background()
+	kube := kubefake.NewSimpleClientset()
+	c, err := NewModelServingController(kube, kthenafake.NewSimpleClientset(), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+	ms := createStandardModelServing("role-race", 1, 1)
+	ms.UID = "role-race-uid"
+	revision := utils.ModelServingRevision(ms)
+	foreign, err := utils.CreateControllerRevision(ctx, kube, ms, revision, ms.Spec.Template.Roles)
+	require.NoError(t, err)
+	require.NoError(t, kube.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, foreign.Name, metav1.DeleteOptions{}))
+	foreign.UID = "foreign-snapshot"
+	foreign.OwnerReferences[0].UID = "foreign-modelserving"
+	gets := 0
+	kube.PrependReactor("get", "controllerrevisions", func(kubetesting.Action) (bool, runtime.Object, error) {
+		gets++
+		if gets == 3 {
+			require.NoError(t, kube.Tracker().Add(foreign))
+		}
+		return false, nil, nil
+	})
+	kube.ClearActions()
+	err = c.CreatePodsByRole(ctx, ms.Spec.Template.Roles[0], ms, 0, 0, revision, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]))
+	require.ErrorContains(t, err, "not controlled")
+	require.Equal(t, 3, gets)
+	for _, action := range kube.Actions() {
+		require.False(t, action.GetVerb() == "create" && action.GetResource().Resource == "pods", "foreign reuse must not authorize dependent Pods")
+	}
+	actual, err := kube.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, foreign.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, foreign, actual)
+}

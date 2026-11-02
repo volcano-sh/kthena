@@ -63,6 +63,9 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 	controllerRevisionName := GenerateControllerRevisionName(ms.Name, revision)
 	existing, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
 	if err == nil {
+		if !controlledByModelServing(existing, ms) {
+			return nil, fmt.Errorf("ControllerRevision %s/%s is not controlled by this ModelServing", ms.Namespace, controllerRevisionName)
+		}
 		// A revision name identifies immutable historical template data. Never
 		// overwrite it: doing so would make stable ordinal recovery use a
 		// template different from the one referenced by live resources.
@@ -165,8 +168,8 @@ func ModelServingAtRevision(ms *workloadv1alpha1.ModelServing, cr *appsv1.Contro
 }
 
 // CleanupOldControllerRevisions deletes old ControllerRevisions that are no longer in use.
-// In ModelServing, we typically have at most two revisions (CurrentRevision and UpdateRevision),
-// so this cleanup removes all revisions except CurrentRevision and UpdateRevision.
+// Status names current/update revisions; active mixed units may reference additional snapshots.
+// Preserve status, store and live Pod references, including mixed Role revisions.
 func CleanupOldControllerRevisions(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -206,16 +209,34 @@ func CleanupOldControllerRevisions(
 		}
 	}
 
-	// Delete all revisions except CurrentRevision and UpdateRevision
+	// API Pods fence cache gaps and unfinished/terminating units. Their historical
+	// snapshot remains necessary until the last actual reference disappears.
+	pods, err := client.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list Pod revision references: %w", err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if controlledByModelServing(pod, ms) {
+			if revision := ObjectRevision(pod); revision != "" {
+				preservedRevisionNames[GenerateControllerRevisionName(ms.Name, revision)] = struct{}{}
+			}
+		}
+	}
+
+	// Delete only unreferenced history controlled by this exact ModelServing.
 	deletedCount := 0
 	for i := range list.Items {
 		revision := &list.Items[i]
+		if !controlledByModelServing(revision, ms) {
+			continue
+		}
 		// Skip if this revision must be preserved
 		if _, preserved := preservedRevisionNames[revision.Name]; preserved {
 			continue
 		}
 
-		err := client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, revision.Name, metav1.DeleteOptions{})
+		err := client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, revision.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &revision.UID}})
 		if err != nil && !apierrors.IsNotFound(err) {
 			klog.Warningf("Failed to delete old ControllerRevision %s/%s: %v", ms.Namespace, revision.Name, err)
 		} else {
@@ -230,4 +251,10 @@ func CleanupOldControllerRevisions(
 	}
 
 	return nil
+}
+
+// controlledByModelServing requires the complete controller identity, not just labels.
+func controlledByModelServing(object metav1.Object, ms *workloadv1alpha1.ModelServing) bool {
+	owner := metav1.GetControllerOf(object)
+	return object.GetNamespace() == ms.Namespace && owner != nil && owner.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && owner.Kind == workloadv1alpha1.ModelServingKind.Kind && owner.Name == ms.Name && owner.UID == ms.UID
 }
