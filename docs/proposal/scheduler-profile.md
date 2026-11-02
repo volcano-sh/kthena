@@ -136,12 +136,19 @@ ModelServer's requests:
 - Plugins listed without a `pluginConfig` entry run with their built-in
   defaults, not the args from the global ConfigMap.
 
-The fallback to the global chain applies only to ModelServers without a
-(resolvable) profile reference. Users migrating from the global config
-must copy every plugin and arg they rely on into the profile — nothing
-carries over. This differs from the semantics discussed for the
-field-based approach in #1899, where a per-ModelServer setting adjusted
-a single knob on top of the global config.
+Two cases decide which chain serves a ModelServer's requests:
+
+- **The ModelServer has no profile reference**: it uses the global chain.
+  This is the only case that falls back to the global chain.
+- **The ModelServer has a profile reference that cannot be resolved**
+  (build failure or dangling reference): its requests fail directly
+  (503 with a reason).
+
+Users migrating from the global config must copy every plugin and arg
+they rely on into the profile — nothing carries over. This differs from
+the semantics discussed for the field-based approach in #1899, where a
+per-ModelServer setting adjusted a single knob on top of the global
+config.
 
 Each profile chain builds its own plugin instances from its own args
 (see [Plugin lifecycle](#plugin-lifecycle)), so every plugin's args —
@@ -306,12 +313,13 @@ flowchart TD
 
 Validation lives in each plugin's args validation method (e.g.
 `ValidateKVCacheAwareArgs`), which returns an error for invalid
-configuration; plugin constructors must not use destructive aborts such
-as `klog.Fatalf`. Chain building runs the full validation before
-constructing any plugin (the validating webhook already checked the same
-rules) to guard against version skew between the webhook and this
-binary, or objects written while the webhook was unavailable. The global
-chain keeps its existing ConfigMap handling unchanged.
+configuration. Plugin constructors must return an error for invalid
+configuration — destructive aborts such as `klog.Fatalf` are not
+allowed. Chain building runs the full validation before constructing any
+plugin (the validating webhook already checked the same rules) to guard
+against version skew between the webhook and this binary, or objects
+written while the webhook was unavailable. The global chain keeps its
+existing ConfigMap handling unchanged.
 
 Chain building is triggered when a SchedulerProfile is created or
 updated, and its failures fall into two cases:
