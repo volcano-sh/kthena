@@ -18,6 +18,7 @@ package podgroupmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sync"
@@ -54,6 +55,8 @@ const (
 	podGroupCRDName = "podgroups.scheduling.volcano.sh"
 	groupNameKey    = "GroupName"
 )
+
+var errPodGroupInformerNotInitialized = errors.New("PodGroup informer is not initialized")
 
 // Manager manages PodGroups for gang scheduling
 type Manager struct {
@@ -247,7 +250,7 @@ func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alph
 
 	podGroupLister := m.GetPodGroupLister()
 	if podGroupLister == nil {
-		return fmt.Errorf("PodGroup informer is not initialized"), enqueueAfter
+		return errPodGroupInformerNotInitialized, enqueueAfter
 	}
 	podGroup, err := podGroupLister.PodGroups(ms.Namespace).Get(pgName)
 	if err != nil {
@@ -450,7 +453,11 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1
 func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *schedulingv1beta1.PodGroup, ms *workloadv1alpha1.ModelServing) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Get latest podgroup from informer store
-		currentPodGroup, getErr := m.PodGroupLister.PodGroups(existing.GetNamespace()).Get(existing.GetName())
+		podGroupLister := m.GetPodGroupLister()
+		if podGroupLister == nil {
+			return errPodGroupInformerNotInitialized
+		}
+		currentPodGroup, getErr := podGroupLister.PodGroups(existing.GetNamespace()).Get(existing.GetName())
 		if getErr != nil {
 			return getErr
 		}
