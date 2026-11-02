@@ -98,10 +98,6 @@ metadata:
   namespace: default
 spec:
   pluginConfig:
-  - name: prefix-cache
-    args:
-      blockSizeToHash: 64
-      maxBlocksToMatch: 256
   - name: least-request
     args:
       maxWaitingRequests: 50
@@ -144,12 +140,36 @@ carries over. This differs from the semantics discussed for the
 field-based approach in #1899, where a per-ModelServer setting adjusted
 a single knob on top of the global config.
 
-The two also differ in validation strictness, matching their validation
-layers: the ConfigMap keeps the existing lenient validation (the checks
-that would abort startup), whose error is surfaced at startup as today;
-a profile uses the stricter validation — full checks — and a runtime
-build failure falls back (to the global chain on create, to the previous
-chain on update) instead of degrading silently.
+**Stateful plugins draw a hard line.** prefix-cache and kvcache-aware
+own long-lived shared resources — a prefix index, a KV block index, a KV
+event subscriber and GC goroutines — created once per router and shared
+by every chain. Each of these resources is created from exactly one
+set of args (`maxHashCacheSize`, `maxBlocksPerPod`, `runtimePort`,
+`indexMode`), so a shared store has one capacity, a shared subscriber
+dials one port, and the index mode must match how the sidecars actually
+publish their cache data. Per-profile values for these args would
+either silently stop working or query an empty backend. Their boundary
+is therefore:
+
+- **Global ConfigMap**: the only place these plugins' args are
+  configured. The shared instances are built from them at router
+  startup and exist regardless of whether the global chain enables
+  these plugins, so a profile can reference them even when the global
+  chain does not.
+- **SchedulerProfile**: cannot configure their args — the validating
+  webhook rejects any `pluginConfig` entry for a stateful plugin. A
+  profile can still enable them in `plugins.filter`/`plugins.score`
+  and set their weight: the plugin instance is shared, and the weight
+  lives on the chain, so two profiles can give the same prefix-cache
+  instance different weights.
+- **blockSizeToHash in particular** decides how prompts are cut into
+  blocks and hashed — a hash written under blockSize=64 is never
+  matched by a query under blockSize=32, so per-profile block sizes
+  cannot share the index anyway.
+
+Stateless plugins (least-request, least-latency, gpu-usage, random,
+lora-affinity) hold no shared state; their args are plain behavior
+knobs and are configured per profile as usual.
 
 ### Why a referenced CRD instead of extending ModelServer
 
@@ -299,20 +319,19 @@ flowchart TD
 
 ### Failure handling when building plugin chains
 
-Each plugin's validation method (see
-[Plugin registration (single source of truth)](#plugin-registration-single-source-of-truth))
-returns the error and owns two validation modes. Lenient mode validates
-what the ConfigMap config validates today (the conditions that would
-abort startup); the global chain runs it before constructing plugins,
-and the upper layer aborts startup as today. Strict mode validates
-everything; the profile chain runs it before constructing plugins, and a
-failure rejects the chain. The constructors no longer carry validation
-logic, so their `Fatalf` calls become unreachable on both paths.
+Validation lives in each plugin's args validation method (e.g.
+`ValidateKVCacheAwareArgs`), which returns an error for invalid
+configuration; plugin constructors must not use destructive aborts such
+as `klog.Fatalf`. Chain building runs the full validation before
+constructing any plugin (the validating webhook already checked the same
+rules) to guard against version skew between the webhook and this
+binary, or objects written while the webhook was unavailable. The global
+chain keeps its existing ConfigMap handling unchanged.
 
 Chain building is triggered when a SchedulerProfile is created or
 updated, and its failures fall into two cases:
 
-- Chain build failure: the profile's args fail strict validation. The
+- Chain build failure: the profile's args fail validation. The
   router falls back instead of taking the new chain: on create it uses
   the global chain and caches nothing; on update it keeps the previously
   built chain.
