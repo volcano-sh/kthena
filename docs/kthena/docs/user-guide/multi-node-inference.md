@@ -99,6 +99,9 @@ metadata:
   name: llama-multinode
   namespace: default
 spec:
+  plugins:
+    - name: headless-service
+      type: BuiltIn
   schedulerName: volcano
   replicas: 1  # inferGroup replicas
   template:
@@ -177,7 +180,7 @@ spec:
 ```
 
 :::tip
-`ENTRY_ADDRESS` is an environment variable that Kthena automatically injects into every worker pod. Its value is set to the headless service address of the corresponding entry pod (e.g., `llama-multinode-0-llama-405b-0-0.default`). You do not need to define it yourself. When multiple Role replicas exist, each worker pod receives the correct entry address for its own replica, so Ray workers always connect to the right head node. See the [Labels and Environment Variables](../architecture/model-serving-controller.mdx#environment-variables) section for the full list of injected variables.
+The example enables `headless-service` at creation. This plugin injects `ENTRY_ADDRESS` into Entry and Worker Pods with a worker template. Its value is the entry-only Headless Service address for that Role instance (e.g., `llama-multinode-0-llama-405b-0-0.default`), so Ray workers connect to their own head node. A separate discovery Service provides each member's DNS record through its hostname and subdomain, including before readiness. Ordinary ModelServings without this plugin do not receive these generated DNS settings. See [plugin configuration and migration](modelserving-plugin-framework.md#upgrade-and-migration) before upgrading existing workloads, and [Labels and Environment Variables](../architecture/model-serving-controller.mdx#environment-variables) for the injected variables.
 :::
 
 ### Combined PD-Disaggregation and Multi-Node Layout

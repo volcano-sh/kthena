@@ -33,6 +33,7 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/config"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
+	msplugins "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,6 +78,12 @@ func BuildModelServing(model *workload.ModelBooster) (*workload.ModelServing, er
 			serving.Spec.Template.Roles[i].WorkerTemplate = nil
 		}
 	}
+	// Plugins are immutable: declare discovery at creation even when no workers
+	// are requested yet. Roles without a worker template have no plugin effects.
+	serving.Spec.Plugins = append(serving.Spec.Plugins, workload.PluginSpec{
+		Name: msplugins.HeadlessServicePluginName,
+		Type: workload.PluginTypeBuiltIn,
+	})
 	return serving, nil
 }
 

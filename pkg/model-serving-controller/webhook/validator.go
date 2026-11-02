@@ -53,19 +53,18 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// UPDATE validation needs both revisions to determine whether a dependency
-	// can bootstrap target-version capacity while the old request path is kept.
-	var oldModelServing *workloadv1alpha1.ModelServing
-	if admissionReview.Request.Operation == admissionv1.Update && len(admissionReview.Request.OldObject.Raw) > 0 {
-		oldModelServing = &workloadv1alpha1.ModelServing{}
-		if err := json.Unmarshal(admissionReview.Request.OldObject.Raw, oldModelServing); err != nil {
-			klog.Errorf("Failed to decode old ModelServing: %v", err)
-			http.Error(w, fmt.Sprintf("failed to decode old ModelServing: %v", err), http.StatusBadRequest)
-			return
-		}
+	// UPDATE must compare against the existing object. Do not turn a missing or
+	// malformed oldObject into CREATE validation and bypass plugin immutability.
+	oldModelServing, err := parseOldModelServingForUpdate(admissionReview)
+	var allowed bool
+	var reason string
+	if err != nil {
+		reason = err.Error()
+	} else if oldModelServing != nil {
+		allowed, reason = v.validateModelServingUpdate(oldModelServing, modelServing)
+	} else {
+		allowed, reason = v.validateModelServing(modelServing)
 	}
-
-	allowed, reason := v.validateModelServingUpdate(oldModelServing, modelServing)
 
 	// Create the admission response
 	admissionResponse := admissionv1.AdmissionResponse{
@@ -90,6 +89,23 @@ func (v *ModelServingValidator) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func parseOldModelServingForUpdate(admissionReview *admissionv1.AdmissionReview) (*workloadv1alpha1.ModelServing, error) {
+	if admissionReview.Request.Operation != admissionv1.Update {
+		return nil, nil
+	}
+	if len(admissionReview.Request.OldObject.Raw) == 0 {
+		return nil, fmt.Errorf("old ModelServing is required for update validation")
+	}
+	var oldModelServing *workloadv1alpha1.ModelServing
+	if err := json.Unmarshal(admissionReview.Request.OldObject.Raw, &oldModelServing); err != nil {
+		return nil, fmt.Errorf("failed to decode old ModelServing: %w", err)
+	}
+	if oldModelServing == nil || oldModelServing.Name == "" {
+		return nil, fmt.Errorf("old ModelServing with metadata.name is required for update validation")
+	}
+	return oldModelServing, nil
+}
+
 // validateModelServing validates the ModelServing resource
 func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alpha1.ModelServing) (bool, string) {
 	allErrs := modelServingValidationErrors(modelServing)
@@ -101,6 +117,7 @@ func (v *ModelServingValidator) validateModelServingUpdate(
 	oldModelServing, modelServing *workloadv1alpha1.ModelServing,
 ) (bool, string) {
 	allErrs := modelServingValidationErrors(modelServing)
+	allErrs = append(allErrs, validatePluginsImmutable(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateRoleCoordinationUpdate(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateRoleCoordinationImmutable(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateCoordinatedPartitions(oldModelServing, modelServing)...)
@@ -109,7 +126,6 @@ func (v *ModelServingValidator) validateModelServingUpdate(
 
 func modelServingValidationErrors(modelServing *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList
-
 	allErrs = append(allErrs, validGeneratedNameLength(modelServing)...)
 	allErrs = append(allErrs, validateRoleNames(modelServing)...)
 	allErrs = append(allErrs, validateWorkerImages(modelServing)...)

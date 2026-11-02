@@ -355,7 +355,9 @@ func TestCoordinatedSurgeCleanupRechecksHealthyCapacityAfterPlanning(t *testing.
 			}
 			client := c.kubeClientSet.(*kubefake.Clientset)
 			client.ClearActions()
-			require.True(t, c.retireCoordinatedSurge(planning, ms, group, prefill, instances, 2))
+			handled, err := c.retireCoordinatedSurge(planning, ms, group, prefill, instances, 2)
+			require.NoError(t, err)
+			require.True(t, handled)
 			if lostWorker {
 				requireNoMergeReadyPodMutations(t, client.Actions())
 				require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group, prefill.Name, "prefill-2"))

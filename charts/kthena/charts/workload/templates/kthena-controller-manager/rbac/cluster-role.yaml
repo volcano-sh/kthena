@@ -130,6 +130,7 @@ rules:
       - delete
       - get
       - list
+      - update
       - watch
   - apiGroups:
       - scheduling.volcano.sh

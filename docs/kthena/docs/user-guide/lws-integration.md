@@ -1,6 +1,6 @@
 # LeaderWorkerSet (LWS) Integration
 
-Kthena ModelServing provides native support for the **LeaderWorkerSet (LWS)** API. This capability allows users to define inference workloads using the standard LWS Custom Resource Definition (CRD) while leveraging Kthena's powerful orchestration, routing, and autoscaling features underneath.
+Kthena can convert **LeaderWorkerSet (LWS)** resources into ModelServing workloads, allowing users to use the LWS Custom Resource Definition (CRD) with Kthena's orchestration, routing, and autoscaling features. Conversion does not imply full native LWS controller or network-identity compatibility.
 
 This guide explains how to use LeaderWorkerSet resources with Kthena.
 
@@ -13,7 +13,7 @@ LeaderWorkerSet (LWS) is a widely adopted API for describing multi-host inferenc
 - **LWS API Compatibility**: Users can submit standard LeaderWorkerSet CRs directly.
 - **Zero Extra Infrastructure**: No need to deploy the native LWS Controller; Kthena's ModelServing Controller handles the logic.
 - **Kthena Powered**: Automatically inherits Kthena's capabilities like ModelRoute and Autoscaling.
-- **Seamless Migration**: Ideal for users already using LWS who want to migrate to Kthena without rewriting their manifests.
+- **Migration boundary**: Validate application startup and DNS requirements before migrating from the native LWS controller; Kthena Role DNS and native LWS network identities are different contracts.
 
 ## How It Works
 
@@ -37,10 +37,28 @@ When Kthena's LWS integration is enabled:
 | `spec.replicas` | `spec.replicas` | Defines the number of independent serving groups. |
 | `spec.leaderWorkerTemplate.leaderTemplate` | `spec.template.roles.EntryTemplate` | Parsed as Leader role definition. If nil, `workerTemplate` is used as Entry Pod. |
 | `spec.leaderWorkerTemplate.workerTemplate` | `spec.template.roles.WorkerTemplate` | Parsed as Worker role definition. |
-| `spec.leaderWorkerTemplate.size` | Worker Role Replicas | Used to calculate replica count for Worker Role: `Replicas = Size - 1` (Assuming Leader is 1). |
+| `spec.leaderWorkerTemplate.size` | `spec.template.roles[].workerReplicas` | Worker count is `Size - 1`. Newly generated ModelServings declare `headless-service` at creation, including size 1, and retain that declaration when size changes. |
 | `spec.startupPolicy` | Startup Policy | Maps startup order policy (e.g., `LeaderFirst`). |
 
 </div>
+
+### DNS and existing generated objects
+
+The generated Role retains its worker template even at size 1. The
+`headless-service` plugin therefore maintains an entry-only Service and a
+separate member-discovery Service for that Role, injects `ENTRY_ADDRESS`, and
+sets generated Pod hostname/subdomain fields. This is Kthena's per-Role DNS
+layout; it does not provide the native LWS shared `<lws-name>` subdomain,
+`<lws-name>-<group-index>` leader hostname, or `LWS_LEADER_ADDRESS` by itself.
+Applications that derive worker hostnames from native LWS addresses need that
+separate integration verified before deployment.
+
+ModelServing plugin chains are immutable. An existing generated ModelServing
+without `headless-service` cannot acquire it through an LWS size update or a
+controller upgrade. Create a new LWS/ModelServing workload and migrate traffic
+after validating startup; the controller does not silently replace the existing
+child or bypass admission. See [plugin migration](modelserving-plugin-framework.md#upgrade-and-migration)
+for legacy Service layouts.
 
 ### Status Mapping (ModelServing -> LeaderWorkerSet)
 

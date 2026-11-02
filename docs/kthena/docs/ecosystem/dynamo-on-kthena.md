@@ -77,38 +77,50 @@ A successful deployment has all of the following properties:
 - The corresponding `ModelServing` reports the expected replica, available, and updated counts.
 - Its Volcano `PodGroup` is `Running` and all leader and worker Pods are ready.
 
-Inspect the LWS runtime environment in a leader and worker Pod:
+Inspect the actual runtime environment in a leader and worker Pod before
+depending on native LWS address conventions:
 
 ```bash
-kubectl exec -n dynamo-demo <leader-pod> -- env | grep '^LWS_'
-kubectl exec -n dynamo-demo <worker-pod> -- env | grep '^LWS_'
+kubectl exec -n dynamo-demo <leader-pod> -- env | grep -E '^(ENTRY_ADDRESS|LWS_)'
+kubectl exec -n dynamo-demo <worker-pod> -- env | grep -E '^(ENTRY_ADDRESS|LWS_)'
 ```
 
-For a two-node group, both Pods receive the same `LWS_LEADER_ADDRESS` and `LWS_GROUP_SIZE=2`; the leader receives `LWS_WORKER_INDEX=0` and the worker receives `LWS_WORKER_INDEX=1`.
+Kthena's `headless-service` plugin supplies `ENTRY_ADDRESS` for the Entry Pod of
+each Role instance and a separate discovery subdomain for member DNS. It does
+not itself inject `LWS_LEADER_ADDRESS`, `LWS_GROUP_SIZE`, or `LWS_WORKER_INDEX`.
+The `lws-standard-labels` plugin supplies identity labels, not these environment
+variables. Native LWS environment and hostname compatibility must be verified
+separately for the Dynamo backend being deployed.
 
-Check the shared headless Service and Pod network identities:
+Check the generated Services and actual Pod network identities:
 
 ```bash
-kubectl get service -n dynamo-demo <lws-name> -o yaml
+kubectl get services -n dynamo-demo \
+  -l modelserving.volcano.sh/name=<lws-name> -o yaml
 kubectl get pods -n dynamo-demo \
   -l leaderworkerset.sigs.k8s.io/name=<lws-name> \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.hostname}{"."}{.spec.subdomain}{"\n"}{end}'
 ```
 
-The Service has `clusterIP: None` and `publishNotReadyAddresses: true`. Leader and worker DNS identities use the shared-subdomain form:
+The two plugin-managed Services have `clusterIP: None` and
+`publishNotReadyAddresses: true`: the Entry Service selects only the Entry,
+while the discovery Service selects Entry and Worker Pods. Use the observed
+hostname and subdomain to query individual Pod DNS records.
 
-```text
-<lws-name>-0.<lws-name>.<namespace>
-<lws-name>-0-1.<lws-name>.<namespace>
-```
-
-This identity supports Dynamo TRT-LLM's worker-host derivation from the leader address. Deleting the Service should cause Kthena to recreate it during reconciliation.
+Earlier versions of this guide described native LWS shared-subdomain names
+such as `<lws-name>-0.<lws-name>.<namespace>`. The generic Kthena plugin does not
+establish that layout. In particular, Dynamo TRT-LLM's derivation of Worker
+hosts from a native LWS leader address must not be assumed to work from
+`ENTRY_ADDRESS`. Validate the backend's address requirements before using this
+integration; this headless-Service change does not implement a separate LWS
+network protocol.
 
 ## Compatibility scope
 
-- The integration implements LWS's default shared-subdomain network identity. `networkConfig.subdomainPolicy: UniquePerReplica` is not supported.
+- Conversion to ModelServing and Kthena Role DNS do not establish native LWS shared-subdomain parity. `networkConfig.subdomainPolicy: UniquePerReplica` is not supported.
 - Do not run the native LWS controller or webhook alongside Kthena.
 - The Kthena workload webhook must remain enabled for Dynamo-generated LWS resources.
-- This integration covers the current Dynamo LWS workload contract; it does not change Dynamo or provide a general replacement for every LWS feature.
+- New generated ModelServings declare the headless plugin at creation, including LWS size 1. Existing children without it require migration because their plugin chain is immutable; see [plugin migration](../user-guide/modelserving-plugin-framework.md#upgrade-and-migration).
+- This guide does not establish full Dynamo backend compatibility or provide a general replacement for every LWS feature. Verify the actual generated environment, DNS records, and application startup for the selected backend.
 
 For an overview of Kthena's LeaderWorkerSet integration, see [LeaderWorkerSet integration](../user-guide/lws-integration.md).

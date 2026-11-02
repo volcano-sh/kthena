@@ -220,6 +220,7 @@ func TestBuildRevisionDataPreservesPodAPIDefaultIntent(t *testing.T) {
 
 func TestBuildRevisionDataIgnoresControllerOwnedEnvValues(t *testing.T) {
 	base := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"))
+	base.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "headless-service"}}
 	role := &base.Spec.Template.Roles[0]
 	role.EntryTemplate.Spec.InitContainers = []corev1.Container{{
 		Name: "entry-init", Image: "init:v1", Env: []corev1.EnvVar{{Name: "KEEP", Value: "entry-init"}},
@@ -256,6 +257,74 @@ func TestBuildRevisionDataIgnoresControllerOwnedEnvValues(t *testing.T) {
 	}
 	if got := len(equivalent.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env); got != 4 {
 		t.Fatalf("BuildRevisionData mutated input environment: %v", equivalent.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env)
+	}
+}
+
+func TestBuildRevisionDataPreservesEntryAddressUnlessPluginOverwritesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name                                string
+		plugin                              bool
+		scope                               *workloadv1alpha1.PluginScope
+		nilWorker                           bool
+		entryOverwritten, workerOverwritten bool
+	}{
+		{name: "no-plugin"},
+		{name: "all", plugin: true, entryOverwritten: true, workerOverwritten: true},
+		{name: "unsupported-entry-target", plugin: true, scope: &workloadv1alpha1.PluginScope{Target: workloadv1alpha1.PluginTargetEntry}},
+		{name: "unsupported-worker-target", plugin: true, scope: &workloadv1alpha1.PluginScope{Target: workloadv1alpha1.PluginTargetWorker}},
+		{name: "excluded-role", plugin: true, scope: &workloadv1alpha1.PluginScope{Roles: []string{"other"}}},
+		{name: "nil-worker", plugin: true, nilWorker: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"))
+			if tc.plugin {
+				base.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "headless-service", Scope: tc.scope}}
+			}
+			if tc.nilWorker {
+				base.Spec.Template.Roles[0].WorkerTemplate = nil
+			}
+			var baseData []byte
+			var err error
+			for _, worker := range []bool{false, true} {
+				if worker && tc.nilWorker {
+					continue
+				}
+				for _, init := range []bool{false, true} {
+					changed := base.DeepCopy()
+					template := &changed.Spec.Template.Roles[0].EntryTemplate
+					overwritten := tc.entryOverwritten
+					if worker {
+						template = changed.Spec.Template.Roles[0].WorkerTemplate
+						overwritten = tc.workerOverwritten
+					}
+					container := &template.Spec.Containers[0]
+					if init {
+						// Include the same init container in the baseline so the only
+						// difference under test is the user ENTRY_ADDRESS value.
+						template.Spec.InitContainers = []corev1.Container{{Name: "init", Image: "init:v1"}}
+						withoutEnv := changed.DeepCopy()
+						baseData, err = BuildRevisionData(withoutEnv)
+						if err != nil {
+							t.Fatal(err)
+						}
+						container = &template.Spec.InitContainers[0]
+					} else {
+						baseData, err = BuildRevisionData(base)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					container.Env = append(container.Env, corev1.EnvVar{Name: workloadv1alpha1.EntryAddressEnv, Value: "user-owned.example"})
+					data, err := BuildRevisionData(changed)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if bytes.Equal(baseData, data) != overwritten {
+						t.Fatalf("worker=%t init=%t: revision equality=%t, overwritten=%t", worker, init, bytes.Equal(baseData, data), overwritten)
+					}
+				}
+			}
+		})
 	}
 }
 
