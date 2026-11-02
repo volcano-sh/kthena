@@ -284,10 +284,10 @@ must use a new name when a replacement must not inherit this affinity state,
 for example after a restart that loses its cache. A replacement with an unchanged
 name, address and port cannot be inferred from the snapshot.
 
-Engine/workload-port edits reapply the raw snapshot without clearing membership
-or in-flight counters. Omitted ports follow configuration, explicit ports stay
-fixed, and obsolete scrapes are discarded. Store reconciliation remains a
-multi-operation update, not an atomic swap.
+Engine/workload-port edits reapply the raw snapshot only if it remains valid;
+otherwise the Store keeps the last applied pool until a valid snapshot arrives.
+Omitted ports inherit the workload port; explicit ports stay fixed. Store
+reconciliation remains a multi-operation update, not an atomic swap.
 
 ### Observability
 

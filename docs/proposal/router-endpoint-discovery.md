@@ -39,8 +39,13 @@ They should reuse the existing scheduler, proxy and Store.
 
 ### Proposal
 
-Select one compiled-in provider and map ModelServers to its parameters.
-External mode disables the Pod informer, not resource configuration loading.
+Router makes two independent choices at startup:
+
+- **Resource configuration:** `--config-source=kubernetes` watches resources such
+  as ModelServer and ModelRoute through the Kubernetes API; `file` loads them from disk.
+- **Instance discovery:** An external `endpointDiscovery.provider` supplies
+  endpoints for mapped ModelServers with either resource source. When enabled,
+  the Router does not run its Pod informer, even with `--config-source=kubernetes`.
 
 - **Mapped:** the ModelServer's `namespace/name` has an entry in
   `endpointDiscovery.mappings`; **unmapped:** it has no entry.
@@ -57,20 +62,17 @@ External mode disables the Pod informer, not resource configuration loading.
 flowchart LR
     K[Kubernetes resource watches] --> M[ModelServer lifecycle]
     F[File resource loader] --> M
-    M --> N[Native / static reconciliation]
+    M -->|native discovery| N[Native / static reconciliation]
     P[Pod informer] --> N
-    M --> D[Discovery Controller - new]
+    M -->|external discovery| D[Discovery Controller]
     E[Provider Source - extension] -->|Endpoint snapshots| D
     N --> S[datastore.Store]
     D -->|Synthetic Pods| S
     S --> R[Scheduler / proxy]
 ```
 
-Resource loading and instance discovery are independent.
-`--config-source=kubernetes` still requires Kubernetes API access to load resource
-configuration, even with external discovery. With `--config-source=file` and an
-external provider, Router can run standalone without a Kubernetes cluster.
-Both paths use the existing Store; the request path is unchanged.
+With file-backed resources and an external provider, Router can run without a
+Kubernetes cluster.
 
 #### User Stories
 
@@ -168,8 +170,9 @@ name for a replacement that must not inherit affinity; provide PD role/group
 labels when needed. The existing bounded inspection loop fetches metrics/models
 asynchronously in external mode, including for unmapped static models.
 
-**3. Handle lifecycle changes.** A spec edit reapplies the last raw snapshot
-before requesting a refresh, so engine/port changes do not clear membership.
+**3. Handle lifecycle changes.** A spec edit revalidates the cached snapshot
+before replay and triggers a refresh. If the cache is invalid under the new spec,
+the Store keeps the last applied pool until a valid snapshot arrives.
 Omitted ports follow ModelServer configuration; explicit endpoint ports do not.
 Deletion cancels the subscription and removes membership; a different UID starts
 a fresh subscription. The controller's `Run(ctx)` / `Close()` own these workers,

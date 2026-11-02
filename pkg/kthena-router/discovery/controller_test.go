@@ -191,6 +191,7 @@ func TestSnapshotEndpointAddressUpdate(t *testing.T) {
 		{"IP", "10.0.0.9", 9000},
 		{"port", "10.0.0.1", 9001},
 		{"IP and port", "10.0.0.9", 9001},
+		{"absolute DNS address", "MODEL.example.org.", 9000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := testController(t, testConfig(), nil, nil)
@@ -252,6 +253,10 @@ func TestSnapshotValidation(t *testing.T) {
 	}{
 		{"empty", nil, true},
 		{"dns", []api.Endpoint{{Name: "a", Address: "model.example.org"}}, true},
+		{"63-byte DNS label", []api.Endpoint{{Name: "a", Address: "model." + strings.Repeat("A", 63) + ".org."}}, true},
+		{"64-byte DNS label", []api.Endpoint{{Name: "a", Address: "model." + strings.Repeat("A", 64) + ".org."}}, false},
+		{"empty DNS label", []api.Endpoint{{Name: "a", Address: "model.example.org.."}}, false},
+		{"non-ASCII DNS label", []api.Endpoint{{Name: "a", Address: "\u212A.example.org"}}, false},
 		{"ipv6", []api.Endpoint{{Name: "a", Address: "2001:db8::1"}}, true},
 		{"missing name", []api.Endpoint{{Address: "10.0.0.1"}}, false},
 		{"name with slash", []api.Endpoint{{Name: "a/b", Address: "10.0.0.1"}}, false},
@@ -363,6 +368,38 @@ func TestModelServerRuntimeChangeKeepsMembership(t *testing.T) {
 	source = snapshotSource(nil, errors.New("unavailable"))
 	require.Error(t, c.refresh(utils.GetNamespaceName(ms), target, sub, &source))
 	require.Same(t, info, c.store.GetPodInfo(info.GetPodNamespacedName()))
+}
+
+func TestInvalidCachedPortRetainsPoolUntilValidSnapshot(t *testing.T) {
+	c := testController(t, testConfig(), nil, nil)
+	ms := testModel()
+	ms.Spec.Endpoints = []api.Endpoint{{Name: "static", Address: "10.0.0.2", Port: ptr.To(int32(9000))}}
+	name := utils.GetNamespaceName(ms)
+	target, sub := installTarget(t, c, ms)
+	ep := api.Endpoint{Name: "a", Address: "10.0.0.1"}
+	source := snapshotSource([]api.Endpoint{ep}, nil)
+	refresh := func() error { return c.refresh(name, target, sub, &source) }
+	require.NoError(t, refresh())
+	port := func() int32 {
+		pod := c.store.GetPodInfo(types.NamespacedName{Namespace: ms.Namespace, Name: "model:a"}).GetPod()
+		return utils.EndpointPort(pod, c.store.GetModelServer(name).Spec.WorkloadPort.Port)
+	}
+
+	next := ms.DeepCopy()
+	next.Spec.WorkloadPort = api.WorkloadPort{} // Valid for static endpoints, but the provider relied on this port.
+	require.NoError(t, c.UpdateModelServer(next))
+	require.Equal(t, int32(8000), port())
+	next.ResourceVersion = "2"
+	require.NoError(t, c.UpdateModelServer(next))
+	require.ErrorContains(t, refresh(), "invalid port 0")
+	require.Equal(t, ms, c.store.GetModelServer(name))
+	require.Equal(t, int32(8000), port())
+
+	ep.Port = ptr.To(int32(8100))
+	source = snapshotSource([]api.Endpoint{ep}, nil)
+	require.NoError(t, refresh())
+	require.Equal(t, next, c.store.GetModelServer(name))
+	require.Equal(t, int32(8100), port())
 }
 
 type failingStore struct {

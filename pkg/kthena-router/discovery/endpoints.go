@@ -19,6 +19,8 @@ package discovery
 import (
 	"fmt"
 	"net"
+	"strings"
+	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -77,7 +79,7 @@ func validateSnapshot(ms *api.ModelServer, endpoints []api.Endpoint) error {
 			return fmt.Errorf("invalid or duplicate endpoint name %q: must be a unique DNS-1123 subdomain", endpoint.Name)
 		}
 		seen[endpoint.Name] = true
-		if net.ParseIP(endpoint.Address) == nil && (endpoint.Address == "" || len(validation.IsDNS1123Subdomain(endpoint.Address)) > 0) {
+		if !validEndpointAddress(endpoint.Address) {
 			return fmt.Errorf("endpoint %q has invalid IP address or DNS name %q", endpoint.Name, endpoint.Address)
 		}
 		port := endpointPort(ms, endpoint)
@@ -91,6 +93,23 @@ func validateSnapshot(ms *api.ModelServer, endpoints []api.Endpoint) error {
 		}
 	}
 	return nil
+}
+
+func validEndpointAddress(address string) bool {
+	if net.ParseIP(address) != nil {
+		return true
+	}
+	// Fold ASCII DNS names for validation only; preserve the root dot when dialing.
+	host := strings.TrimSuffix(address, ".")
+	if len(host) > validation.DNS1123SubdomainMaxLength || utf8.RuneCountInString(host) != len(host) {
+		return false
+	}
+	for label := range strings.SplitSeq(strings.ToLower(host), ".") {
+		if len(validation.IsDNS1123Label(label)) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func endpointPort(ms *api.ModelServer, endpoint api.Endpoint) int32 {

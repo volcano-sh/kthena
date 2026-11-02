@@ -211,21 +211,23 @@ func (c *Controller) UpdateModelServer(ms *api.ModelServer) error {
 	if reflect.DeepEqual(sub.ms, ms) {
 		return nil
 	}
-	if reflect.DeepEqual(sub.ms.Spec, ms.Spec) {
+	if !reflect.DeepEqual(sub.ms.Spec, ms.Spec) {
+		// Revalidate inherited ports before replaying. Even if replay is invalid,
+		// the next provider snapshot must be checked against the new spec.
+		if err := validateSnapshot(ms, sub.last); err != nil {
+			klog.Warningf("endpoint discovery %s: cached snapshot no longer valid: %v; keeping last applied pool", name, err)
+		} else if err := SyncEndpoints(c.store, ms, sub.last); err != nil {
+			return err
+		}
+		sub.version++
+		signal(sub.wake)
+	} else if applied := c.store.GetModelServer(name); applied != nil && reflect.DeepEqual(applied.Spec, ms.Spec) {
+		// A metadata-only update must not publish a spec still awaiting a valid snapshot.
 		if err := c.store.AddOrUpdateModelServer(ms, nil); err != nil {
 			return err
 		}
-		sub.ms = ms
-		return nil
-	}
-	// Reapply the raw snapshot immediately. Store invalidates changed runtime
-	// data in place, preserving membership and in-flight request counters.
-	if err := SyncEndpoints(c.store, ms, sub.last); err != nil {
-		return err
 	}
 	sub.ms = ms
-	sub.version++
-	signal(sub.wake)
 	return nil
 }
 
