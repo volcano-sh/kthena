@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -26,7 +27,10 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	kubefake "k8s.io/client-go/kubernetes/fake"
+	kt "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 )
 
@@ -89,11 +93,26 @@ func TestCoordinatedSurgeCleanupWaitsForFormalReady(t *testing.T) {
 	require.NoError(t, c.store.UpdateRoleStatus(key, "cleanup-0", role.Name, utils.GenerateRoleID(role.Name, 0), datastore.RoleRunning))
 	instances, err = c.store.GetRoleList(key, "cleanup-0", role.Name)
 	require.NoError(t, err)
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	denied := true
+	client.PrependReactor("delete", "pods", func(action kt.Action) (bool, runtime.Object, error) {
+		deletion := action.(kt.DeleteAction)
+		require.Equal(t, "cleanup-0-prefill-1-0", deletion.GetName(), "a marked surge cannot authorize deleting formal capacity")
+		require.Equal(t, ms.UID, *deletion.GetDeleteOptions().Preconditions.UID)
+		if denied {
+			return true, nil, fmt.Errorf("injected surge DELETE failure")
+		}
+		return false, nil, nil
+	})
 	handled, err = c.retireCoordinatedSurge(context.Background(), ms, "cleanup-0", role, instances, 1)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "injected surge DELETE failure")
 	require.True(t, handled)
 	require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, "cleanup-0", role.Name, utils.GenerateRoleID(role.Name, 0)))
 	require.Equal(t, datastore.RoleDeleting, c.store.GetRoleStatus(key, "cleanup-0", role.Name, utils.GenerateRoleID(role.Name, 1)))
+	denied = false
+	require.NoError(t, c.finishPendingDeletions(context.Background(), ms))
+	_, err = client.CoreV1().Pods(ms.Namespace).Get(context.Background(), "cleanup-0-prefill-0-0", metav1.GetOptions{})
+	require.NoError(t, err, "retry preserves formal capacity")
 }
 
 func TestCoordinatedSurgeAdoptionRemovesOriginWithoutReplacingUID(t *testing.T) {

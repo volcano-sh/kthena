@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -33,8 +34,10 @@ import (
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	kt "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 	volcanofake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
 )
@@ -50,6 +53,107 @@ func historicalPluginFixture(t *testing.T) (*ModelServingController, *kubefake.C
 	c, err := NewModelServingController(client, kthenafake.NewSimpleClientset(ms), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
 	require.NoError(t, err)
 	return c, client, ms
+}
+
+func TestCoordinatedHistoryFormatsAndOwnerIdentity(t *testing.T) {
+	for _, v1 := range []bool{false, true} {
+		for _, owner := range []string{"valid", "name", "kind", "api", "uid", "controller"} {
+			t.Run(fmt.Sprintf("v1=%t/%s", v1, owner), func(t *testing.T) {
+				ctx := context.Background()
+				ms := mergeReadyModelServing("coord-history", 1, 1)
+				c := newRevisionTestController(t, ms)
+				old := ms.DeepCopy()
+				old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "historical-image"
+				cr := historicalPluginRevision(t, old, "applied", v1)
+				cr.Annotations[coordinatedRoleReplicaBaselineAnnotation] = `{"prefill":2,"decode":3}`
+				switch owner {
+				case "name":
+					cr.OwnerReferences[0].Name = "other"
+				case "kind":
+					cr.OwnerReferences[0].Kind = "Other"
+				case "api":
+					cr.OwnerReferences[0].APIVersion = "other/v1"
+				case "uid":
+					cr.OwnerReferences[0].UID = "other"
+				case "controller":
+					cr.OwnerReferences[0].Controller = nil
+				}
+				_, err := c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Create(ctx, cr, metav1.CreateOptions{})
+				require.NoError(t, err)
+				client := c.kubeClientSet.(*kubefake.Clientset)
+				client.ClearActions()
+				roles, readErr := c.roleSpecsFromRevisionInRound(withCoordinatedRound(ctx, ms), ms, "applied")
+				persistErr := c.persistCoordinatedRoleRevision(ctx, ms, "applied")
+				if owner == "valid" {
+					require.NoError(t, readErr)
+					require.NoError(t, persistErr)
+					require.Equal(t, "historical-image", roles["prefill"].EntryTemplate.Spec.Containers[0].Image)
+					require.EqualValues(t, 2, *roles["prefill"].Replicas)
+					require.EqualValues(t, 3, *roles["decode"].Replicas)
+				} else {
+					require.ErrorContains(t, readErr, "is not controlled by ModelServing")
+					require.ErrorContains(t, persistErr, "is not controlled by ModelServing")
+					for _, action := range client.Actions() {
+						require.Equal(t, "get", action.GetVerb(), "foreign history must have no metadata or workload writes")
+					}
+				}
+				stored, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, cr.Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				require.Equal(t, cr.Data.Raw, stored.Data.Raw, "the operational baseline never rewrites immutable template data")
+			})
+		}
+	}
+}
+
+func TestCoordinatedHeadlessPartialV1Replay(t *testing.T) {
+	ctx := context.Background()
+	ms := mergeReadyModelServing("coord-headless", 1, 1)
+	ms.Spec.Plugins = []workload.PluginSpec{{Name: plugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}}
+	for i := range ms.Spec.Template.Roles {
+		ms.Spec.Template.Roles[i].WorkerReplicas = 1
+		ms.Spec.Template.Roles[i].WorkerTemplate = ms.Spec.Template.Roles[i].EntryTemplate.DeepCopy()
+	}
+	revision := utils.ModelServingRevision(ms)
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = revision, revision
+	c := newRevisionTestController(t, ms)
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	cr := historicalPluginRevision(t, ms, revision, true)
+	_, err := client.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, cr, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	group, key, role := ms.Name+"-0", utils.GetNamespaceName(ms), ms.Spec.Template.Roles[0]
+	c.store.AddServingGroup(key, 0, revision)
+	failed := false
+	client.PrependReactor("create", "pods", func(action kt.Action) (bool, runtime.Object, error) {
+		pod := action.(kt.CreateAction).GetObject().(*corev1.Pod)
+		if strings.HasSuffix(pod.Name, "-1") && !failed {
+			failed = true
+			return true, nil, fmt.Errorf("injected partial worker failure")
+		}
+		pod.UID = types.UID(pod.Name + "-accepted")
+		return false, nil, nil
+	})
+	err = c.scaleUpRoles(withCoordinatedRound(ctx, ms), ms, group, role, nil, 1, 0, revision, true)
+	require.ErrorContains(t, err, "injected partial worker failure")
+	require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(key, group, role.Name, "prefill-0"))
+	entry, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, group+"-prefill-0-0", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(entry))
+	chain, err := c.buildPluginChain(ms)
+	require.NoError(t, err)
+	require.NoError(t, c.manageRoleReplicasPerGroup(withCoordinatedRound(ctx, ms), ms, group, role, 0, revision, false, chain), "a reserved partial Role finishes its workers without another target start")
+	pods, err := client.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 2)
+	for _, pod := range pods.Items {
+		require.Equal(t, "prefill-0", utils.GetRoleID(&pod))
+		require.Equal(t, group+"-prefill-0-0-discovery", pod.Spec.Subdomain)
+		if pod.Name == entry.Name {
+			require.Equal(t, entry.UID, pod.UID)
+		}
+	}
+	services, err := client.CoreV1().Services(ms.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, services.Items, 2, "partial replay keeps one exact entry/discovery pair")
 }
 
 func historicalPluginRevision(t *testing.T, ms *workload.ModelServing, revision string, v1 bool) *appsv1.ControllerRevision {

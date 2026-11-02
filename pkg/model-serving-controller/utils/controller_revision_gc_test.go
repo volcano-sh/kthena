@@ -82,6 +82,34 @@ func TestRevisionGCRetainsLiveOwnedPodReferences(t *testing.T) {
 	}
 }
 
+func TestRevisionGCRetainsUnfinishedTargetAfterRetarget(t *testing.T) {
+	for _, raw := range []string{
+		`{"revision":"b","patched":{"main":{"image":"next"}}}`,
+		`{"version":1,"phase":"Updating","targetRevision":"b"}`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			ctx := context.Background()
+			ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "ms-uid"}, Status: workload.ModelServingStatus{CurrentRevision: "a", UpdateRevision: "c"}}
+			client := kubefake.NewSimpleClientset()
+			target, err := CreateControllerRevision(ctx, client, ms, "b", []workload.Role{{Name: "infer"}})
+			require.NoError(t, err)
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "member", Namespace: ms.Namespace, Labels: map[string]string{workload.RevisionLabelKey: "a"}, Annotations: map[string]string{workload.InPlaceUpdateStateAnnotationKey: raw}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}}}
+			_, err = client.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+			require.NoError(t, err)
+			require.NoError(t, CleanupOldControllerRevisions(ctx, client, ms))
+			_, err = client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
+			require.NoError(t, err, "unfinished B must survive even when status targets C and the Pod label is A")
+			pod.Labels[workload.RevisionLabelKey] = "c"
+			pod.Annotations[workload.InPlaceUpdateStateAnnotationKey] = `{"revision":"b","done":true}`
+			_, err = client.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			require.NoError(t, CleanupOldControllerRevisions(ctx, client, ms))
+			_, err = client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, target.Name, metav1.GetOptions{})
+			require.True(t, apierrors.IsNotFound(err), "a completed annotation must not retain an otherwise unused target")
+		})
+	}
+}
+
 func TestRevisionGCObservationFailureAndForeignRevisionSafety(t *testing.T) {
 	ctx := context.Background()
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "ms-uid"}}

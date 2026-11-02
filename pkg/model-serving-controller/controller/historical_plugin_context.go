@@ -23,6 +23,7 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -39,7 +40,7 @@ func (c *ModelServingController) resolveModelServingRevision(ctx context.Context
 	if revision == "" {
 		return ms, nil
 	}
-	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revision)
+	cr, err := c.controllerRevisionInRound(ctx, ms, revision)
 	if err != nil {
 		return nil, fmt.Errorf("get historical ControllerRevision %s: %w", revision, err)
 	}
@@ -49,10 +50,22 @@ func (c *ModelServingController) resolveModelServingRevision(ctx context.Context
 		}
 		return nil, fmt.Errorf("historical ControllerRevision %s was not found", revision)
 	}
+	return modelServingFromControllerRevision(ms, cr, preserveLegacyCounts)
+}
+
+func validateControllerRevisionOwner(ms *workload.ModelServing, cr *appsv1.ControllerRevision) error {
 	owner := metav1.GetControllerOf(cr)
 	if cr.Namespace != ms.Namespace || owner == nil || owner.APIVersion != workload.SchemeGroupVersion.String() || owner.Kind != workload.ModelServingKind.Kind || owner.Name != ms.Name || owner.UID != ms.UID {
-		return nil, fmt.Errorf("historical ControllerRevision %s is not controlled by ModelServing %s/%s UID %s", cr.Name, ms.Namespace, ms.Name, ms.UID)
+		return fmt.Errorf("historical ControllerRevision %s is not controlled by ModelServing %s/%s UID %s", cr.Name, ms.Namespace, ms.Name, ms.UID)
 	}
+	return nil
+}
+
+func modelServingFromControllerRevision(ms *workload.ModelServing, cr *appsv1.ControllerRevision, preserveLegacyCounts bool) (*workload.ModelServing, error) {
+	if err := validateControllerRevisionOwner(ms, cr); err != nil {
+		return nil, err
+	}
+	revision := cr.Name
 	switch version := cr.Annotations[utils.ControllerRevisionDataVersionAnnotation]; version {
 	case utils.ControllerRevisionDataVersionV1:
 		return utils.ApplyRevision(ms, cr)

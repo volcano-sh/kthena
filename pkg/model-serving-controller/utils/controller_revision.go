@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -221,6 +222,9 @@ func CleanupOldControllerRevisions(
 			if revision := ObjectRevision(pod); revision != "" {
 				preservedRevisionNames[GenerateControllerRevisionName(ms.Name, revision)] = struct{}{}
 			}
+			if revision := unfinishedInPlaceRevision(pod); revision != "" {
+				preservedRevisionNames[GenerateControllerRevisionName(ms.Name, revision)] = struct{}{}
+			}
 		}
 	}
 
@@ -251,6 +255,31 @@ func CleanupOldControllerRevisions(
 	}
 
 	return nil
+}
+
+// An unfinished patch can still target B after the desired revision advances to
+// C while the Pod label remains A. Decode only its history reference here: the
+// inplace package depends on utils. Keep current and legacy completion semantics
+// aligned with inplace.StateOf; completed patch records do not pin old history.
+func unfinishedInPlaceRevision(pod *corev1.Pod) string {
+	var state struct {
+		Revision       string `json:"revision"`
+		TargetRevision string `json:"targetRevision"`
+		Version        int    `json:"version"`
+		Phase          string `json:"phase"`
+		Done           bool   `json:"done"`
+	}
+	if err := json.Unmarshal([]byte(pod.Annotations[workloadv1alpha1.InPlaceUpdateStateAnnotationKey]), &state); err != nil {
+		return ""
+	}
+	if state.Version != 0 || state.Phase != "" {
+		if state.Phase != "Done" {
+			return state.TargetRevision
+		}
+	} else if !state.Done {
+		return state.Revision
+	}
+	return ""
 }
 
 // controlledByModelServing requires the complete controller identity, not just labels.

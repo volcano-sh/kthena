@@ -356,7 +356,7 @@ func (c *ModelServingController) finishCoordinatedSurge(ctx context.Context, ms 
 	c.enqueueModelServingAfter(ms, enqueueAfter)
 	surge, err := utils.GetMaxSurgeForRole(role)
 	if err != nil {
-		return true, nil
+		return true, err
 	}
 	formal := 0
 	for _, instance := range instances {
@@ -395,7 +395,7 @@ func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms 
 	_, unavailable := c.outdatedRolesInRound(ctx, ms, datastore.ServingGroup{Name: group}, role, ledger)
 	budget, err := roleRolloutBudget(role, ledger, unavailable)
 	if err != nil {
-		return true, nil
+		return true, err
 	}
 	excess := len(instances) - expected
 	for i := len(instances) - 1; i >= 0 && excess > 0; i-- {
@@ -405,17 +405,20 @@ func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms 
 			if ms.ResourceVersion != "" {
 				actionCtx = withCoordinatedRound(ctx, ms)
 				if err := c.refreshCoordinatedAvailabilityInRound(actionCtx, ms); err != nil {
-					return true, nil
+					return true, err
 				}
 				current, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group, role.Name)
 				if err != nil {
-					return true, nil
+					return true, err
 				}
 				marked, err := c.surgePodsInRound(actionCtx, ms, surgeRole, group, role.Name)
-				if err != nil || !markedSurgeNames(marked, surgeRole, roleReplicas(role)).Has(instance.Name) {
+				if err != nil {
+					return true, err
+				}
+				if !markedSurgeNames(marked, surgeRole, roleReplicas(role)).Has(instance.Name) {
 					continue
 				}
-				at := slices.IndexFunc(current, func(r datastore.Role) (bool, error) { return r.Name == instance.Name })
+				at := slices.IndexFunc(current, func(r datastore.Role) bool { return r.Name == instance.Name })
 				if at < 0 || current[at].Status == datastore.RoleDeleting {
 					continue
 				}
@@ -423,7 +426,7 @@ func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms 
 				_, unavailable := c.outdatedRolesInRound(actionCtx, ms, datastore.ServingGroup{Name: group}, role, current)
 				budget, err = roleRolloutBudget(role, current, unavailable)
 				if err != nil {
-					return true, nil
+					return true, err
 				}
 			}
 			comparison := c.compareRoleTemplate(actionCtx, ms, datastore.ServingGroup{Name: group}, role.Name, instance)

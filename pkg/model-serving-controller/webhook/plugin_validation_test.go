@@ -29,6 +29,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -177,6 +178,33 @@ func TestModelServingValidatorPluginsCreate(t *testing.T) {
 		}
 		response := admitPlugins(t, admissionv1.Create, nil, ms)
 		require.True(t, response.Allowed, "%+v", response.Result)
+	}
+}
+
+func TestModelServingUpdateEnforcesPluginAndCoordinationImmutability(t *testing.T) {
+	old := pluginImmutableFixture()
+	second := *old.Spec.Template.Roles[0].DeepCopy()
+	second.Name = "decode"
+	old.Spec.Template.Roles = append(old.Spec.Template.Roles, second)
+	old.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate, RoleCoordination: &workloadv1alpha1.RoleCoordination{MaxSkew: ptr.To(intstr.FromString("50%"))}}
+	for _, change := range []string{"none", "plugins", "coordination", "both"} {
+		t.Run(change, func(t *testing.T) {
+			next := old.DeepCopy()
+			if change == "plugins" || change == "both" {
+				next.Spec.Plugins = nil
+			}
+			if change == "coordination" || change == "both" {
+				next.Spec.RolloutStrategy.RoleCoordination.MaxSkew = ptr.To(intstr.FromString("100%"))
+			}
+			response := admitPlugins(t, admissionv1.Update, old, next)
+			require.Equal(t, change == "none", response.Allowed, "%+v", response.Result)
+			if change == "plugins" || change == "both" {
+				require.Contains(t, response.Result.Message, "spec.plugins: Forbidden")
+			}
+			if change == "coordination" || change == "both" {
+				require.Contains(t, response.Result.Message, "roleCoordination")
+			}
+		})
 	}
 }
 

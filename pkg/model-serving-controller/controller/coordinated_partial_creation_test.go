@@ -92,7 +92,7 @@ func TestCoordinatedPartialExpansionReservesOneStartAndRepairsItsWorker(t *testi
 			// Creation remains an ordinary expansion. Once its entry is
 			// accepted, that partial formal target must consume one of the
 			// two cumulative starts available to subsequent old replacements.
-			require.NoError(t, f.controller.syncModelServing(context.Background(), f.ms.Namespace+"/"+f.ms.Name))
+			require.ErrorContains(t, f.controller.syncModelServing(context.Background(), f.ms.Namespace+"/"+f.ms.Name), "injected one worker failure")
 			acceptedUIDs := map[string]types.UID{}
 			reservationsBeforeRepair := map[string]int{}
 			for _, role := range f.ms.Spec.Template.Roles {

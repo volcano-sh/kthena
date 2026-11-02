@@ -56,7 +56,7 @@ func hiddenCoordinatedMember(t *testing.T, c *ModelServingController, ms *api.Mo
 	id, hash := utils.GenerateRoleID(role.Name, ordinal), utils.CalRoleTemplateHash(role)
 	pod := utils.GenerateEntryPod(*role.DeepCopy(), ms, group, id, revision, hash)
 	if member > 0 {
-		pod = utils.GenerateWorkerPod(*role.DeepCopy(), ms, pod, group, id, member, revision, hash)
+		pod = utils.GenerateWorkerPod(*role.DeepCopy(), ms, group, id, member, revision, hash)
 	}
 	pod.UID = types.UID(pod.Name + "-live")
 	if mutate != nil {

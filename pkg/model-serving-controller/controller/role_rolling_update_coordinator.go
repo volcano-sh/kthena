@@ -333,8 +333,8 @@ func (c *ModelServingController) persistCoordinatedRoleRevision(
 		}
 	}
 
-	if !metav1.IsControlledBy(controllerRevision, ms) {
-		return fmt.Errorf("ControllerRevision %s belongs to another ModelServing UID", revision)
+	if err := validateControllerRevisionOwner(ms, controllerRevision); err != nil {
+		return err
 	}
 	replicasByRole := make(map[string]int32, len(ms.Spec.Template.Roles))
 	for _, role := range ms.Spec.Template.Roles {
@@ -416,17 +416,18 @@ func (c *ModelServingController) roleSpecsFromRevisionInRound(ctx context.Contex
 func (c *ModelServingController) readCoordinatedRevision(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) (map[string]workloadv1alpha1.Role, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	controllerRevision, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revision)
+	controllerRevision, err := c.controllerRevisionInRound(ctx, ms, revision)
 	if err != nil {
 		return nil, err
 	}
-	if controllerRevision == nil || !metav1.IsControlledBy(controllerRevision, ms) {
+	if controllerRevision == nil {
 		return nil, fmt.Errorf("controller revision %s is missing or not controlled by the current ModelServing UID", revision)
 	}
-	oldRoles, err := utils.GetRolesFromControllerRevision(controllerRevision)
+	historical, err := modelServingFromControllerRevision(ms, controllerRevision, true)
 	if err != nil {
 		return nil, err
 	}
+	oldRoles := historical.Spec.Template.Roles
 	if baseline := controllerRevision.Annotations[coordinatedRoleReplicaBaselineAnnotation]; baseline != "" {
 		var replicasByRole map[string]int32
 		if err := json.Unmarshal([]byte(baseline), &replicasByRole); err != nil {

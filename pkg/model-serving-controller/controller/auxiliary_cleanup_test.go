@@ -146,7 +146,7 @@ func TestLegacyDNSDoesNotBlockRoleShrink(t *testing.T) {
 	chain, err := c.buildPluginChain(ms)
 	require.NoError(t, err)
 	client.PrependReactor("delete", "pods", func(kt.Action) (bool, runtime.Object, error) { return true, nil, nil })
-	require.NoError(t, c.manageRoleReplicasPerGroup(context.Background(), ms, "cleanup-0", role, 0, "v1", chain))
+	require.NoError(t, c.manageRoleReplicasPerGroup(context.Background(), ms, "cleanup-0", role, 0, "v1", true, chain))
 	found := false
 	for _, a := range client.Actions() {
 		if a.Matches("delete", "pods") {
