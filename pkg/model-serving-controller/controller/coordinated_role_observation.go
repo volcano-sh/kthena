@@ -343,20 +343,20 @@ func (c *ModelServingController) adoptCoordinatedSurge(ctx context.Context, ms *
 // A temporary target can occupy the desired count after the last old instance
 // disappears. Restore the missing formal slot before retiring that temporary
 // capacity; object count alone does not establish rollout completion.
-func (c *ModelServingController) finishCoordinatedSurge(ctx context.Context, ms *api.ModelServing, group string, role api.Role, instances []datastore.Role, groupOrdinal int, revision string, allowTargetStart bool) bool {
+func (c *ModelServingController) finishCoordinatedSurge(ctx context.Context, ms *api.ModelServing, group string, role api.Role, instances []datastore.Role, groupOrdinal int, revision string, allowTargetStart bool) (bool, error) {
 	pods, err := c.surgePodsInRound(ctx, ms, surgeRole, group, role.Name)
 	if err != nil {
 		c.enqueueModelServingAfter(ms, enqueueAfter)
-		return true
+		return true, err
 	}
 	temporary := markedSurgeNames(pods, surgeRole, roleReplicas(role))
 	if temporary.Len() == 0 {
-		return false
+		return false, nil
 	}
 	c.enqueueModelServingAfter(ms, enqueueAfter)
 	surge, err := utils.GetMaxSurgeForRole(role)
 	if err != nil {
-		return true
+		return true, err
 	}
 	formal := 0
 	for _, instance := range instances {
@@ -367,8 +367,7 @@ func (c *ModelServingController) finishCoordinatedSurge(ctx context.Context, ms 
 	missing := max(0, roleReplicas(role)-formal)
 	toCreate := min(missing, max(0, roleReplicas(role)+surge-len(instances)))
 	if toCreate > 0 {
-		c.scaleUpRoles(ctx, ms, group, role, instances, len(instances)+toCreate, groupOrdinal, revision, allowTargetStart)
-		return true
+		return true, c.scaleUpRoles(ctx, ms, group, role, instances, len(instances)+toCreate, groupOrdinal, revision, allowTargetStart)
 	}
 	// With surge reduced to zero, free only the availability-permitted temporary
 	// slots. Their disappearance then allows ordinary formal refill.
@@ -376,27 +375,27 @@ func (c *ModelServingController) finishCoordinatedSurge(ctx context.Context, ms 
 	if missing > 0 && surge == 0 {
 		expected = len(instances) - missing
 	}
-	c.retireCoordinatedSurge(ctx, ms, group, role, instances, expected)
-	return true
+	_, err = c.retireCoordinatedSurge(ctx, ms, group, role, instances, expected)
+	return true, err
 }
 
 // Cleanup never selects a formal target merely because a healthy surge makes
 // total capacity exceed desired. Every healthy deletion spends actual credit.
-func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms *api.ModelServing, group string, role api.Role, instances []datastore.Role, expected int) bool {
+func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms *api.ModelServing, group string, role api.Role, instances []datastore.Role, expected int) (bool, error) {
 	pods, err := c.surgePodsInRound(ctx, ms, surgeRole, group, role.Name)
 	if err != nil {
 		c.enqueueModelServingAfter(ms, enqueueAfter)
-		return true
+		return true, err
 	}
 	temporary := markedSurgeNames(pods, surgeRole, roleReplicas(role))
 	if temporary.Len() == 0 {
-		return false
+		return false, nil
 	}
 	ledger := slices.Clone(instances)
 	_, unavailable := c.outdatedRolesInRound(ctx, ms, datastore.ServingGroup{Name: group}, role, ledger)
 	budget, err := roleRolloutBudget(role, ledger, unavailable)
 	if err != nil {
-		return true
+		return true, err
 	}
 	excess := len(instances) - expected
 	for i := len(instances) - 1; i >= 0 && excess > 0; i-- {
@@ -406,14 +405,17 @@ func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms 
 			if ms.ResourceVersion != "" {
 				actionCtx = withCoordinatedRound(ctx, ms)
 				if err := c.refreshCoordinatedAvailabilityInRound(actionCtx, ms); err != nil {
-					return true
+					return true, err
 				}
 				current, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group, role.Name)
 				if err != nil {
-					return true
+					return true, err
 				}
 				marked, err := c.surgePodsInRound(actionCtx, ms, surgeRole, group, role.Name)
-				if err != nil || !markedSurgeNames(marked, surgeRole, roleReplicas(role)).Has(instance.Name) {
+				if err != nil {
+					return true, err
+				}
+				if !markedSurgeNames(marked, surgeRole, roleReplicas(role)).Has(instance.Name) {
 					continue
 				}
 				at := slices.IndexFunc(current, func(r datastore.Role) bool { return r.Name == instance.Name })
@@ -424,7 +426,7 @@ func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms 
 				_, unavailable := c.outdatedRolesInRound(actionCtx, ms, datastore.ServingGroup{Name: group}, role, current)
 				budget, err = roleRolloutBudget(role, current, unavailable)
 				if err != nil {
-					return true
+					return true, err
 				}
 			}
 			comparison := c.compareRoleTemplate(actionCtx, ms, datastore.ServingGroup{Name: group}, role.Name, instance)
@@ -434,11 +436,14 @@ func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms 
 			if (comparison == templateDifferent || instance.Status == datastore.RoleRunning) && !budget.take(instance.Status == datastore.RoleRunning) {
 				continue
 			}
-			c.DeleteRole(actionCtx, ms, group, role.Name, instance.Name)
+			if err := c.DeleteRole(actionCtx, ms, group, role.Name, instance.Name); err != nil {
+				c.enqueueModelServingAfter(ms, enqueueAfter)
+				return true, err
+			}
 			excess--
 		}
 	}
-	return true
+	return true, nil
 }
 
 func (c *ModelServingController) refreshCoordinatedAvailability(ms *api.ModelServing) error {

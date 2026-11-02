@@ -232,6 +232,9 @@ func (c *LWSController) syncHandler(ctx context.Context, key string) error {
 				namespace, msName, lws.Name)
 		}
 		desiredMs := c.constructModelServing(lws)
+		if err := msplugins.PreserveChildPluginConfiguration(ms, desiredMs); err != nil {
+			return err
+		}
 		if !reflect.DeepEqual(ms.Spec, desiredMs.Spec) {
 			msCopy := ms.DeepCopy()
 			msCopy.Spec = desiredMs.Spec
@@ -359,12 +362,18 @@ func (c *LWSController) constructModelServing(lws *lwsv1.LeaderWorkerSet) *workl
 					Name: msplugins.LWSLabelsPluginName,
 					Type: workloadv1alpha1.PluginTypeBuiltIn,
 				},
+				{
+					Name: msplugins.HeadlessServicePluginName,
+					Type: workloadv1alpha1.PluginTypeBuiltIn,
+				},
 			},
 			Template: workloadv1alpha1.ServingGroup{
 				Roles: []workloadv1alpha1.Role{role},
 			},
 		},
 	}
+	// Keep the plugin chain stable through size=1 transitions. LWS retains a
+	// worker template at size=1, so discovery also applies to its single Pod.
 	return ms
 }
 

@@ -118,8 +118,9 @@ func buildRevisionPatch(ms *workloadv1alpha1.ModelServing) (*modelServingRevisio
 	roles := make([]modelServingRevisionRole, len(normalized.Spec.Template.Roles))
 	for i := range normalized.Spec.Template.Roles {
 		role := &normalized.Spec.Template.Roles[i]
-		normalizePodTemplate(&role.EntryTemplate, normalized.Spec.SchedulerName)
-		normalizePodTemplate(role.WorkerTemplate, normalized.Spec.SchedulerName)
+		generatedEntryAddress := headlessOwnsEntryAddress(plugins, role)
+		normalizePodTemplate(&role.EntryTemplate, normalized.Spec.SchedulerName, generatedEntryAddress)
+		normalizePodTemplate(role.WorkerTemplate, normalized.Spec.SchedulerName, generatedEntryAddress)
 		roles[i] = modelServingRevisionRole{
 			Name:           role.Name,
 			EntryTemplate:  role.EntryTemplate,
@@ -142,10 +143,10 @@ func buildRevisionPatch(ms *workloadv1alpha1.ModelServing) (*modelServingRevisio
 	}, nil
 }
 
-// normalizePodTemplate removes only differences that ModelServing itself
-// overwrites before plugins render the workload. Kubernetes Pod API defaults
+// normalizePodTemplate removes only values overwritten by the controller or
+// the applicable headless-service plugin. Kubernetes Pod API defaults
 // remain part of the template because plugins can observe the pre-admission Pod.
-func normalizePodTemplate(template *workloadv1alpha1.PodTemplateSpec, schedulerName string) {
+func normalizePodTemplate(template *workloadv1alpha1.PodTemplateSpec, schedulerName string, generatedEntryAddress bool) {
 	if template == nil {
 		return
 	}
@@ -156,18 +157,42 @@ func normalizePodTemplate(template *workloadv1alpha1.PodTemplateSpec, schedulerN
 	spec := &template.Spec
 	spec.SchedulerName = schedulerName
 	for i := range spec.InitContainers {
-		removeControllerOwnedEnv(&spec.InitContainers[i])
+		removeControllerOwnedEnv(&spec.InitContainers[i], generatedEntryAddress)
 	}
 	for i := range spec.Containers {
-		removeControllerOwnedEnv(&spec.Containers[i])
+		removeControllerOwnedEnv(&spec.Containers[i], generatedEntryAddress)
 	}
 }
 
-func removeControllerOwnedEnv(container *corev1.Container) {
+// Keep this applicability check aligned with headless-service OnPodCreate and
+// plugin scope dispatch. utils cannot import plugins, which depends on utils.
+func headlessOwnsEntryAddress(specs []workloadv1alpha1.PluginSpec, role *workloadv1alpha1.Role) bool {
+	if role.WorkerTemplate == nil {
+		return false
+	}
+	for _, spec := range specs {
+		if spec.Name != "headless-service" || spec.Type != workloadv1alpha1.PluginTypeBuiltIn {
+			continue
+		}
+		if spec.Scope == nil {
+			return true
+		}
+		if len(spec.Scope.Roles) > 0 && !slices.Contains(spec.Scope.Roles, role.Name) {
+			continue
+		}
+		// The headless plugin rejects Entry/Worker-only targets at construction.
+		return spec.Scope.Target == "" || spec.Scope.Target == workloadv1alpha1.PluginTargetAll
+	}
+	return false
+}
+
+func removeControllerOwnedEnv(container *corev1.Container, generatedEntryAddress bool) {
 	container.Env = slices.DeleteFunc(container.Env, func(env corev1.EnvVar) bool {
 		switch env.Name {
-		case workloadv1alpha1.GroupSizeEnv, workloadv1alpha1.EntryAddressEnv, workloadv1alpha1.WorkerIndexEnv:
+		case workloadv1alpha1.GroupSizeEnv, workloadv1alpha1.WorkerIndexEnv:
 			return true
+		case workloadv1alpha1.EntryAddressEnv:
+			return generatedEntryAddress
 		default:
 			return false
 		}

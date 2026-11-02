@@ -40,6 +40,7 @@ import (
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	plugins "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	controllerutils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
@@ -382,6 +383,10 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 	// so that headless services are actually created by the controller.
 	workerRole := createRole("prefill", 1, 1)
 	modelServing := createBasicModelServing("test-svc-sg-delete", 3, 0, workerRole)
+	modelServing.Spec.Plugins = append(modelServing.Spec.Plugins, workload.PluginSpec{
+		Name: plugins.HeadlessServicePluginName,
+		Type: workload.PluginTypeBuiltIn,
+	})
 
 	t.Log("Creating ModelServing with 3 servingGroup replicas and WorkerTemplate")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -390,27 +395,56 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get ModelServing")
 
-	// Wait for initial headless services to be created (one per servingGroup)
+	// Require both exact Services per surviving Role, including sparse group identities.
 	labelSelector := modelServingLabelSelector(modelServing.Name)
-	require.Eventually(t, func() bool {
-		serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
+	servicesMatchLiveGroups := func(wantGroups int) bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 		if err != nil {
 			return false
 		}
-		headlessCount := 0
-		for _, svc := range serviceList.Items {
-			for _, ref := range svc.OwnerReferences {
-				if ref.UID == ms.UID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
-					headlessCount++
-					break
-				}
+		groups := map[string]bool{}
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if metav1.IsControlledBy(pod, ms) && pod.DeletionTimestamp == nil && pod.Labels[workload.GroupNameLabelKey] != "" {
+				groups[pod.Labels[workload.GroupNameLabelKey]] = true
 			}
 		}
-		t.Logf("Initial headless service count: %d (expecting 3)", headlessCount)
-		return headlessCount == 3
-	}, 30*time.Second, 1*time.Second, "Expected 3 headless services (one per servingGroup)")
+		if len(groups) != wantGroups {
+			return false
+		}
+		expected := map[string]bool{}
+		serviceGroups := map[string]string{}
+		for group := range groups {
+			entry := controllerutils.GeneratePodName(group, "prefill-0", 0)
+			expected[entry] = true
+			expected[plugins.DiscoveryServiceName(entry)] = false
+			serviceGroups[entry] = group
+			serviceGroups[plugins.DiscoveryServiceName(entry)] = group
+		}
+		services, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false
+		}
+		seen := 0
+		for i := range services.Items {
+			svc := &services.Items[i]
+			if !metav1.IsControlledBy(svc, ms) {
+				continue
+			}
+			entryOnly, ok := expected[svc.Name]
+			if !ok || svc.Spec.ClusterIP != corev1.ClusterIPNone || !svc.Spec.PublishNotReadyAddresses || svc.DeletionTimestamp != nil {
+				return false
+			}
+			entryValue, hasEntrySelector := svc.Spec.Selector[workload.EntryLabelKey]
+			if (entryOnly && entryValue != "true") || (!entryOnly && hasEntrySelector) || svc.Spec.Selector[workload.GroupNameLabelKey] != serviceGroups[svc.Name] || svc.Spec.Selector[workload.RoleLabelKey] != "prefill" || svc.Spec.Selector[workload.RoleIDKey] != "prefill-0" {
+				return false
+			}
+			seen++
+		}
+		return seen == 2*wantGroups
+	}
+	require.Eventually(t, func() bool { return servicesMatchLiveGroups(3) }, 30*time.Second, time.Second,
+		"Expected exactly three owned entry/discovery pairs")
 
 	// Scale down to 1 replica (removing 2 servingGroups)
 	scaleDownMS := ms.DeepCopy()
@@ -424,30 +458,9 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 	// Wait for the ModelServing to be ready
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
-	// Verify headless services were cleaned up: should go from 3 to exactly 1
-	require.Eventually(t, func() bool {
-		currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		services, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return false
-		}
-		headlessCount := 0
-		for _, svc := range services.Items {
-			for _, ref := range svc.OwnerReferences {
-				if ref.UID == currentMS.UID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
-					headlessCount++
-					break
-				}
-			}
-		}
-		t.Logf("Current headless service count: %d (expecting 1)", headlessCount)
-		return headlessCount == 1
-	}, 2*time.Minute, 5*time.Second, "Headless services were not cleaned up after servingGroup deletion")
+	// Both Services for deleted Roles must disappear, leaving the survivor's pair.
+	require.Eventually(t, func() bool { return servicesMatchLiveGroups(1) }, 2*time.Minute, 5*time.Second,
+		"Expected only the surviving Role's owned entry/discovery pair")
 
 	t.Log("ModelServing headless service cleanup on servingGroup delete test passed successfully")
 }
@@ -531,6 +544,10 @@ func TestModelServingServiceRecovery(t *testing.T) {
 	// Create a ModelServing with a WorkerTemplate so that headless services are created
 	workerRole := createRole("prefill", 1, 1)
 	modelServing := createBasicModelServing("test-service-recovery", 1, 0, workerRole)
+	modelServing.Spec.Plugins = append(modelServing.Spec.Plugins, workload.PluginSpec{
+		Name: plugins.HeadlessServicePluginName,
+		Type: workload.PluginTypeBuiltIn,
+	})
 
 	t.Log("Creating ModelServing for service recovery test")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -566,13 +583,13 @@ func TestModelServingServiceRecovery(t *testing.T) {
 		}
 	}
 
-	// If no headless Service owned by the ModelServing exists, gracefully skip the test
-	if originalService == nil {
-		t.Log("No headless Service owned by ModelServing found, skipping service recovery test")
-		t.Skip()
-	}
+	require.NotNil(t, originalService, "Expected an opted-in Headless Service owned by the ModelServing")
 
 	t.Logf("Deleting headless Service %s (UID: %s)", originalService.Name, originalServiceUID)
+
+	beforePods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	require.NoError(t, err)
+	require.NotEmpty(t, beforePods.Items)
 
 	// Delete the Service
 	err = kubeClient.CoreV1().Services(testNamespace).Delete(ctx, originalService.Name, metav1.DeleteOptions{})
@@ -596,7 +613,7 @@ func TestModelServingServiceRecovery(t *testing.T) {
 				}
 			}
 			// Return true if it's a new service (different UID) owned by the ModelServing and is headless
-			if ownedByMS && string(svc.UID) != originalServiceUID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
+			if ownedByMS && svc.Name == originalService.Name && string(svc.UID) != originalServiceUID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
 				t.Logf("New Service created: %s (UID: %s)", svc.Name, svc.UID)
 				return true
 			}
@@ -606,6 +623,12 @@ func TestModelServingServiceRecovery(t *testing.T) {
 
 	// Verify ModelServing is still ready
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	for _, originalPod := range beforePods.Items {
+		actualPod, err := kubeClient.CoreV1().Pods(testNamespace).Get(ctx, originalPod.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, originalPod.UID, actualPod.UID, "Service recovery must preserve every existing Pod UID")
+	}
 
 	t.Log("ModelServing service recovery test passed")
 }

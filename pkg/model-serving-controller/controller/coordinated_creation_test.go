@@ -56,7 +56,7 @@ func hiddenCoordinatedMember(t *testing.T, c *ModelServingController, ms *api.Mo
 	id, hash := utils.GenerateRoleID(role.Name, ordinal), utils.CalRoleTemplateHash(role)
 	pod := utils.GenerateEntryPod(*role.DeepCopy(), ms, group, id, revision, hash)
 	if member > 0 {
-		pod = utils.GenerateWorkerPod(*role.DeepCopy(), ms, pod, group, id, member, revision, hash)
+		pod = utils.GenerateWorkerPod(*role.DeepCopy(), ms, group, id, member, revision, hash)
 	}
 	pod.UID = types.UID(pod.Name + "-live")
 	if mutate != nil {
@@ -355,7 +355,9 @@ func TestCoordinatedSurgeCleanupRechecksHealthyCapacityAfterPlanning(t *testing.
 			}
 			client := c.kubeClientSet.(*kubefake.Clientset)
 			client.ClearActions()
-			require.True(t, c.retireCoordinatedSurge(planning, ms, group, prefill, instances, 2))
+			handled, err := c.retireCoordinatedSurge(planning, ms, group, prefill, instances, 2)
+			require.NoError(t, err)
+			require.True(t, handled)
 			if lostWorker {
 				requireNoMergeReadyPodMutations(t, client.Actions())
 				require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group, prefill.Name, "prefill-2"))

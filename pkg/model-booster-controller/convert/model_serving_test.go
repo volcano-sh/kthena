@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/env"
+	msplugins "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
@@ -427,6 +428,7 @@ func TestBuildModelServingWorkerPodsToWorkerReplicas(t *testing.T) {
 			got, err := BuildModelServing(model)
 			require.NoError(t, err)
 			require.Len(t, got.Spec.Template.Roles, 1)
+			assert.Equal(t, []workload.PluginSpec{{Name: msplugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}}, got.Spec.Plugins)
 
 			workerReplicas := got.Spec.Template.Roles[0].WorkerReplicas
 			assert.GreaterOrEqual(t, workerReplicas, int32(0), "workerReplicas must never be negative")

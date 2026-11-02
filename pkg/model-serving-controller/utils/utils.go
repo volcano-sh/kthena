@@ -27,7 +27,6 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -105,12 +104,12 @@ func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServ
 	entryPod.Spec = role.EntryTemplate.Spec
 	entryPod.Spec.SchedulerName = ms.Spec.SchedulerName
 	// Build environment variables into each container of all pod
-	envVars := createCommonEnvVars(role, entryPod, 0)
-	addPodEnvVars(entryPod, envVars...)
+	envVars := createCommonEnvVars(role, 0)
+	AddPodEnvVars(entryPod, envVars...)
 	return entryPod
 }
 
-func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName, roleID string, podIndex int, revision, roleTemplateHash string) *corev1.Pod {
+func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName, roleID string, podIndex int, revision, roleTemplateHash string) *corev1.Pod {
 	if role.WorkerTemplate == nil {
 		klog.Errorf("WorkerTemplate is required when workerReplicas > 0 for role %s", role.Name)
 		return nil
@@ -121,8 +120,8 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelSer
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
 	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
-	envVars := createCommonEnvVars(role, entryPod, podIndex)
-	addPodEnvVars(workerPod, envVars...)
+	envVars := createCommonEnvVars(role, podIndex)
+	AddPodEnvVars(workerPod, envVars...)
 	return workerPod
 }
 
@@ -172,16 +171,11 @@ func addPodLabelAndAnnotation(pod *corev1.Pod, metadata *workloadv1alpha1.Metada
 	}
 }
 
-func createCommonEnvVars(role workloadv1alpha1.Role, entryPod *corev1.Pod, workerIndex int) []corev1.EnvVar {
+func createCommonEnvVars(role workloadv1alpha1.Role, workerIndex int) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{
 			Name:  workloadv1alpha1.GroupSizeEnv,
 			Value: strconv.Itoa(int(role.WorkerReplicas) + 1),
-		},
-		{
-			Name: workloadv1alpha1.EntryAddressEnv,
-			// entryPod name as same as headless service name
-			Value: entryPod.GetName() + "." + entryPod.Namespace,
 		},
 		{
 			Name:  workloadv1alpha1.WorkerIndexEnv,
@@ -190,8 +184,9 @@ func createCommonEnvVars(role workloadv1alpha1.Role, entryPod *corev1.Pod, worke
 	}
 }
 
-// addPodEnvVars adds new env vars to the container.
-func addPodEnvVars(pod *corev1.Pod, newEnvVars ...corev1.EnvVar) {
+// AddPodEnvVars adds or replaces environment variables in every container and
+// init container of a Pod.
+func AddPodEnvVars(pod *corev1.Pod, newEnvVars ...corev1.EnvVar) {
 	if pod == nil {
 		return
 	}
@@ -239,8 +234,17 @@ func newModelServingOwnerRef(ms *workloadv1alpha1.ModelServing) metav1.OwnerRefe
 	}
 }
 
-func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, ms *workloadv1alpha1.ModelServing, serviceSelector map[string]string, groupName, roleLabel string, roleIndex int) error {
+func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, ms *workloadv1alpha1.ModelServing, serviceSelector map[string]string, groupName, roleLabel string, roleIndex int, additionalLabels map[string]string) error {
 	serviceName := GeneratePodName(groupName, GenerateRoleID(roleLabel, roleIndex), 0)
+	serviceLabels := map[string]string{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		workloadv1alpha1.GroupNameLabelKey:        groupName,
+		workloadv1alpha1.RoleLabelKey:             roleLabel,
+		workloadv1alpha1.RoleIDKey:                GenerateRoleID(roleLabel, roleIndex),
+	}
+	for key, value := range additionalLabels {
+		serviceLabels[key] = value
+	}
 	headlessService := corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      serviceName,
@@ -248,12 +252,7 @@ func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, 
 			OwnerReferences: []metav1.OwnerReference{
 				newModelServingOwnerRef(ms),
 			},
-			Labels: map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
-				workloadv1alpha1.GroupNameLabelKey:        groupName,
-				workloadv1alpha1.RoleLabelKey:             roleLabel,
-				workloadv1alpha1.RoleIDKey:                GenerateRoleID(roleLabel, roleIndex),
-			},
+			Labels: serviceLabels,
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP:                "None", // defines service as headless
@@ -264,13 +263,7 @@ func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, 
 	// create the service in the cluster
 	klog.V(4).Infof("Creating headless service %s", headlessService.Name)
 	_, err := k8sClient.CoreV1().Services(ms.Namespace).Create(ctx, &headlessService, metav1.CreateOptions{})
-
-	if err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create headless service failed: %v", err)
-		}
-	}
-	return nil
+	return err
 }
 
 func GetModelServingAndGroupByLabel(podLabels map[string]string) (string, string, bool) {

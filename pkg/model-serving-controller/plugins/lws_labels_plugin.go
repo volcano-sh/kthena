@@ -84,6 +84,14 @@ func (p *LWSLabelsPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+func (p *LWSLabelsPlugin) OnRoleSync(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
+func (p *LWSLabelsPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 // SupportsInPlaceUpdate is true, because an image patch does not change these labels.
 func (p *LWSLabelsPlugin) SupportsInPlaceUpdate() bool {
 	return true

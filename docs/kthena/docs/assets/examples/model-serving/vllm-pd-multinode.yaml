@@ -7,6 +7,9 @@ spec:
   schedulerName: volcano
   replicas: 1
   recoveryPolicy: ServingGroupRecreate
+  plugins:
+    - name: headless-service
+      type: BuiltIn
   template:
     restartGracePeriodSeconds: 60
     gangPolicy:

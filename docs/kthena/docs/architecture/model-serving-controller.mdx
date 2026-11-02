@@ -62,5 +62,12 @@ Read the [examples](https://github.com/volcano-sh/kthena/tree/main/examples/mode
 | Key           | Description                                                         | Example                                         | Applies to |
 |---------------|---------------------------------------------------------------------|-------------------------------------------------|------------|
 | GROUP_SIZE    | The environment variable for the serving Role instance size       | 4                                               | pod        |
-| ENTRY_ADDRESS | The address of the Entry via the headless service                   | sample-0-decode-0-0.sample-0-decode-0-0.default | pod        |
+| ENTRY_ADDRESS | Entry-only Service address, injected by `headless-service` for Roles with a worker template | sample-0-decode-0-0.default | Entry and Worker Pods in plugin scope |
 | WORKER_INDEX  | The index or identity of the pod within the serving Role instance | 0                                               | pod        |
+
+The `headless-service` plugin also maintains a separate discovery Service for
+individual Entry and Worker DNS records. New Pods use their generated names as
+hostnames and that discovery Service as their subdomain. Both Services publish
+addresses before readiness. Configure the plugin at ModelServing creation;
+existing plugin chains cannot be added, removed, or substantively changed in
+place. See [plugin configuration and migration](../user-guide/modelserving-plugin-framework.md#upgrade-and-migration).

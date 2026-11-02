@@ -158,7 +158,7 @@ func TestCoordinatedActionRechecksDependencyBudgetAndReplacementAfterPlanning(t 
 					require.NoError(t, err)
 				case "candidate-replaced-with-target":
 					entry := utils.GenerateEntryPod(*prefillTarget.DeepCopy(), ms, group, "prefill-1", targetRevision, utils.CalRoleTemplateHash(prefillTarget))
-					worker := utils.GenerateWorkerPod(*prefillTarget.DeepCopy(), ms, entry, group, "prefill-1", 1, targetRevision, utils.CalRoleTemplateHash(prefillTarget))
+					worker := utils.GenerateWorkerPod(*prefillTarget.DeepCopy(), ms, group, "prefill-1", 1, targetRevision, utils.CalRoleTemplateHash(prefillTarget))
 					for i, replacement := range []*corev1.Pod{entry, worker} {
 						replacement.UID = types.UID(string(candidate[i].UID) + "-target")
 						replacement.Status = *candidate[i].Status.DeepCopy()
@@ -236,9 +236,11 @@ func TestCoordinatedScaleDownRetainsHistorySafetyForTheSurvivingGroup(t *testing
 				if action.GetResource().Resource != "pods" || action.GetVerb() == "list" || action.GetVerb() == "get" {
 					continue
 				}
-				deletion, ok := action.(clienttesting.DeleteCollectionAction)
+				deletion, ok := action.(clienttesting.DeleteAction)
 				require.True(t, ok, "only the selected excess group may have a Pod mutation; got %s", action.GetVerb())
-				require.Equal(t, api.GroupNameLabelKey+"="+discarded, deletion.GetListRestrictions().Labels.String())
+				require.Contains(t, deletion.GetName(), discarded+"-")
+				require.NotNil(t, deletion.GetDeleteOptions().Preconditions)
+				require.NotEmpty(t, *deletion.GetDeleteOptions().Preconditions.UID)
 				deleted = true
 			}
 			require.True(t, deleted, "the same normal scale-down candidate must be removed in both history placements")

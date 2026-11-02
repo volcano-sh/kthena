@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -84,7 +85,7 @@ func newCoordinatedInPlaceFixture(t *testing.T) *coordinatedInPlaceFixture {
 		for ordinal := 0; ordinal < int(*role.Replicas); ordinal++ {
 			id, hash := utils.GenerateRoleID(role.Name, ordinal), utils.CalRoleTemplateHash(role)
 			entry := utils.GenerateEntryPod(*role.DeepCopy(), old, f.group, id, f.oldRev, hash)
-			worker := utils.GenerateWorkerPod(*role.DeepCopy(), old, entry, f.group, id, 1, f.oldRev, hash)
+			worker := utils.GenerateWorkerPod(*role.DeepCopy(), old, f.group, id, 1, f.oldRev, hash)
 			for _, pod := range []*corev1.Pod{entry, worker} {
 				pod.UID = types.UID(pod.Name + "-original")
 				pod.Status.Phase = corev1.PodRunning
@@ -323,6 +324,11 @@ func TestCoordinatedInPlaceFallbackAndIndependentMode(t *testing.T) {
 			}
 			require.NoError(t, f.controller.updateRole(context.Background(), f.ms, f.group, "prefill", "prefill-3"))
 			for member := 0; member < 2; member++ {
+				if !tc.inPlace {
+					_, err := f.controller.kubeClientSet.CoreV1().Pods(f.ms.Namespace).Get(context.Background(), utils.GeneratePodName(f.group, "prefill-3", member), metav1.GetOptions{})
+					require.True(t, apierrors.IsNotFound(err), "Recreate removes both selected original members")
+					continue
+				}
 				pod := f.pod(t, "prefill", 3, member)
 				if tc.inPlace {
 					require.True(t, inplace.InProgress(pod))

@@ -35,6 +35,7 @@ import (
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	kthenainformers "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	msplugins "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 )
 
 func TestConstructModelServing(t *testing.T) {
@@ -363,6 +364,14 @@ func TestConstructModelServing(t *testing.T) {
 			assert.Equal(t, expectedRole.Name, role.Name)
 			assert.Equal(t, *expectedRole.Replicas, *role.Replicas)
 			assert.Equal(t, expectedRole.WorkerReplicas, role.WorkerReplicas)
+			hasHeadlessServicePlugin := false
+			for _, plugin := range got.Spec.Plugins {
+				if plugin.Name == msplugins.HeadlessServicePluginName {
+					hasHeadlessServicePlugin = true
+					break
+				}
+			}
+			assert.True(t, hasHeadlessServicePlugin)
 
 			// Verify Templates
 			assert.Equal(t, expectedRole.EntryTemplate.Spec.Containers[0].Name, role.EntryTemplate.Spec.Containers[0].Name)
@@ -397,7 +406,7 @@ func TestLWSSyncHandlerModelServingOwnership(t *testing.T) {
 	// A ModelServing a user created with the same name as the LWS.
 	userMS := func() *workloadv1alpha1.ModelServing {
 		return &workloadv1alpha1.ModelServing{
-			ObjectMeta: metav1.ObjectMeta{Name: "team-llm", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "team-llm", Namespace: "default", UID: "existing-ms-uid", Annotations: map[string]string{"example.com/preserve": "yes"}},
 			Spec:       workloadv1alpha1.ModelServingSpec{Replicas: ptr.To(int32(3))},
 		}
 	}
@@ -411,6 +420,9 @@ func TestLWSSyncHandlerModelServingOwnership(t *testing.T) {
 		}}
 		return ms
 	}
+
+	managedMS := (&LWSController{}).constructModelServing(lws)
+	managedMS.Spec.Replicas = ptr.To(int32(3))
 
 	tests := []struct {
 		name         string
@@ -426,9 +438,15 @@ func TestLWSSyncHandlerModelServingOwnership(t *testing.T) {
 		},
 		{
 			name:         "updates a ModelServing controlled by this LWS",
-			existing:     ownedBy(userMS(), "lws-uid"),
+			existing:     managedMS,
 			wantReplicas: 1,
 			wantVerbs:    []string{"update"},
+		},
+		{
+			name:         "preserves an owned child with an incompatible immutable plugin declaration",
+			existing:     ownedBy(userMS(), "lws-uid"),
+			wantErr:      "MigrationRequired",
+			wantReplicas: 3,
 		},
 		{
 			name:         "does not touch a ModelServing with no owner",
@@ -474,7 +492,7 @@ func TestLWSSyncHandlerModelServingOwnership(t *testing.T) {
 
 			var verbs []string
 			for _, action := range kthenaClient.Actions() {
-				if action.GetVerb() == "create" || action.GetVerb() == "update" {
+				if verb := action.GetVerb(); verb == "create" || verb == "update" || verb == "patch" || verb == "delete" || verb == "delete-collection" {
 					verbs = append(verbs, action.GetVerb())
 				}
 			}
@@ -483,6 +501,9 @@ func TestLWSSyncHandlerModelServingOwnership(t *testing.T) {
 			got, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Get(context.Background(), "team-llm", metav1.GetOptions{})
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantReplicas, *got.Spec.Replicas)
+			if tt.wantErr != "" {
+				assert.Equal(t, tt.existing, got, "rejected synchronization must preserve the entire stored child")
+			}
 		})
 	}
 }

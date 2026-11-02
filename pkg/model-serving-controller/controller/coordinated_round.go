@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -39,6 +40,12 @@ type coordinatedRound struct {
 	pods       []*corev1.Pod
 	podErr     error
 	revisions  map[string]coordinatedRevision
+	snapshots  map[string]controllerRevisionObservation
+}
+
+type controllerRevisionObservation struct {
+	revision *appsv1.ControllerRevision
+	err      error
 }
 
 type coordinatedRevision struct {
@@ -52,7 +59,23 @@ func withCoordinatedRound(ctx context.Context, ms *api.ModelServing) context.Con
 	if roleCoordination(ms) == nil || ms.ResourceVersion == "" {
 		return ctx
 	}
-	return context.WithValue(ctx, coordinatedRoundKey{}, &coordinatedRound{owner: ms.UID, revisions: make(map[string]coordinatedRevision)})
+	return context.WithValue(ctx, coordinatedRoundKey{}, &coordinatedRound{owner: ms.UID, revisions: make(map[string]coordinatedRevision), snapshots: make(map[string]controllerRevisionObservation)})
+}
+
+// Full rendering and coordination must share the same immutable snapshot within
+// a planning round. Action rounds still refresh observations before a mutation.
+func (c *ModelServingController) controllerRevisionInRound(ctx context.Context, ms *api.ModelServing, revision string) (*appsv1.ControllerRevision, error) {
+	round := coordinatedRoundOf(ctx, ms)
+	if round != nil {
+		if observed, ok := round.snapshots[revision]; ok {
+			return observed.revision, observed.err
+		}
+	}
+	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revision)
+	if round != nil {
+		round.snapshots[revision] = controllerRevisionObservation{revision: cr, err: err}
+	}
+	return cr, err
 }
 
 func coordinatedRoundOf(ctx context.Context, ms *api.ModelServing) *coordinatedRound {

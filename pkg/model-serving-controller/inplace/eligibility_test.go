@@ -103,6 +103,9 @@ func TestOnlyImagesChanged(t *testing.T) {
 		},
 		{
 			name: "changes that render the same Pods",
+			base: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "headless-service", Type: workloadv1alpha1.PluginTypeBuiltIn}}
+			},
 			mutate: func(ms *workloadv1alpha1.ModelServing) {
 				ms.Spec.SchedulerName = ""
 				entry := &ms.Spec.Template.Roles[0].EntryTemplate
@@ -112,6 +115,15 @@ func TestOnlyImagesChanged(t *testing.T) {
 				setEntryImage(ms, 0, "example.com/engine:v2")
 			},
 			want: true,
+		},
+		{
+			name: "user entry address change with image requires replacement",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env = append(
+					ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env,
+					corev1.EnvVar{Name: workloadv1alpha1.EntryAddressEnv, Value: "user.example"})
+				setEntryImage(ms, 0, "example.com/engine:v2")
+			},
 		},
 		{
 			name: "Roles reordered with an image change",

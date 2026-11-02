@@ -62,7 +62,7 @@ func addMergeReadyInstance(t *testing.T, c *ModelServingController, ms *api.Mode
 		if worker == 0 {
 			pod = utils.GenerateEntryPod(*role.DeepCopy(), ms, group, id, liveRevision, liveHash)
 		} else {
-			pod = utils.GenerateWorkerPod(*role.DeepCopy(), ms, pods[0], group, id, worker, liveRevision, liveHash)
+			pod = utils.GenerateWorkerPod(*role.DeepCopy(), ms, group, id, worker, liveRevision, liveHash)
 		}
 		pod.UID = types.UID(pod.Name + "-uid")
 		pod.Status.Phase = corev1.PodRunning

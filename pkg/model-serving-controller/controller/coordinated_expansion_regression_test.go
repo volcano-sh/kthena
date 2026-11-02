@@ -29,8 +29,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
@@ -205,17 +205,15 @@ func TestCoordinatedExpansionCountsFormalStartsAgainstLaterReplacement(t *testin
 				}
 				mutations++
 				if method == api.RecreateUpdateMethod {
-					deletion, ok := action.(clienttesting.DeleteCollectionAction)
-					require.True(t, ok, "Recreate must issue one Role deletion per permitted start")
-					selector := deletion.GetListRestrictions().Labels
-					matches := 0
-					for _, role := range f.ms.Spec.Template.Roles {
-						if selector.Matches(labels.Set{api.GroupNameLabelKey: f.group, api.RoleLabelKey: role.Name, api.RoleIDKey: utils.GenerateRoleID(role.Name, 3)}) {
-							matches++
-							deletedRoles[utils.GenerateRoleID(role.Name, 3)]++
-						}
-					}
-					require.Equal(t, 1, matches, "only the highest old ordinal 3 may advance")
+					deletion, ok := action.(clienttesting.DeleteAction)
+					require.True(t, ok, "Recreate deletes each original member with its UID")
+					previous, exists := original[deletion.GetName()]
+					require.True(t, exists)
+					_, ordinal := utils.GetParentNameAndOrdinal(utils.GetRoleID(previous))
+					require.Equal(t, 3, ordinal, "only the highest old ordinal may advance")
+					require.NotNil(t, deletion.GetDeleteOptions().Preconditions)
+					require.Equal(t, previous.UID, *deletion.GetDeleteOptions().Preconditions.UID)
+					deletedRoles[utils.GetRoleID(previous)]++
 				} else {
 					patch, ok := action.(clienttesting.PatchAction)
 					require.True(t, ok, "InPlace must preserve the admitted Role's Pod identities")
@@ -226,16 +224,20 @@ func TestCoordinatedExpansionCountsFormalStartsAgainstLaterReplacement(t *testin
 				}
 			}
 			if method == api.RecreateUpdateMethod {
-				require.Equal(t, 2, mutations)
-				require.Equal(t, map[string]int{"prefill-3": 1, "decode-3": 1}, deletedRoles, "each Role spends its own single replacement allowance")
+				require.Equal(t, 4, mutations)
+				require.Equal(t, map[string]int{"prefill-3": 2, "decode-3": 2}, deletedRoles, "two members together spend each Role's single replacement allowance")
 			} else {
 				require.Equal(t, 4, mutations, "entry and worker patches reserve one Role start together")
 			}
 			for name, previous := range original {
 				actual, err := client.CoreV1().Pods(f.ms.Namespace).Get(context.Background(), name, metav1.GetOptions{})
+				_, ordinal := utils.GetParentNameAndOrdinal(utils.GetRoleID(previous))
+				if method == api.RecreateUpdateMethod && ordinal == 3 {
+					require.True(t, apierrors.IsNotFound(err), "both selected members were deleted")
+					continue
+				}
 				require.NoError(t, err)
 				require.Equal(t, previous.UID, actual.UID)
-				_, ordinal := utils.GetParentNameAndOrdinal(utils.GetRoleID(previous))
 				if method == api.InPlaceUpdateMethod && ordinal == 3 {
 					require.Equal(t, "img:v2", actual.Spec.Containers[0].Image)
 					require.True(t, inplace.InProgress(actual))

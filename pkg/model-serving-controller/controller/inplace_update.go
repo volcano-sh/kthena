@@ -174,8 +174,7 @@ func (c *ModelServingController) updateServingGroup(ctx context.Context, ms *wor
 func (c *ModelServingController) updateRole(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) error {
 	ctx = ensureRound(ctx)
 	if !roundOf(ctx).enabledFor(c, ms) || !roleBudgetAllowsInPlace(ms, roleName) {
-		c.DeleteRole(ctx, ms, groupName, roleName, roleID)
-		return nil
+		return c.DeleteRole(ctx, ms, groupName, roleName, roleID)
 	}
 	pods, err := c.ownedPodsByIndex(ms, RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, roleName, roleID))
 	if err != nil {
@@ -194,8 +193,7 @@ func (c *ModelServingController) updateRole(ctx context.Context, ms *workloadv1a
 	case decisionRecreate:
 		c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "InPlaceUpdateFallback",
 			fmt.Sprintf("Role %s/%s in ServingGroup %s is recreated instead of updated in place: %s", roleName, roleID, groupName, reason))
-		c.DeleteRole(ctx, ms, groupName, roleName, roleID)
-		return nil
+		return c.DeleteRole(ctx, ms, groupName, roleName, roleID)
 	}
 	return c.startInPlaceUpdate(ctx, ms, groupName, pods, revision)
 }
@@ -655,8 +653,7 @@ func (c *ModelServingController) recreateInPlaceUnit(ctx context.Context, ms *wo
 	if unit.roleName == "" {
 		return c.deleteServingGroup(ctx, ms, unit.groupName)
 	}
-	c.DeleteRole(ctx, ms, unit.groupName, unit.roleName, unit.roleID)
-	return nil
+	return c.DeleteRole(ctx, ms, unit.groupName, unit.roleName, unit.roleID)
 }
 
 func (c *ModelServingController) roleTemplateHashOf(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) string {
