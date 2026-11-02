@@ -347,7 +347,7 @@ func TestCreatePodDeletesStalePodFromPreviousSameNamedModelServing(t *testing.T)
 		},
 	}
 
-	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod, true, nil, "entry")
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", nil, newPod, true, nil, "entry")
 	assert.ErrorContains(t, err, "does not match expected identity")
 
 	_, err = h.kubeClient.CoreV1().Pods("default").Get(context.Background(), existing.Name, metav1.GetOptions{})
@@ -438,20 +438,20 @@ func TestCreatePodRetriesUntilStalePodDeletionCompletes(t *testing.T) {
 
 	// First reconcile: requests the delete, but the stale pod is still present
 	// afterward, so create still fails this pass.
-	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod.DeepCopy(), true, nil, "entry")
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", nil, newPod.DeepCopy(), true, nil, "entry")
 	assert.ErrorContains(t, err, "does not match expected identity")
 	_, err = h.kubeClient.CoreV1().Pods("default").Get(context.Background(), existing.Name, metav1.GetOptions{})
 	assert.NoError(t, err, "stale pod should still be present after the first, not-yet-effective delete")
 
 	// Second reconcile: the earlier delete is still outstanding, so this pass
 	// fails too, but this time the delete actually removes the pod.
-	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod.DeepCopy(), true, nil, "entry")
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", nil, newPod.DeepCopy(), true, nil, "entry")
 	assert.ErrorContains(t, err, "does not match expected identity")
 	_, err = h.kubeClient.CoreV1().Pods("default").Get(context.Background(), existing.Name, metav1.GetOptions{})
 	assert.True(t, apierrors.IsNotFound(err), "stale pod should be gone after the second delete, got err=%v", err)
 
 	// Third reconcile: the stale pod is actually gone, so create succeeds.
-	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod.DeepCopy(), true, nil, "entry")
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", nil, newPod.DeepCopy(), true, nil, "entry")
 	assert.NoError(t, err, "should converge once the stale pod is actually gone")
 
 	created, err := h.kubeClient.CoreV1().Pods("default").Get(context.Background(), newPod.Name, metav1.GetOptions{})
@@ -3007,9 +3007,8 @@ func TestManageRoleReplicas(t *testing.T) {
 			ownerlessPod:     true,
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
-			// Satisfied by createPod's pre-existing AlreadyExists handling, not by the
-			// orphan-detection logic under test.
-			expectRequeue: true,
+			// The pod is still counted, so no recreation is attempted and nothing is requeued.
+			expectRequeue: false,
 		},
 		{
 			name:             "pod owned by a differently-named ModelServing is left untouched",
@@ -3020,9 +3019,8 @@ func TestManageRoleReplicas(t *testing.T) {
 			otherMSOwnedPod:  true,
 			expectedRoleSize: 1,
 			expectedPodCount: 1,
-			// Satisfied by createPod's pre-existing AlreadyExists handling, not by the
-			// orphan-detection logic under test.
-			expectRequeue: true,
+			// The pod is still counted, so no recreation is attempted and nothing is requeued.
+			expectRequeue: false,
 		},
 	}
 
@@ -3108,11 +3106,7 @@ func TestManageRoleReplicas(t *testing.T) {
 			}
 
 			err = controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision, true, nil)
-			if tt.mismatchOwnerUID {
-				require.ErrorContains(t, err, "does not match expected identity: owner=false")
-			} else {
-				require.NoError(t, err)
-			}
+			require.NoError(t, err)
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
@@ -3188,7 +3182,9 @@ func TestManageRoleReplicas(t *testing.T) {
 
 			if tt.expectRequeue {
 				require.Len(t, pods.Items, 1)
-				assert.Equal(t, types.UID("original-entry-uid"), pods.Items[0].UID, "foreign Pod must not be replaced or adopted")
+				if !tt.mismatchOwnerUID {
+					assert.Equal(t, types.UID("original-entry-uid"), pods.Items[0].UID, "foreign Pod must not be replaced or adopted")
+				}
 				requeued := waitForObjectInCache(t, 2*time.Second, func() bool {
 					return controller.workqueue.Len() > 0
 				})

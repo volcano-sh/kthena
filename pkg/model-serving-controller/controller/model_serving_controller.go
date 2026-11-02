@@ -1424,14 +1424,16 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			}
 		}
 		ownedPods := make([]*corev1.Pod, 0, len(pods))
+		unownedPods := make(map[string]struct{})
 		staleFound := false
 		for _, pod := range pods {
 			ownerUID, isModelServingPod := modelServingOwnerUID(pod, ms.Name)
-			if !isModelServingPod {
-				// Not owned by a ModelServing named ms.Name; leave it alone.
-				continue
-			}
-			if ownerUID == ms.UID {
+			if !isModelServingPod || ownerUID == ms.UID {
+				// Owned by this ModelServing, or not owned by a ModelServing named ms.Name
+				// at all; leave it alone and keep counting it.
+				if !isModelServingPod {
+					unownedPods[pod.Name] = struct{}{}
+				}
 				ownedPods = append(ownedPods, pod)
 				continue
 			}
@@ -1513,7 +1515,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			}
 		}
 		expectedPods := 1 + int(roleToApply.WorkerReplicas)
-		if !rolePodsComplete(ms, groupName, roleObj.Name, roleToApply, revisionToUse, pods, false) {
+		if !rolePodsComplete(ms, groupName, roleObj.Name, roleToApply, revisionToUse, pods, false) && !unownedPodsFillRole(groupName, roleObj.Name, roleToApply, pods, unownedPods) {
 			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 			if err := c.createPodsByRoleWithContext(ctx, roleToApply, applicable, roleIndex, servingGroupOrdinal, revisionToUse, hashToUse, applicableChain); err != nil {
@@ -2462,6 +2464,30 @@ func isOwnedByModelServing(metaObj metav1.Object) bool {
 		}
 	}
 	return false
+}
+
+// unownedPodsFillRole reports whether every expected pod of the role exists and at
+// least one of them is not owned by any ModelServing. Such pods are left untouched
+// and still count as present, so they must not trigger recreation.
+func unownedPodsFillRole(groupName, roleID string, role workloadv1alpha1.Role, pods []*corev1.Pod, unowned map[string]struct{}) bool {
+	if len(unowned) == 0 {
+		return false
+	}
+	present := make(map[string]struct{}, len(pods))
+	for _, pod := range pods {
+		present[pod.Name] = struct{}{}
+	}
+	hasUnowned := false
+	for ordinal := 0; ordinal <= int(role.WorkerReplicas); ordinal++ {
+		name := utils.GeneratePodName(groupName, roleID, ordinal)
+		if _, ok := present[name]; !ok {
+			return false
+		}
+		if _, ok := unowned[name]; ok {
+			hasUnowned = true
+		}
+	}
+	return hasUnowned
 }
 
 // modelServingOwnerUID returns the UID of metaObj's owner reference to the ModelServing named
