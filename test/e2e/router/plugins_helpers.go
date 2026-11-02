@@ -280,6 +280,11 @@ func countSelectedPodInRouterPodLogs(t *testing.T, kube kubernetes.Interface, ro
 	return strings.Count(string(raw), "selected_pod="+podName)
 }
 
+// The memory mode helpers below match log lines of the runtime sidecar, because the sidecar exposes no
+// status endpoint and the router has no way to show its index. The strings come from
+// python/kthena/runtime/memory_kv_manager.py: "Router registered: id=", "Router stream ended: id=" and
+// "Runtime memory stream - Model: ". Update these tests when those messages change.
+
 // runtimeLogsSince returns the kthena-runtime sidecar logs of a pod since the given time.
 func runtimeLogsSince(t *testing.T, kube kubernetes.Interface, pod corev1.Pod, since metav1.Time) string {
 	t.Helper()
