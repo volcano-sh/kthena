@@ -56,6 +56,7 @@ const (
 	routerContainerPort            = "8080" // kthenaRouter.port in the Helm chart; the Service exposes it as 80
 	kvCacheSyncModeEnv             = "KV_EVENT_SYNC_MODE"
 	kvCacheStreamWaitTimeout       = 90 * time.Second
+	kvCacheOwnershipConfirmHits    = 3
 	kvCacheOwnershipWaitTimeout    = 90 * time.Second
 	kvCacheMappingPrefix           = "vllm:kv:block"
 	kvCacheOwnershipPrefix         = "matrix:kv:block"
@@ -326,6 +327,31 @@ func warmKVCacheMemory(t *testing.T, kube kubernetes.Interface, pod corev1.Pod, 
 		return strings.Contains(runtimeLogsSince(t, kube, pod, since), streamed)
 	}, kvCacheStreamWaitTimeout, time.Second,
 		"sidecar of pod %s did not stream KV blocks to routers", pod.Name)
+}
+
+// confirmKVCacheOwnership waits until the router behind chatURL has applied the blocks a pod streamed.
+// The sidecar logs only show that events were queued. A stream is ordered, so a router that routes a
+// throwaway prompt to the pod, warmed after the prompts under test, has applied everything streamed before
+// it. Probes use unique, short prompts led by a distinct token: a probe that races ahead of the router
+// only warms another pod for its own prompt and never for the prompts under test. Several hits in a row
+// rule out a miss that happened to land on the pod.
+func confirmKVCacheOwnership(t *testing.T, kube kubernetes.Interface, kthenaNamespace, chatURL, model string, pod corev1.Pod) {
+	t.Helper()
+	hits := 0
+	deadline := time.Now().Add(kvCacheStreamWaitTimeout)
+	for attempt := 0; time.Now().Before(deadline); attempt++ {
+		prompt := fmt.Sprintf("probe%d%s kvcache ownership check", attempt, utils.RandomString(6))
+		warmKVCacheMemory(t, kube, pod, model, prompt)
+		messages := []utils.ChatMessage{utils.NewChatMessage("user", prompt)}
+		if utils.SelectedPodAfterChatURLHeaders(t, kube, kthenaNamespace, chatURL, model, messages, nil) != pod.Name {
+			hits = 0
+			continue
+		}
+		if hits++; hits == kvCacheOwnershipConfirmHits {
+			return
+		}
+	}
+	require.FailNowf(t, "router did not apply the KV blocks streamed by the pod", "pod=%s url=%s", pod.Name, chatURL)
 }
 
 // assertKVCacheHitRouting sends the warmed prompt through the router and expects most requests on the owning pod.
