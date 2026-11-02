@@ -74,6 +74,7 @@ spec:
                 emptyDir:
                   medium: Memory
                   sizeLimit: 8Gi
+        workerReplicas: 0
 ---
 apiVersion: networking.serving.volcano.sh/v1alpha1
 kind: ModelServer
