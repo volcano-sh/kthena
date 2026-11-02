@@ -47,8 +47,13 @@ type JWKSRotator struct {
 	config          conf.AuthenticationConfig
 	refreshInterval time.Duration
 	stopCh          chan struct{}
+	stopOnce        sync.Once
+	cancel          context.CancelFunc
+	loopWG          sync.WaitGroup
 	mu              sync.RWMutex
 	jwks            *Jwks
+	// fetch downloads the key set from the JWKS URI; tests replace it.
+	fetch func(ctx context.Context, uri string) (jwk.Set, error)
 }
 
 // NewJWKSRotator creates a new JWKS rotator
@@ -57,24 +62,38 @@ func NewJWKSRotator(config conf.AuthenticationConfig) *JWKSRotator {
 		config:          config,
 		refreshInterval: defaultRefreshInterval,
 		stopCh:          make(chan struct{}),
+		fetch:           fetchJWKS,
 	}
+}
+
+// fetchJWKS downloads the key set from uri.
+func fetchJWKS(ctx context.Context, uri string) (jwk.Set, error) {
+	return jwk.Fetch(ctx, uri)
 }
 
 // Start begins the JWKS rotation process
 func (jr *JWKSRotator) Start(ctx context.Context) {
 	klog.V(4).Info("Starting JWKS rotator")
+	ctx, jr.cancel = context.WithCancel(ctx)
 
 	// Perform initial JWKS fetch
-	jr.rotateJWKS()
+	jr.rotateJWKS(ctx)
 
 	// Start the rotation goroutine
-	go jr.rotationLoop(ctx)
+	jr.loopWG.Go(func() { jr.rotationLoop(ctx) })
 }
 
-// Stop stops the JWKS rotation process
+// Stop stops the JWKS rotation process, cancels an in-flight JWKS fetch and
+// waits for the rotation goroutine to exit
 func (jr *JWKSRotator) Stop() {
 	klog.V(4).Info("Stopping JWKS rotator")
-	close(jr.stopCh)
+	jr.stopOnce.Do(func() {
+		close(jr.stopCh)
+		if jr.cancel != nil {
+			jr.cancel()
+		}
+	})
+	jr.loopWG.Wait()
 }
 
 // GetJwks returns the current JWKS cache
@@ -98,17 +117,17 @@ func (jr *JWKSRotator) rotationLoop(ctx context.Context) {
 			klog.V(4).Info("Stop signal received, stopping JWKS rotation")
 			return
 		case <-ticker.C:
-			jr.rotateJWKS()
+			jr.rotateJWKS(ctx)
 		}
 	}
 }
 
 // rotateJWKS performs the actual JWKS rotation
-func (jr *JWKSRotator) rotateJWKS() {
+func (jr *JWKSRotator) rotateJWKS(ctx context.Context) {
 	klog.V(4).Infof("Rotating JWKS from URI: %s", jr.config.JwksUri)
 
 	// Fetch new JWKS
-	newJwks := rebuildJwks(jr.config)
+	newJwks := rebuildJwks(ctx, jr.config, jr.fetch)
 	if newJwks != nil {
 		jr.mu.Lock()
 		jr.jwks = newJwks
@@ -119,12 +138,14 @@ func (jr *JWKSRotator) rotateJWKS() {
 	}
 }
 
-// rebuildJwks creates a new Jwks instance by fetching from the configured URI
-func rebuildJwks(config conf.AuthenticationConfig) *Jwks {
+// rebuildJwks creates a new Jwks instance by fetching from the configured URI.
+// It stops retrying once ctx is cancelled.
+func rebuildJwks(ctx context.Context, config conf.AuthenticationConfig,
+	fetch func(ctx context.Context, uri string) (jwk.Set, error)) *Jwks {
 	var keySet jwk.Set
 	var err error
-	for i := 0; i < maxRetryAttempts; i++ {
-		keySet, err = jwk.Fetch(context.Background(), config.JwksUri)
+	for i := 0; i < maxRetryAttempts && ctx.Err() == nil; i++ {
+		keySet, err = fetch(ctx, config.JwksUri)
 		if err != nil {
 			klog.V(4).Infof("failed to fetch JWKS from %s: %v", config.JwksUri, err)
 		} else {
