@@ -1363,11 +1363,9 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 		staleFound := false
 		for _, pod := range pods {
 			ownerUID, isModelServingPod := modelServingOwnerUID(pod, ms.Name)
-			if !isModelServingPod {
-				// Not owned by a ModelServing named ms.Name; leave it alone.
-				continue
-			}
-			if ownerUID == ms.UID {
+			if !isModelServingPod || ownerUID == ms.UID {
+				// Owned by this ModelServing, or not owned by a ModelServing named ms.Name
+				// at all; leave it alone and keep counting it.
 				ownedPodCount++
 				continue
 			}
