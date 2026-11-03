@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,6 +28,7 @@ import (
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apiextinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -469,9 +469,10 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 		updated.Spec.MinMember = int32(minMember)
 		updated.Spec.MinResources = &minResources
 
-		// Sync queue name from ModelServing annotations if configured.
-		// When the queue annotation is removed (or set to empty) queue field is set to empty string.
-		updated.Spec.Queue = extractQueueName(ms)
+		// Preserve the server-assigned queue unless ModelServing explicitly overrides it.
+		if queue := extractQueueName(ms); queue != "" {
+			updated.Spec.Queue = queue
+		}
 
 		syncPodGroupNetworkTopology(ms, &updated.Spec)
 
@@ -630,11 +631,7 @@ func syncPodGroupNetworkTopology(ms *workloadv1alpha1.ModelServing, spec *schedu
 }
 
 func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
-	return current.Spec.MinMember != updated.Spec.MinMember ||
-		!reflect.DeepEqual(current.Spec.MinResources, updated.Spec.MinResources) ||
-		!reflect.DeepEqual(current.Spec.NetworkTopology, updated.Spec.NetworkTopology) ||
-		!reflect.DeepEqual(current.Spec.SubGroupPolicy, updated.Spec.SubGroupPolicy) ||
-		current.Spec.Queue != updated.Spec.Queue
+	return !apiequality.Semantic.DeepEqual(current.Spec, updated.Spec)
 }
 
 func appendSubGroupPolicy(ms *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup, minRoleMember map[string]int32) *schedulingv1beta1.PodGroup {

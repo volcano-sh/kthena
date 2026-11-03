@@ -18,10 +18,12 @@ package podgroupmanager
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -698,9 +700,40 @@ func TestHasPodGroupChanged(t *testing.T) {
 		assert.False(t, result, "Expected no change when objects are identical")
 	})
 
+	t.Run("QueueValues", func(t *testing.T) {
+		for _, tt := range []struct {
+			name    string
+			current string
+			updated string
+			changed bool
+		}{
+			{name: "both omitted"},
+			{name: "both default", current: schedulingv1beta1.DefaultQueue, updated: schedulingv1beta1.DefaultQueue},
+			{name: "stored default", current: schedulingv1beta1.DefaultQueue, changed: true},
+			{name: "desired default", updated: schedulingv1beta1.DefaultQueue, changed: true},
+			{name: "same custom", current: "custom-a", updated: "custom-a"},
+			{name: "set custom from empty", updated: "custom-a", changed: true},
+			{name: "set custom from default", current: schedulingv1beta1.DefaultQueue, updated: "custom-a", changed: true},
+			{name: "remove custom", current: "custom-a", changed: true},
+			{name: "custom to default", current: "custom-a", updated: schedulingv1beta1.DefaultQueue, changed: true},
+			{name: "change custom", current: "custom-a", updated: "custom-b", changed: true},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				current, updated := basePodGroup(), basePodGroup()
+				current.Spec.Queue, updated.Spec.Queue = tt.current, tt.updated
+				beforeCurrent, beforeUpdated := current.DeepCopy(), updated.DeepCopy()
+				assert.Equal(t, tt.changed, hasPodGroupChanged(current, updated))
+				assert.Equal(t, beforeCurrent, current, "comparison must not modify the cached PodGroup")
+				assert.Equal(t, beforeUpdated, updated, "comparison must not modify the desired PodGroup")
+			})
+		}
+	})
+
 	t.Run("MinMemberChanged", func(t *testing.T) {
 		current := basePodGroup()
+		current.Spec.Queue = schedulingv1beta1.DefaultQueue
 		updated := basePodGroup()
+		updated.Spec.Queue = current.Spec.Queue
 		updated.Spec.MinMember = 3
 
 		result := hasPodGroupChanged(current, updated)
@@ -1394,18 +1427,19 @@ func TestCreatePodGroupQueueBehavior(t *testing.T) {
 		assert.Equal(t, "high-priority-queue", pg.Spec.Queue)
 	})
 
-	t.Run("no annotation leaves Spec.Queue empty", func(t *testing.T) {
-		mgr, fakeVolcano := newManager()
-		ms := newMinimalMS("") // no queue annotation
-
-		err := mgr.createPodGroup(context.Background(), ms, "test-pg")
-		assert.NoError(t, err)
-
-		pg, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(
-			context.Background(), "test-pg", metav1.GetOptions{})
-		assert.NoError(t, err)
-		assert.Equal(t, "", pg.Spec.Queue)
-	})
+	for _, emptyAnnotation := range []bool{false, true} {
+		t.Run(map[bool]string{false: "absent annotation", true: "empty annotation"}[emptyAnnotation], func(t *testing.T) {
+			mgr, fakeVolcano := newManager()
+			ms := newMinimalMS("")
+			if emptyAnnotation {
+				ms.Annotations = map[string]string{schedulingv1beta1.QueueNameAnnotationKey: ""}
+			}
+			require.NoError(t, mgr.createPodGroup(context.Background(), ms, "test-pg"))
+			pg, err := fakeVolcano.SchedulingV1beta1().PodGroups(ms.Namespace).Get(context.Background(), "test-pg", metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Empty(t, pg.Spec.Queue, "creation must leave queue assignment to the server")
+		})
+	}
 }
 
 // TestUpdatePodGroupQueueBehavior verifies that updatePodGroupIfNeeded syncs
@@ -1419,8 +1453,9 @@ func TestUpdatePodGroupQueueBehavior(t *testing.T) {
 				Namespace: "default",
 			},
 			Spec: schedulingv1beta1.PodGroupSpec{
-				MinMember: 1,
-				Queue:     queue,
+				MinMember:    1,
+				MinResources: &corev1.ResourceList{},
+				Queue:        queue,
 			},
 		}
 	}
@@ -1430,8 +1465,7 @@ func TestUpdatePodGroupQueueBehavior(t *testing.T) {
 	// (for Get calls inside updatePodGroupIfNeeded).
 	setupManager := func(existingPG *schedulingv1beta1.PodGroup) (*Manager, *volcanofake.Clientset) {
 		fakeVolcano := volcanofake.NewSimpleClientset(existingPG)
-		fakeApiext := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
-		mgr := NewManager(nil, fakeVolcano, fakeApiext, nil)
+		mgr := &Manager{volcanoClient: fakeVolcano}
 		mgr.hasPodGroupCRD.Store(true)
 		mgr.hasSubGroupPolicy.Store(false)
 
@@ -1459,19 +1493,95 @@ func TestUpdatePodGroupQueueBehavior(t *testing.T) {
 		assert.Equal(t, "new-queue", updated.Spec.Queue)
 	})
 
-	t.Run("annotation removed clears Spec.Queue", func(t *testing.T) {
+	t.Run("annotation removed preserves Spec.Queue", func(t *testing.T) {
 		pg := buildExistingPG("some-queue")
 		mgr, fakeVolcano := setupManager(pg)
 		ms := newMinimalMS("") // annotation removed
 
 		err := mgr.updatePodGroupIfNeeded(context.Background(), pg, ms)
 		assert.NoError(t, err)
+		assert.Empty(t, fakeVolcano.Actions())
 
 		updated, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(
 			context.Background(), "test-pg", metav1.GetOptions{})
 		assert.NoError(t, err)
-		assert.Equal(t, "", updated.Spec.Queue)
+		assert.Equal(t, "some-queue", updated.Spec.Queue)
 	})
+
+	t.Run("explicit default overrides the server queue", func(t *testing.T) {
+		pg := buildExistingPG("namespace-queue")
+		mgr, client := setupManager(pg)
+		require.NoError(t, mgr.updatePodGroupIfNeeded(context.Background(), pg, newMinimalMS(schedulingv1beta1.DefaultQueue)))
+		require.Len(t, client.Actions(), 1)
+		updated, err := client.SchedulingV1beta1().PodGroups(pg.Namespace).Get(context.Background(), pg.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, schedulingv1beta1.DefaultQueue, updated.Spec.Queue)
+		require.Equal(t, "namespace-queue", pg.Spec.Queue)
+	})
+}
+
+func TestUpdatePodGroupPreservesServerQueue(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		queue      string
+		annotation *string
+	}{
+		{name: "default without annotation", queue: schedulingv1beta1.DefaultQueue},
+		{name: "namespace queue without annotation", queue: "namespace-queue"},
+		{name: "custom queue after annotation removal", queue: "custom-queue"},
+		{name: "empty server queue"},
+		{name: "default with empty annotation", queue: schedulingv1beta1.DefaultQueue, annotation: ptr.To("")},
+		{name: "namespace queue with empty annotation", queue: "namespace-queue", annotation: ptr.To("")},
+		{name: "custom queue with empty annotation", queue: "custom-queue", annotation: ptr.To("")},
+		{name: "empty queue with empty annotation", annotation: ptr.To("")},
+		{name: "explicit matching default", queue: schedulingv1beta1.DefaultQueue, annotation: ptr.To(schedulingv1beta1.DefaultQueue)},
+		{name: "explicit matching custom", queue: "custom-queue", annotation: ptr.To("custom-queue")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := newMinimalMS("")
+			if tt.annotation != nil {
+				ms.Annotations = map[string]string{schedulingv1beta1.QueueNameAnnotationKey: *tt.annotation}
+			}
+			mgr := &Manager{}
+			minMember, _, minResources := mgr.calculateRequirements(ms)
+			pg := &schedulingv1beta1.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-pg", Namespace: ms.Namespace},
+				Spec:       schedulingv1beta1.PodGroupSpec{MinMember: int32(minMember), MinResources: &minResources, Queue: tt.queue},
+			}
+			beforePG, beforeMS := pg.DeepCopy(), ms.DeepCopy()
+			client := volcanofake.NewSimpleClientset(pg)
+			indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+			require.NoError(t, indexer.Add(pg))
+			mgr.volcanoClient = client
+			mgr.PodGroupLister = volcanoschedulerlister.NewPodGroupLister(indexer)
+			for i := 0; i < 3; i++ {
+				require.NoError(t, mgr.updatePodGroupIfNeeded(context.Background(), pg, ms))
+			}
+			require.Empty(t, client.Actions(), "the effective server queue must not trigger redundant writes")
+			require.Equal(t, beforePG, pg)
+			require.Equal(t, beforeMS, ms)
+
+			*ms.Spec.Template.Roles[0].Replicas = 2
+			require.NoError(t, mgr.updatePodGroupIfNeeded(context.Background(), pg, ms))
+			require.Len(t, client.Actions(), 1)
+			require.Equal(t, "update", client.Actions()[0].GetVerb())
+			updated, err := client.SchedulingV1beta1().PodGroups(ms.Namespace).Get(context.Background(), pg.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, int32(2), updated.Spec.MinMember)
+			require.Equal(t, tt.queue, updated.Spec.Queue, "a real requirement change must preserve the server queue")
+			require.Equal(t, beforePG, pg, "the cached PodGroup must remain unchanged")
+
+			require.NoError(t, indexer.Update(updated))
+			client.ClearActions()
+			ms.Annotations = map[string]string{schedulingv1beta1.QueueNameAnnotationKey: "override-queue"}
+			require.NoError(t, mgr.updatePodGroupIfNeeded(context.Background(), updated, ms))
+			require.Len(t, client.Actions(), 1, "an explicit override must still issue an UPDATE")
+			actual, err := client.SchedulingV1beta1().PodGroups(ms.Namespace).Get(context.Background(), pg.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, "override-queue", actual.Spec.Queue)
+			require.Equal(t, tt.queue, updated.Spec.Queue)
+		})
+	}
 }
 
 func newMinimalMSWithGroupTopology(mode string) *workloadv1alpha1.ModelServing {
@@ -1648,4 +1758,184 @@ func TestUpdatePodGroupIfNeededListerAccess(t *testing.T) {
 			assert.ErrorIs(t, err, errPodGroupInformerNotInitialized)
 		}
 	})
+}
+
+func TestPodGroupComparisonUsesEffectiveValues(t *testing.T) {
+	current := &schedulingv1beta1.PodGroup{Spec: schedulingv1beta1.PodGroupSpec{Queue: schedulingv1beta1.DefaultQueue, MinMember: 1, MinResources: &corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi"), "example.com/device": resource.MustParse("2"),
+	}}}
+	desired := current.DeepCopy()
+	*desired.Spec.MinResources = corev1.ResourceList{
+		corev1.ResourceCPU: *resource.NewMilliQuantity(1000, resource.DecimalSI), corev1.ResourceMemory: resource.MustParse("1024Mi"), "example.com/device": resource.MustParse("2000m"),
+	}
+	beforeCurrent, beforeDesired := current.DeepCopy(), desired.DeepCopy()
+	require.False(t, hasPodGroupChanged(current, desired))
+	require.False(t, hasPodGroupChanged(desired, current))
+	require.Equal(t, beforeCurrent, current)
+	require.Equal(t, beforeDesired, desired)
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, "example.com/device"} {
+		changed := desired.DeepCopy()
+		q := (*changed.Spec.MinResources)[name]
+		q.Add(resource.MustParse("1"))
+		(*changed.Spec.MinResources)[name] = q
+		require.True(t, hasPodGroupChanged(current, changed), "%s must still be updated", name)
+	}
+	removed := desired.DeepCopy()
+	delete(*removed.Spec.MinResources, "example.com/device")
+	require.True(t, hasPodGroupChanged(current, removed))
+	for _, pair := range [][2]string{{"custom", ""}, {"", "custom"}, {"first", "second"}} {
+		current.Spec.Queue, desired.Spec.Queue = pair[0], pair[1]
+		require.True(t, hasPodGroupChanged(current, desired))
+	}
+}
+
+func TestUpdatePodGroupSkipsEquivalentStoredSpec(t *testing.T) {
+	for _, queue := range []string{"", schedulingv1beta1.DefaultQueue, "custom"} {
+		t.Run("queue="+queue, func(t *testing.T) {
+			ms := newMinimalMS(queue)
+			ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("1000m"), corev1.ResourceMemory: resource.MustParse("1024Mi"),
+				"example.com/device": resource.MustParse("2"),
+			}
+			manager := &Manager{}
+			manager.hasSubGroupPolicy.Store(true)
+			ms.Spec.Template.NetworkTopology = &workloadv1alpha1.NetworkTopology{
+				GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{Mode: schedulingv1beta1.HardNetworkTopologyMode, HighestTierAllowed: ptr.To(2)},
+				RolePolicy:  &schedulingv1beta1.NetworkTopologySpec{Mode: schedulingv1beta1.SoftNetworkTopologyMode, HighestTierAllowed: ptr.To(1)},
+			}
+			minMember, minRoleMember, resources := manager.calculateRequirements(ms)
+			pg := &schedulingv1beta1.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-pg", Namespace: ms.Namespace},
+				Spec:       schedulingv1beta1.PodGroupSpec{MinMember: int32(minMember), MinResources: &resources, Queue: queue},
+			}
+			if queue == "" {
+				pg.Spec.Queue = schedulingv1beta1.DefaultQueue
+			}
+			// Preserve fields managed by other writers when a real update is needed.
+			pg.Spec.MinTaskMember = map[string]int32{"external": 1}
+			pg.Spec.PriorityClassName = "external-priority"
+			syncPodGroupNetworkTopology(ms, &pg.Spec)
+			pg = appendSubGroupPolicy(ms, pg, minRoleMember)
+			// Informers observe serialized quantities and the server's default queue.
+			encoded, err := json.Marshal(pg)
+			require.NoError(t, err)
+			stored := &schedulingv1beta1.PodGroup{}
+			require.NoError(t, json.Unmarshal(encoded, stored))
+			client := volcanofake.NewSimpleClientset(stored)
+			indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+			require.NoError(t, indexer.Add(stored))
+			manager.volcanoClient = client
+			manager.PodGroupLister = volcanoschedulerlister.NewPodGroupLister(indexer)
+			for i := 0; i < 3; i++ {
+				require.NoError(t, manager.updatePodGroupIfNeeded(context.Background(), stored, ms))
+			}
+			require.Empty(t, client.Actions(), "equivalent requirements must not issue an UPDATE")
+
+			*ms.Spec.Template.Roles[0].Replicas = 2
+			require.NoError(t, manager.updatePodGroupIfNeeded(context.Background(), stored, ms))
+			require.Len(t, client.Actions(), 1)
+			require.Equal(t, "update", client.Actions()[0].GetVerb())
+			updated, err := client.SchedulingV1beta1().PodGroups(ms.Namespace).Get(context.Background(), stored.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, int32(2), updated.Spec.MinMember)
+			require.Equal(t, pg.Spec.MinTaskMember, updated.Spec.MinTaskMember)
+			require.Equal(t, pg.Spec.PriorityClassName, updated.Spec.PriorityClassName)
+			require.Equal(t, int32(2), *updated.Spec.SubGroupPolicy[0].MinSubGroups)
+			for name, quantity := range resources {
+				quantity.Mul(2)
+				actual := (*updated.Spec.MinResources)[name]
+				require.Zero(t, actual.Cmp(quantity), "%s must reflect the new replica count", name)
+			}
+		})
+	}
+}
+
+func TestPodGroupComparisonIncludesPolicies(t *testing.T) {
+	base := &schedulingv1beta1.PodGroup{Spec: schedulingv1beta1.PodGroupSpec{
+		MinMember: 2, Queue: schedulingv1beta1.DefaultQueue,
+		MinTaskMember: map[string]int32{"task": 1}, PriorityClassName: "priority",
+		NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{Mode: schedulingv1beta1.HardNetworkTopologyMode, HighestTierAllowed: ptr.To(2)},
+		SubGroupPolicy: []schedulingv1beta1.SubGroupPolicySpec{{
+			Name: "role", SubGroupSize: ptr.To[int32](1), MinSubGroups: ptr.To[int32](1),
+			LabelSelector:   &metav1.LabelSelector{MatchLabels: map[string]string{"role": "a"}},
+			MatchLabelKeys:  []string{"role", "index"},
+			NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{Mode: schedulingv1beta1.SoftNetworkTopologyMode},
+		}},
+	}}
+	changes := map[string]func(*schedulingv1beta1.PodGroupSpec){
+		"task minimum": func(s *schedulingv1beta1.PodGroupSpec) { s.MinTaskMember["task"]++ },
+		"priority":     func(s *schedulingv1beta1.PodGroupSpec) { s.PriorityClassName = "different" },
+		"group mode": func(s *schedulingv1beta1.PodGroupSpec) {
+			s.NetworkTopology.Mode = schedulingv1beta1.SoftNetworkTopologyMode
+		},
+		"group tier":           func(s *schedulingv1beta1.PodGroupSpec) { *s.NetworkTopology.HighestTierAllowed++ },
+		"group policy removed": func(s *schedulingv1beta1.PodGroupSpec) { s.NetworkTopology = nil },
+		"role name":            func(s *schedulingv1beta1.PodGroupSpec) { s.SubGroupPolicy[0].Name = "different" },
+		"role size":            func(s *schedulingv1beta1.PodGroupSpec) { *s.SubGroupPolicy[0].SubGroupSize++ },
+		"role minimum":         func(s *schedulingv1beta1.PodGroupSpec) { *s.SubGroupPolicy[0].MinSubGroups++ },
+		"role selector":        func(s *schedulingv1beta1.PodGroupSpec) { s.SubGroupPolicy[0].LabelSelector.MatchLabels["role"] = "b" },
+		"role selector absent": func(s *schedulingv1beta1.PodGroupSpec) { s.SubGroupPolicy[0].LabelSelector = nil },
+		"role mode": func(s *schedulingv1beta1.PodGroupSpec) {
+			s.SubGroupPolicy[0].NetworkTopology.Mode = schedulingv1beta1.HardNetworkTopologyMode
+		},
+		"role grouping key": func(s *schedulingv1beta1.PodGroupSpec) { s.SubGroupPolicy[0].MatchLabelKeys[1] = "other" },
+		"grouping key order": func(s *schedulingv1beta1.PodGroupSpec) {
+			s.SubGroupPolicy[0].MatchLabelKeys = []string{"index", "role"}
+		},
+	}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			updated := base.DeepCopy()
+			change(&updated.Spec)
+			require.True(t, hasPodGroupChanged(base, updated))
+		})
+	}
+
+	t.Run("empty collections", func(t *testing.T) {
+		current := &schedulingv1beta1.PodGroup{Spec: schedulingv1beta1.PodGroupSpec{MinResources: new(corev1.ResourceList)}}
+		updated := &schedulingv1beta1.PodGroup{Spec: schedulingv1beta1.PodGroupSpec{
+			MinTaskMember: map[string]int32{}, MinResources: &corev1.ResourceList{}, SubGroupPolicy: []schedulingv1beta1.SubGroupPolicySpec{},
+		}}
+		require.False(t, hasPodGroupChanged(current, updated))
+		require.False(t, hasPodGroupChanged(updated, current))
+	})
+	t.Run("subgroup order", func(t *testing.T) {
+		current := base.DeepCopy()
+		current.Spec.SubGroupPolicy = append(current.Spec.SubGroupPolicy, schedulingv1beta1.SubGroupPolicySpec{Name: "other"})
+		updated := current.DeepCopy()
+		updated.Spec.SubGroupPolicy[0], updated.Spec.SubGroupPolicy[1] = updated.Spec.SubGroupPolicy[1], updated.Spec.SubGroupPolicy[0]
+		require.True(t, hasPodGroupChanged(current, updated))
+	})
+
+	t.Run("empty collections and metadata do not cause a write", func(t *testing.T) {
+		updated := base.DeepCopy()
+		updated.Spec.SubGroupPolicy[0].LabelSelector.MatchExpressions = []metav1.LabelSelectorRequirement{}
+		updated.ResourceVersion = "new-version"
+		updated.Annotations = map[string]string{"other": "writer"}
+		updated.Status.Phase = schedulingv1beta1.PodGroupRunning
+		beforeCurrent, beforeUpdated := base.DeepCopy(), updated.DeepCopy()
+		require.False(t, hasPodGroupChanged(base, updated))
+		require.Equal(t, beforeCurrent, base)
+		require.Equal(t, beforeUpdated, updated, "comparison must not mutate caller-owned inputs")
+	})
+	for _, field := range []string{"selector", "network policy", "minimum", "resources"} {
+		t.Run("absent differs from explicit "+field, func(t *testing.T) {
+			current, updated := base.DeepCopy(), base.DeepCopy()
+			switch field {
+			case "selector":
+				current.Spec.SubGroupPolicy[0].LabelSelector = nil
+				updated.Spec.SubGroupPolicy[0].LabelSelector = &metav1.LabelSelector{}
+			case "network policy":
+				current.Spec.NetworkTopology = nil
+				updated.Spec.NetworkTopology = &schedulingv1beta1.NetworkTopologySpec{}
+			case "minimum":
+				current.Spec.SubGroupPolicy[0].MinSubGroups = nil
+				updated.Spec.SubGroupPolicy[0].MinSubGroups = ptr.To[int32](0)
+			case "resources":
+				current.Spec.MinResources = nil
+				updated.Spec.MinResources = &corev1.ResourceList{}
+			}
+			require.True(t, hasPodGroupChanged(current, updated))
+		})
+	}
 }
