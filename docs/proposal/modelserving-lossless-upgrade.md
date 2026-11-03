@@ -109,10 +109,13 @@ sequenceDiagram
     A->>P: preStop → SIGTERM → grace period → SIGKILL
 ```
 
-Phase 1 is the controller's declaration (steps 1-2): the Pod stops receiving
-new traffic but stays alive with its in-flight tracked. Phase 2 is the router's
-confirmation (step 3) followed by the actual delete (step 4): only the party
-that actually holds the traffic declares "in-flight reached zero".
+Phase 1 is declare-and-drain (steps 1-2): the controller declares the drain via
+the annotation, and the router acts on it — the Pod stops receiving new traffic
+(the router's doing) but stays alive with its in-flight tracked. Phase 2 is
+confirm-and-delete (steps 3-4): the router — the party that actually holds the
+traffic — confirms in-flight reached zero, and the controller performs the
+delete. Each component spans one phase; the drain completes through their
+cooperation.
 
 #### User Stories
 
