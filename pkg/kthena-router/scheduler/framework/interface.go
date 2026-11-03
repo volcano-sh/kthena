@@ -57,6 +57,20 @@ type Context struct {
 
 	// MetricsRecorder for recording scheduler plugin metrics
 	MetricsRecorder *metrics.RequestMetricsRecorder
+
+	// ScheduleChain is the plugin chain this scheduling round uses; set by
+	// the router before Schedule, read back by RunPostHooks. Nil means the
+	// global chain.
+	ScheduleChain ScheduleChain
+}
+
+// ScheduleChain is the request-scoped handle to the plugin chain in use.
+type ScheduleChain interface {
+	// Acquire marks a request as using the chain; pair it with Release.
+	Acquire()
+	// Release marks the request done; the chain may close once retired and
+	// fully drained.
+	Release()
 }
 
 type ScorePlugin interface {
@@ -76,4 +90,11 @@ type FilterPlugin interface {
 type PostScheduleHook interface {
 	Name() string
 	PostSchedule(ctx *Context, index int)
+}
+
+// PluginCloser is implemented by plugins that hold per-chain resources
+// (background workers, store callbacks). The ProfileChainManager closes the plugins
+// of replaced or deleted chains. Close must be idempotent.
+type PluginCloser interface {
+	Close() error
 }

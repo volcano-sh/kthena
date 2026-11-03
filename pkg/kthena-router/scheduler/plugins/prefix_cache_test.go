@@ -589,3 +589,13 @@ func TestPrefixCachePostSchedule(t *testing.T) {
 		})
 	}
 }
+
+func TestPrefixCacheClose(t *testing.T) {
+	mockDS := datastore.New()
+	plugin := NewPrefixCache(mockDS, runtime.RawExtension{Raw: []byte{}})
+	require.NotNil(t, plugin.unregisterEntriesMetric, "construction must register the gauge provider")
+
+	require.NoError(t, plugin.Close())
+	assert.Nil(t, plugin.unregisterEntriesMetric, "Close must unregister the gauge provider")
+	assert.NoError(t, plugin.Close(), "Close must be idempotent")
+}

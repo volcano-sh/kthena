@@ -9,6 +9,7 @@ rules:
       - modelroutes
       - externalmodelproviders
       - modelservers
+      - schedulerprofiles
     verbs:
       - create
       - delete
