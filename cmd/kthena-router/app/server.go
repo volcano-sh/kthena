@@ -83,7 +83,10 @@ type Server struct {
 	// it is a field only so that tests can shorten it.
 	handlerExitTimeout time.Duration
 	// listeners tracks the inference listeners so Run can wait for them to drain.
-	listeners listenerGroup
+	listeners drainGroup
+	// requests tracks the requests the inference listeners serve, so Run can
+	// wait for their handlers to return once the listeners have stopped.
+	requests drainGroup
 }
 
 func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort, metricsPort int, exposeMetricsOnRouterPort bool, kubeAPIQPS float32, kubeAPIBurst int) *Server {
@@ -166,40 +169,27 @@ func (s *Server) Run(ctx context.Context) {
 	klog.Info("Router server started, waiting for shutdown signal...")
 	<-ctx.Done()
 	klog.Info("Router server shutting down...")
-	s.shutdown(r.ActiveRequestCount, stopAfterDrain)
+	s.shutdown(stopAfterDrain)
 }
 
 // shutdown returns once the inference listeners have drained, or have been
 // force-closed after the drain timeout, and their request handlers have
-// returned. Only then does it stop what runs on drainCtx. main() exits as soon
-// as Run returns, so in-flight requests must be finished by then.
-func (s *Server) shutdown(activeRequests func() int64, stopAfterDrain context.CancelFunc) {
-	s.listeners.closeAndWait()
-	if running := waitForRequestHandlers(activeRequests, s.handlerExitTimeout); running > 0 {
-		klog.Warningf("%d requests still running %v after the listeners stopped, exiting anyway",
-			running, s.handlerExitTimeout)
+// returned or handlerExitTimeout has passed. Only then does it stop what runs on
+// drainCtx. main() exits as soon as Run returns, so in-flight requests must be
+// finished by then.
+func (s *Server) shutdown(stopAfterDrain context.CancelFunc) {
+	s.listeners.closeAndWait(context.Background())
+	// http.Server.Close does not wait for handlers to return. Handlers of
+	// connections force-closed at the drain timeout still run their cleanup,
+	// such as releasing the pod's on-flight count in Redis.
+	ctx, cancel := context.WithTimeout(context.Background(), s.handlerExitTimeout)
+	defer cancel()
+	if !s.requests.closeAndWait(ctx) {
+		klog.Warningf("Request handlers still running %v after the listeners stopped, exiting anyway",
+			s.handlerExitTimeout)
 	}
 	stopAfterDrain()
 	klog.Info("Router server stopped")
-}
-
-// waitForRequestHandlers waits until activeRequests reports no running request
-// handler, or until timeout passes, and returns the number still running.
-// http.Server.Close does not wait for handlers to return and the router only
-// exposes a counter, so this polls. It returns at once unless connections were
-// force-closed at the drain timeout.
-func waitForRequestHandlers(activeRequests func() int64, timeout time.Duration) int64 {
-	deadline := time.Now().Add(timeout)
-	for {
-		running := activeRequests()
-		if running <= 0 {
-			return 0
-		}
-		if time.Now().After(deadline) {
-			return running
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 func (s *Server) HasSynced() bool {
