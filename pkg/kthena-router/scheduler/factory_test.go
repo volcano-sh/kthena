@@ -62,7 +62,7 @@ func TestRegisterDefaultPlugins(t *testing.T) {
 		assert.NotNil(t, builder, "Score plugin builder for %s should not be nil", pluginName)
 
 		// Test that the builder actually creates a plugin
-		plugin := builder(store, runtime.RawExtension{})
+		plugin, _ := builder(store, runtime.RawExtension{})
 		assert.NotNil(t, plugin, "Plugin %s should be created successfully", pluginName)
 		assert.Equal(t, pluginName, plugin.Name(), "Plugin name should match")
 	}
@@ -79,7 +79,7 @@ func TestRegisterDefaultPlugins(t *testing.T) {
 		assert.NotNil(t, builder, "Filter plugin builder for %s should not be nil", pluginName)
 
 		// Test that the builder actually creates a plugin
-		plugin := builder(runtime.RawExtension{})
+		plugin, _ := builder(runtime.RawExtension{})
 		assert.NotNil(t, plugin, "Plugin %s should be created successfully", pluginName)
 		assert.Equal(t, pluginName, plugin.Name(), "Plugin name should match")
 	}
@@ -95,6 +95,7 @@ func TestGetFilterPlugins(t *testing.T) {
 		pluginsArgMap   map[string]runtime.RawExtension
 		expectedCount   int
 		expectedNames   []string
+		expectErr       bool
 	}{
 		{
 			name:            "empty filter plugin map",
@@ -123,7 +124,7 @@ func TestGetFilterPlugins(t *testing.T) {
 			expectedNames: []string{plugins.LeastRequestPluginName, plugins.LoraAffinityPluginName},
 		},
 		{
-			name:            "non-existent plugin should be skipped",
+			name:            "non-existent plugin is skipped with an error log",
 			filterPluginMap: []string{plugins.LeastRequestPluginName, "non-existent-plugin"},
 			pluginsArgMap: map[string]runtime.RawExtension{
 				plugins.LeastRequestPluginName: {Raw: []byte(`{"maxWaitingRequests": 10}`)},
@@ -136,7 +137,12 @@ func TestGetFilterPlugins(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filterPlugins := getFilterPlugins(registry, tt.filterPluginMap, tt.pluginsArgMap)
+			filterPlugins, err := getFilterPlugins(registry, tt.filterPluginMap, tt.pluginsArgMap)
+			if tt.expectErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
 
 			assert.Equal(t, tt.expectedCount, len(filterPlugins))
 
@@ -161,6 +167,7 @@ func TestGetScorePlugins(t *testing.T) {
 		pluginsArgMap   map[string]runtime.RawExtension
 		expectedCount   int
 		expectedWeights map[string]int
+		expectErr       bool
 	}{
 		{
 			name:            "empty score plugin map",
@@ -225,7 +232,7 @@ func TestGetScorePlugins(t *testing.T) {
 			},
 		},
 		{
-			name: "non-existent plugin should be skipped",
+			name: "non-existent plugin is skipped with an error log",
 			scorePluginMap: map[string]int{
 				plugins.LeastRequestPluginName: 3,
 				"non-existent-plugin":          5,
@@ -239,11 +246,31 @@ func TestGetScorePlugins(t *testing.T) {
 				plugins.LeastRequestPluginName: 3,
 			},
 		},
+		{
+			// Builders now return errors: a plugin whose configured args are
+			// invalid fails the build and must propagate (unlike unknown
+			// plugin names, which only log and skip).
+			name: "invalid plugin args fail the build",
+			scorePluginMap: map[string]int{
+				plugins.KVCacheAwarePluginName: 1,
+			},
+			pluginsArgMap: map[string]runtime.RawExtension{
+				plugins.KVCacheAwarePluginName: {Raw: []byte(`{"indexMode": "bogus"}`)},
+			},
+			expectErr:       true,
+			expectedCount:   0,
+			expectedWeights: map[string]int{},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scorePlugins := getScorePlugins(registry, store, tt.scorePluginMap, tt.pluginsArgMap)
+			scorePlugins, err := getScorePlugins(registry, store, tt.scorePluginMap, tt.pluginsArgMap)
+			if tt.expectErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
 
 			assert.Equal(t, tt.expectedCount, len(scorePlugins))
 
@@ -263,7 +290,7 @@ func TestGetPostScheduleHooks(t *testing.T) {
 	registry := NewPluginRegistry()
 	registerDefaultPlugins(registry)
 
-	scorePlugins := getScorePlugins(registry, datastore.New(), map[string]int{
+	scorePlugins, _ := getScorePlugins(registry, datastore.New(), map[string]int{
 		plugins.LeastRequestPluginName: 1,
 		plugins.PrefixCachePluginName:  1,
 	}, map[string]runtime.RawExtension{

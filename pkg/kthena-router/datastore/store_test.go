@@ -460,11 +460,87 @@ func TestStoreAddOrUpdatePod(t *testing.T) {
 	}
 }
 
+func TestStoreRegisterCallbackUnregister(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]callbackEntry),
+	}
+
+	events := make(chan EventData, 1)
+	unregister := s.RegisterCallback("Pod", func(data EventData) { events <- data })
+
+	s.triggerCallbacks("Pod", EventData{EventType: EventAdd})
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatal("registered callback did not fire")
+	}
+
+	// Unregistering twice is safe; the callback must not fire afterwards.
+	unregister()
+	unregister()
+	s.triggerCallbacks("Pod", EventData{EventType: EventAdd})
+	select {
+	case <-events:
+		t.Fatal("unregistered callback still fired")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestStoreUnregisterLeavesOtherCallbacks(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]callbackEntry),
+	}
+
+	events := make(chan string, 2)
+	unregisterFirst := s.RegisterCallback("Pod", func(data EventData) { events <- "first" })
+	s.RegisterCallback("Pod", func(data EventData) { events <- "second" })
+
+	unregisterFirst()
+	s.triggerCallbacks("Pod", EventData{EventType: EventAdd})
+
+	select {
+	case got := <-events:
+		assert.Equal(t, "second", got)
+	case <-time.After(time.Second):
+		t.Fatal("remaining callback did not fire")
+	}
+	select {
+	case got := <-events:
+		t.Fatalf("unregistered callback still fired: %q", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestStoreUnregisterStopsRealPodEvents(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]callbackEntry),
+	}
+	ms := &aiv1alpha1.ModelServer{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model1"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod1"}}
+
+	events := make(chan EventData, 1)
+	unregister := s.RegisterCallback("Pod", func(data EventData) { events <- data })
+	unregister()
+
+	assert.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
+	select {
+	case <-events:
+		t.Fatal("unregistered callback received a real pod event")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestStoreAddOrUpdatePodFiresPodEvents(t *testing.T) {
 	s := &store{
 		modelServer: sync.Map{},
 		pods:        sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 	ms := &aiv1alpha1.ModelServer{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model1"}}
 	assert.NoError(t, s.AddOrUpdateModelServer(ms, nil))
@@ -501,7 +577,7 @@ func TestStoreDeletePod(t *testing.T) {
 	s := &store{
 		pods:        sync.Map{},
 		modelServer: sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 
 	s.pods.Store(podName, podInfo)
@@ -539,7 +615,7 @@ func TestStoreDeletePod_MultiModelServers(t *testing.T) {
 	s := &store{
 		pods:        sync.Map{},
 		modelServer: sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 
 	s.pods.Store(podName, podInfo)
@@ -631,7 +707,7 @@ func TestStoreDeleteModelServerEmitsPodDeleteEvent(t *testing.T) {
 		s := &store{
 			modelServer: sync.Map{},
 			pods:        sync.Map{},
-			callbacks:   make(map[string][]CallbackFunc),
+			callbacks:   make(map[string][]callbackEntry),
 		}
 		ms := newMS("model1")
 		msName := utils.GetNamespaceName(ms)
@@ -675,7 +751,7 @@ func TestStoreDeleteModelServerEmitsPodDeleteEvent(t *testing.T) {
 		s := &store{
 			modelServer: sync.Map{},
 			pods:        sync.Map{},
-			callbacks:   make(map[string][]CallbackFunc),
+			callbacks:   make(map[string][]callbackEntry),
 		}
 		deletedMS, keptMS := newMS("model1"), newMS("model2")
 		deletedName, keptName := utils.GetNamespaceName(deletedMS), utils.GetNamespaceName(keptMS)
@@ -745,7 +821,7 @@ func TestStoreDeleteModelRoute(t *testing.T) {
 			routeInfo:           make(map[string]*modelRouteInfo),
 			routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 			loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-			callbacks:           make(map[string][]CallbackFunc),
+			callbacks:           make(map[string][]callbackEntry),
 			requestWaitingQueue: sync.Map{},
 		}
 
@@ -802,7 +878,7 @@ func TestStoreDeleteModelRoute(t *testing.T) {
 			routeInfo:           make(map[string]*modelRouteInfo),
 			routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 			loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-			callbacks:           make(map[string][]CallbackFunc),
+			callbacks:           make(map[string][]callbackEntry),
 			requestWaitingQueue: sync.Map{},
 		}
 
@@ -838,7 +914,7 @@ func TestStoreDeleteModelRoute(t *testing.T) {
 			routeInfo:           make(map[string]*modelRouteInfo),
 			routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 			loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-			callbacks:           make(map[string][]CallbackFunc),
+			callbacks:           make(map[string][]callbackEntry),
 			requestWaitingQueue: sync.Map{},
 		}
 
@@ -865,7 +941,7 @@ func TestStoreDeleteModelRoute(t *testing.T) {
 			routeInfo:           make(map[string]*modelRouteInfo),
 			routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 			loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-			callbacks:           make(map[string][]CallbackFunc),
+			callbacks:           make(map[string][]callbackEntry),
 			requestWaitingQueue: sync.Map{},
 		}
 
@@ -966,7 +1042,7 @@ func TestStoreDeleteModelRoute_RequestQueueCleanup(t *testing.T) {
 		routeInfo:           make(map[string]*modelRouteInfo),
 		routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 		loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-		callbacks:           make(map[string][]CallbackFunc),
+		callbacks:           make(map[string][]callbackEntry),
 		requestWaitingQueue: sync.Map{},
 	}
 
@@ -1010,7 +1086,7 @@ func TestStoreDeleteModelRoute_LoraQueueCleanup(t *testing.T) {
 		routeInfo:           make(map[string]*modelRouteInfo),
 		routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 		loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-		callbacks:           make(map[string][]CallbackFunc),
+		callbacks:           make(map[string][]callbackEntry),
 		requestWaitingQueue: sync.Map{},
 	}
 
@@ -1053,7 +1129,7 @@ func TestStoreDeleteModelRoute_ConcurrentAccess(t *testing.T) {
 		routeInfo:           make(map[string]*modelRouteInfo),
 		routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 		loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-		callbacks:           make(map[string][]CallbackFunc),
+		callbacks:           make(map[string][]callbackEntry),
 		requestWaitingQueue: sync.Map{},
 	}
 

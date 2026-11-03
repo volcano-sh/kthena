@@ -164,10 +164,19 @@ type EventData struct {
 
 	ModelName  string
 	ModelRoute *aiv1alpha1.ModelRoute
+
+	SchedulerProfile *aiv1alpha1.SchedulerProfile
 }
 
 // CallbackFunc is the type of function that can be registered as a callback
 type CallbackFunc func(data EventData)
+
+// callbackEntry pairs a registered callback with an id, so it can be
+// unregistered (Go function values are not comparable).
+type callbackEntry struct {
+	id uint64
+	fn CallbackFunc
+}
 
 // PodRuntimeInspector fetches runtime metrics and loaded models for a pod.
 type PodRuntimeInspector interface {
@@ -212,6 +221,12 @@ type Store interface {
 	DeleteModelServer(name types.NamespacedName) error
 	// Get modelServer
 	GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServer
+	// Add or update a SchedulerProfile and trigger SchedulerProfile callbacks.
+	AddOrUpdateSchedulerProfile(profile *aiv1alpha1.SchedulerProfile)
+	// Delete a SchedulerProfile and trigger SchedulerProfile callbacks.
+	DeleteSchedulerProfile(name types.NamespacedName)
+	// Get a SchedulerProfile, or nil when absent.
+	GetSchedulerProfile(name types.NamespacedName) *aiv1alpha1.SchedulerProfile
 	GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, error)
 
 	// Refresh Store and ModelServer when add a new pod or update a pod
@@ -245,7 +260,7 @@ type Store interface {
 	GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*PodInfo, error)
 
 	// New methods for callback management
-	RegisterCallback(kind string, callback CallbackFunc)
+	RegisterCallback(kind string, callback CallbackFunc) (unregister func())
 	// Run to update pod info periodically
 	Run(context.Context)
 
@@ -390,6 +405,7 @@ type ModelTarget struct {
 
 type store struct {
 	modelServer            sync.Map // map[types.NamespacedName]*modelServer
+	schedulerProfiles      sync.Map // map[types.NamespacedName]*aiv1alpha1.SchedulerProfile
 	externalModelProviders sync.Map // map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider
 	pods                   sync.Map // map[types.NamespacedName]*PodInfo
 	secrets                sync.Map // map[types.NamespacedName]*corev1.Secret
@@ -425,8 +441,9 @@ type store struct {
 	httpRoutes     map[string]*gatewayv1.HTTPRoute // key: namespace/name, value: *gatewayv1.HTTPRoute
 	gatewayRoutes  map[string]sets.Set[string]     // key: gateway key (namespace/name), value: set of HTTPRoute keys
 	// New fields for callback management
-	callbacksMu sync.RWMutex
-	callbacks   map[string][]CallbackFunc
+	callbacksMu    sync.RWMutex
+	callbacks      map[string][]callbackEntry
+	nextCallbackID atomic.Uint64
 
 	// initialSynced is used to indicate whether all the resources has been processed and storred into this store.
 	initialSynced *atomic.Bool
@@ -451,7 +468,7 @@ func New(opts ...Option) Store {
 		inferencePools:      make(map[string]*inferencev1.InferencePool),
 		httpRoutes:          make(map[string]*gatewayv1.HTTPRoute),
 		gatewayRoutes:       make(map[string]sets.Set[string]),
-		callbacks:           make(map[string][]CallbackFunc),
+		callbacks:           make(map[string][]callbackEntry),
 		initialSynced:       &atomic.Bool{},
 		requestWaitingQueue: sync.Map{},
 		// Create token tracker with environment-based configuration
@@ -1004,6 +1021,44 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 func (s *store) GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServer {
 	if value, ok := s.modelServer.Load(name); ok {
 		return value.(*modelServer).getModelServer()
+	}
+	return nil
+}
+
+// AddOrUpdateSchedulerProfile stores the given SchedulerProfile and triggers
+// "SchedulerProfile" callbacks with the profile object.
+func (s *store) AddOrUpdateSchedulerProfile(profile *aiv1alpha1.SchedulerProfile) {
+	if profile == nil {
+		return
+	}
+	key := types.NamespacedName{Namespace: profile.Namespace, Name: profile.Name}
+	eventType := EventAdd
+	if _, existed := s.schedulerProfiles.Load(key); existed {
+		eventType = EventUpdate
+	}
+	s.schedulerProfiles.Store(key, profile)
+	s.triggerCallbacks("SchedulerProfile", EventData{
+		EventType:        eventType,
+		SchedulerProfile: profile,
+	})
+}
+
+// DeleteSchedulerProfile removes the SchedulerProfile and triggers
+// "SchedulerProfile" callbacks with the last-known object.
+func (s *store) DeleteSchedulerProfile(name types.NamespacedName) {
+	if value, loaded := s.schedulerProfiles.LoadAndDelete(name); loaded {
+		profile, _ := value.(*aiv1alpha1.SchedulerProfile)
+		s.triggerCallbacks("SchedulerProfile", EventData{
+			EventType:        EventDelete,
+			SchedulerProfile: profile,
+		})
+	}
+}
+
+// GetSchedulerProfile returns the stored SchedulerProfile, or nil when absent.
+func (s *store) GetSchedulerProfile(name types.NamespacedName) *aiv1alpha1.SchedulerProfile {
+	if value, ok := s.schedulerProfiles.Load(name); ok {
+		return value.(*aiv1alpha1.SchedulerProfile)
 	}
 	return nil
 }
@@ -1928,17 +1983,34 @@ func updateHistogramMetrics(podinfo *PodInfo, histogramMetrics map[string]*dto.H
 	}
 }
 
-// RegisterCallback registers a callback function for a specific resource
-func (s *store) RegisterCallback(kind string, callback CallbackFunc) {
+// RegisterCallback registers a callback function for a specific resource and
+// returns a function that unregisters it.
+func (s *store) RegisterCallback(kind string, callback CallbackFunc) (unregister func()) {
+	id := s.nextCallbackID.Add(1)
 	s.callbacksMu.Lock()
-	defer s.callbacksMu.Unlock()
-	s.callbacks[kind] = append(s.callbacks[kind], callback)
+	s.callbacks[kind] = append(s.callbacks[kind], callbackEntry{id: id, fn: callback})
+	s.callbacksMu.Unlock()
+
+	return func() {
+		s.callbacksMu.Lock()
+		defer s.callbacksMu.Unlock()
+		entries := s.callbacks[kind]
+		for i, entry := range entries {
+			if entry.id == id {
+				s.callbacks[kind] = append(entries[:i], entries[i+1:]...)
+				return
+			}
+		}
+	}
 }
 
 // triggerCallbacks executes all registered callbacks for a specific event type
 func (s *store) triggerCallbacks(kind string, data EventData) {
 	s.callbacksMu.RLock()
-	callbacks := s.callbacks[kind]
+	callbacks := make([]CallbackFunc, 0, len(s.callbacks[kind]))
+	for _, entry := range s.callbacks[kind] {
+		callbacks = append(callbacks, entry.fn)
+	}
 	s.callbacksMu.RUnlock()
 	for _, callback := range callbacks {
 		go callback(data)

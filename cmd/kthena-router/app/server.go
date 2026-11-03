@@ -125,11 +125,12 @@ func (s *Server) Run(ctx context.Context) {
 
 	// must be run before the controller, because it will register callbacks
 	r := NewRouter(store, s.RouterConfigFile, transportRegistry)
+
 	// start the configured resource source
 	if s.ConfigSource == ConfigSourceFile {
 		s.controllers = s.startFileSource(store, transportRegistry, ctx.Done())
 	} else {
-		s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst, transportRegistry)
+		s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst, transportRegistry, r.ProfileChainManager())
 	}
 
 	// Start store's periodic update loop after controllers have synced

@@ -69,6 +69,22 @@ func (m *MockStore) GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelS
 	return args.Get(0).(*aiv1alpha1.ModelServer)
 }
 
+func (m *MockStore) AddOrUpdateSchedulerProfile(profile *aiv1alpha1.SchedulerProfile) {
+	m.Called(profile)
+}
+
+func (m *MockStore) DeleteSchedulerProfile(name types.NamespacedName) {
+	m.Called(name)
+}
+
+func (m *MockStore) GetSchedulerProfile(name types.NamespacedName) *aiv1alpha1.SchedulerProfile {
+	args := m.Called(name)
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(*aiv1alpha1.SchedulerProfile)
+}
+
 func (m *MockStore) GetPodsByModelServer(name types.NamespacedName) ([]*datastore.PodInfo, error) {
 	args := m.Called(name)
 	if args.Get(0) == nil {
@@ -130,8 +146,9 @@ func (m *MockStore) GetPrefillPodsForDecodeGroup(modelServerName types.Namespace
 	return args.Get(0).([]*datastore.PodInfo), args.Error(1)
 }
 
-func (m *MockStore) RegisterCallback(kind string, callback datastore.CallbackFunc) {
+func (m *MockStore) RegisterCallback(kind string, callback datastore.CallbackFunc) (unregister func()) {
 	m.Called(kind, callback)
+	return func() {}
 }
 
 func (m *MockStore) Run(ctx context.Context) {
