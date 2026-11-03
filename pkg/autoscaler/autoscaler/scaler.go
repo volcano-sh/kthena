@@ -63,7 +63,7 @@ func (autoscaler *Autoscaler) UpdateAutoscalePolicy(autoscalePolicy *workload.Au
 }
 
 func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodLister, autoscalePolicy *workload.AutoscalingPolicy, currentInstancesCount int32) (int32, error) {
-	unreadyInstancesCountByMetric, readyInstancesMetrics, externalMetrics, err := autoscaler.Collector.UpdateMetrics(ctx, podLister, autoscaler.Meta.Config.Target.MetricSources)
+	unreadyInstancesCountByMetric, readyInstancesMetrics, externalMetrics, servingGroups, err := autoscaler.Collector.UpdateMetrics(ctx, podLister, autoscaler.Meta.Config.Target.MetricSources)
 	if err != nil {
 		klog.Errorf("update metrics error: %v", err)
 		return -1, err
@@ -79,6 +79,7 @@ func (autoscaler *Autoscaler) Scale(ctx context.Context, podLister listerv1.PodL
 		UnreadyInstancesCountByMetric: unreadyInstancesCountByMetric,
 		ReadyInstancesMetrics:         readyInstancesMetrics,
 		ExternalMetrics:               externalMetrics,
+		ReplicasByMetric:              servingGroupReplicaCounts(servingGroups),
 	})
 	if result.Skip {
 		klog.InfoS("skip recommended instances")
@@ -101,6 +102,7 @@ type scaleOneTargetInput struct {
 	UnreadyInstancesCountByMetric map[string]int32
 	ReadyInstancesMetrics         map[string][]algorithm.Metrics
 	ExternalMetrics               algorithm.Metrics
+	ReplicasByMetric              map[string]algorithm.ReplicaCount
 }
 
 type scaleOneTargetResult struct {
@@ -108,6 +110,16 @@ type scaleOneTargetResult struct {
 	CorrectedReplicas   int32
 	RefreshPanicMode    bool
 	Skip                bool
+}
+
+// servingGroupReplicaCounts returns the replica counts of targets whose replicas are
+// ServingGroups, which are homogeneous and heterogeneous targets.
+func servingGroupReplicaCounts(servingGroups map[string]servingGroupCount) map[string]algorithm.ReplicaCount {
+	counts := make(map[string]algorithm.ReplicaCount, len(servingGroups))
+	for metricName, groups := range servingGroups {
+		counts[metricName] = algorithm.ReplicaCount{Ready: float64(groups.ready), All: float64(groups.all)}
+	}
+	return counts
 }
 
 func scaleOneTarget(input scaleOneTargetInput) scaleOneTargetResult {
@@ -120,6 +132,7 @@ func scaleOneTarget(input scaleOneTargetInput) scaleOneTargetResult {
 		UnreadyInstancesCountByMetric: input.UnreadyInstancesCountByMetric,
 		ReadyInstancesMetrics:         input.ReadyInstancesMetrics,
 		ExternalMetrics:               input.ExternalMetrics,
+		ReplicasByMetric:              input.ReplicasByMetric,
 	}
 	recommendedReplicas, skip := instancesAlgorithm.GetRecommendedInstances()
 	if skip {

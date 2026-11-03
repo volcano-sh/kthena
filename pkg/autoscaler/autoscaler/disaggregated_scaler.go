@@ -166,7 +166,7 @@ func (autoscaler *DisaggregatedAutoscaler) Scale(ctx context.Context, podLister 
 
 		// Metric sources are role-scoped before each collection so pod scraping is
 		// automatically filtered to pods carrying the current role label.
-		unreadyInstancesCountByMetric, readyInstancesMetrics, externalMetrics, err := collector.UpdateMetrics(ctx, podLister, metricSourcesForRole(roleName, roleParam.MetricSources))
+		unreadyInstancesCountByMetric, readyInstancesMetrics, externalMetrics, servingGroups, err := collector.UpdateMetrics(ctx, podLister, metricSourcesForRole(roleName, roleParam.MetricSources))
 		if err != nil {
 			return nil, fmt.Errorf("update metrics for role %s: %w", roleName, err)
 		}
@@ -182,6 +182,7 @@ func (autoscaler *DisaggregatedAutoscaler) Scale(ctx context.Context, podLister 
 			UnreadyInstancesCountByMetric: unreadyInstancesCountByMetric,
 			ReadyInstancesMetrics:         readyInstancesMetrics,
 			ExternalMetrics:               externalMetrics,
+			ReplicasByMetric:              roleReplicaCounts(servingGroups, readyInstancesMetrics, unreadyInstancesCountByMetric),
 		})
 		if scaleResult.Skip {
 			klog.InfoS("skip disaggregated scaling because role metrics are unavailable", "role", roleName)
@@ -268,6 +269,25 @@ func GetDisaggregatedMetricTargets(policy *workload.AutoscalingPolicy) map[strin
 // disaggregated policy with no ratio constraint.
 func isFixedRole(roleParam workload.RoleScalingParam) bool {
 	return roleParam.MaxReplicas > 0 && roleParam.MinReplicas == roleParam.MaxReplicas
+}
+
+// roleReplicaCounts returns the replica counts of a disaggregated role. Its replicas are
+// per ServingGroup, so the count is the selected pods divided by their ServingGroups. For
+// example, 4 pods in 2 ServingGroups are 2 role replicas.
+func roleReplicaCounts(servingGroups map[string]servingGroupCount, ready map[string][]algorithm.Metrics, unready map[string]int32) map[string]algorithm.ReplicaCount {
+	counts := make(map[string]algorithm.ReplicaCount, len(servingGroups))
+	for metricName, groups := range servingGroups {
+		readyPods := float64(len(ready[metricName]))
+		var count algorithm.ReplicaCount
+		if groups.ready > 0 {
+			count.Ready = readyPods / float64(groups.ready)
+		}
+		if groups.all > 0 {
+			count.All = (readyPods + float64(unready[metricName])) / float64(groups.all)
+		}
+		counts[metricName] = count
+	}
+	return counts
 }
 
 // metricSourcesForRole returns a defensive copy of metric sources with pod
