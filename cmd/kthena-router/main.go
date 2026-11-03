@@ -155,7 +155,8 @@ func main() {
 
 // handleTerminationSignals cancels the router's context on the first signal.
 // The router then drains in-flight requests before it exits, which can take up
-// to DRAIN_TIMEOUT, so a second signal exits without waiting for the drain.
+// to DRAIN_TIMEOUT plus a few seconds, so a second signal exits without waiting
+// for the drain.
 func handleTerminationSignals(signalCh <-chan os.Signal, cancel context.CancelFunc, exit func(int)) {
 	<-signalCh
 	klog.Info("Received termination, signaling shutdown")
