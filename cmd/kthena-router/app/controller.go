@@ -41,6 +41,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/controller"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler"
 	"github.com/volcano-sh/kthena/pkg/kube"
 )
 
@@ -54,7 +55,7 @@ type aggregatedController struct {
 
 var _ Controller = &aggregatedController{}
 
-func startControllers(store datastore.Store, stop <-chan struct{}, enableGatewayAPI bool, defaultPort string, enableGatewayAPIInferenceExtension bool, kubeAPIQPS float32, kubeAPIBurst int, transportRegistry *common.TransportRegistry) Controller {
+func startControllers(store datastore.Store, stop <-chan struct{}, enableGatewayAPI bool, defaultPort string, enableGatewayAPIInferenceExtension bool, kubeAPIQPS float32, kubeAPIBurst int, transportRegistry *common.TransportRegistry, chainManager *scheduler.ProfileChainManager) Controller {
 	cfg, err := kube.BuildConfig("", "")
 	if err != nil {
 		klog.Fatalf("Error building kubeconfig: %s", err.Error())
@@ -92,11 +93,20 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	if err != nil {
 		klog.Fatalf("Error creating model server controller: %s", err.Error())
 	}
+	profileStatusController, err := controller.NewProfileStatusController(kthenaInformerFactory, chainManager, chainManager.BuildSettled(), kthenaClient)
+	if err != nil {
+		klog.Fatalf("Error creating profile status controller: %s", err.Error())
+	}
+	schedulerProfileController, err := controller.NewSchedulerProfileController(kthenaInformerFactory, store)
+	if err != nil {
+		klog.Fatalf("Error creating scheduler profile controller: %s", err.Error())
+	}
 
 	cacheSyncs := []cache.InformerSynced{
 		kthenaInformerFactory.Networking().V1alpha1().ModelRoutes().Informer().HasSynced,
 		kthenaInformerFactory.Networking().V1alpha1().ExternalModelProviders().Informer().HasSynced,
 		kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().HasSynced,
+		kthenaInformerFactory.Networking().V1alpha1().SchedulerProfiles().Informer().HasSynced,
 		kubeInformerFactory.Core().V1().Pods().Informer().HasSynced,
 	}
 
@@ -162,7 +172,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 		klog.Fatalf("Failed to sync informer caches")
 	}
 
-	controllers := []Controller{modelRouteController, externalModelProviderController, modelServerController}
+	controllers := []Controller{modelRouteController, externalModelProviderController, modelServerController, profileStatusController, schedulerProfileController}
 
 	go func() {
 		if err := modelRouteController.Run(stop); err != nil {
@@ -177,6 +187,16 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	go func() {
 		if err := modelServerController.Run(stop); err != nil {
 			klog.Fatalf("Error running model server controller: %s", err.Error())
+		}
+	}()
+	go func() {
+		if err := profileStatusController.Run(stop); err != nil {
+			klog.Fatalf("Error running profile status controller: %s", err.Error())
+		}
+	}()
+	go func() {
+		if err := schedulerProfileController.Run(stop); err != nil {
+			klog.Fatalf("Error running scheduler profile controller: %s", err.Error())
 		}
 	}()
 

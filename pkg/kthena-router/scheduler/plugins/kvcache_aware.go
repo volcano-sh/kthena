@@ -129,6 +129,10 @@ type KVCacheAware struct {
 	processor        *TokenBlockProcessor
 	tokenizerManager *tokenization.TokenizerManager
 	gcCursor         uint64
+	// modeStop tears down the active mode's background workers (memory: KV
+	// event subscriber + index GC; redis: gcStaleFields ticker) and the
+	// pod-event callback when the plugin is closed.
+	modeStop func()
 }
 
 var _ framework.ScorePlugin = &KVCacheAware{}
@@ -158,7 +162,7 @@ func (b KVCacheAwareBlock) String(prefix string) string {
 	return fmt.Sprintf("%s%s@%d", prefix, b.ModelName, b.ChunkHash)
 }
 
-func NewKVCacheAware(store datastore.Store, pluginArg runtime.RawExtension) *KVCacheAware {
+func NewKVCacheAware(store datastore.Store, pluginArg runtime.RawExtension) (*KVCacheAware, error) {
 	klog.Infof("KVCacheAware: initializing plugin, raw args length=%d", len(pluginArg.Raw))
 
 	var args KVCacheAwareArgs
@@ -176,7 +180,10 @@ func NewKVCacheAware(store datastore.Store, pluginArg runtime.RawExtension) *KVC
 	if maxBlocksToMatch <= 0 {
 		maxBlocksToMatch = defaultMaxBlocksToMatch
 	}
-	indexMode := normalizeIndexMode(args.IndexMode)
+	indexMode, err := normalizeIndexMode(args.IndexMode)
+	if err != nil {
+		return nil, err
+	}
 
 	vllmPort := normalizeTokenizerPort(tokenization.EngineVLLM, args.VLLMTokenizerPort, defaultVLLMTokenizerPort)
 	sglangPort := normalizeTokenizerPort(tokenization.EngineSGLang, args.SGLangTokenizerPort, defaultSGLangTokenizerPort)
@@ -204,8 +211,10 @@ func NewKVCacheAware(store datastore.Store, pluginArg runtime.RawExtension) *KVC
 
 	if indexMode == kvCacheIndexModeMemory {
 		plugin.memoryIndex = NewKVBlockMemoryIndex(args.MaxBlocksPerPod)
-		plugin.startMemoryMode(store, args)
-		return plugin
+		if err := plugin.startMemoryMode(store, args); err != nil {
+			return nil, err
+		}
+		return plugin, nil
 	}
 
 	redisClient := utils.TryGetRedisClient()
@@ -216,41 +225,46 @@ func NewKVCacheAware(store datastore.Store, pluginArg runtime.RawExtension) *KVC
 	}
 	plugin.redisClient = redisClient
 	plugin.startGC()
-	return plugin
+	return plugin, nil
 }
 
-func normalizeIndexMode(mode string) string {
+func normalizeIndexMode(mode string) (string, error) {
 	switch mode {
 	case "", kvCacheIndexModeRedis:
-		return kvCacheIndexModeRedis
+		return kvCacheIndexModeRedis, nil
 	case kvCacheIndexModeMemory:
-		return kvCacheIndexModeMemory
+		return kvCacheIndexModeMemory, nil
 	default:
-		klog.Fatalf("KVCacheAware: invalid indexMode %q, must be %q or %q",
+		return "", fmt.Errorf("invalid indexMode %q, must be %q or %q",
 			mode, kvCacheIndexModeRedis, kvCacheIndexModeMemory)
-		return ""
 	}
 }
 
 // startMemoryMode starts streaming KV events from the runtime sidecars and the
 // in-memory index GC.
-func (t *KVCacheAware) startMemoryMode(store datastore.Store, args KVCacheAwareArgs) {
+func (t *KVCacheAware) startMemoryMode(store datastore.Store, args KVCacheAwareArgs) error {
 	if store == nil {
-		klog.Fatalf("KVCacheAware: memory mode requires a datastore to find runtime sidecars")
+		return fmt.Errorf("memory mode requires a datastore to find runtime sidecars")
 	}
 	runtimePort := args.RuntimePort
 	if runtimePort == 0 {
 		runtimePort = defaultRuntimePort
 	} else if runtimePort < 1 || runtimePort > maxTokenizerPort {
-		klog.Fatalf("KVCacheAware: invalid runtimePort %d, must be within [1, %d]", runtimePort, maxTokenizerPort)
+		return fmt.Errorf("invalid runtimePort %d, must be within [1, %d]", runtimePort, maxTokenizerPort)
 	}
 
-	go t.memoryIndex.runGC(context.Background(), kvCacheGCInterval, kvCacheFieldFreshDuration)
 	subscriber := newKVEventSubscriber(store, t.memoryIndex, routerInstanceID(), runtimePort)
-	store.RegisterCallback("Pod", subscriber.onPodEvent)
-	go subscriber.run(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	unregister := store.RegisterCallback("Pod", subscriber.onPodEvent)
+	go subscriber.run(ctx)
+	go t.memoryIndex.runGC(ctx, kvCacheGCInterval, kvCacheFieldFreshDuration)
+	t.modeStop = func() {
+		cancel()
+		unregister()
+	}
 	klog.Infof("KVCacheAware: memory mode active, runtimePort=%d, maxBlocksPerPod=%d",
 		runtimePort, t.memoryIndex.maxBlocksPerOwner)
+	return nil
 }
 
 func normalizeTokenizerPort(engine string, configuredPort, defaultPort int) int {
@@ -288,6 +302,18 @@ func normalizeTokenizerServiceArgs(args *TokenizerServiceArgs) tokenization.Toke
 
 func (t *KVCacheAware) Name() string {
 	return t.name
+}
+
+// Close stops the active mode's background workers and unregisters the pod
+// event callback. In-flight requests keep working against the index; it just
+// stops receiving updates.
+func (t *KVCacheAware) Close() error {
+	if t.modeStop != nil {
+		t.modeStop()
+		t.modeStop = nil
+		klog.V(2).Infof("KVCacheAware: stopped %s mode workers", t.indexMode)
+	}
+	return nil
 }
 
 func (t *KVCacheAware) normalizeAndTokenizePrompt(ctx *framework.Context, pods []*datastore.PodInfo) ([]uint32, error) {
@@ -497,14 +523,21 @@ func (t *KVCacheAware) startGC() {
 	if t.redisClient == nil {
 		return
 	}
-	go t.runGC()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.modeStop = cancel
+	go t.runGC(ctx)
 }
 
-func (t *KVCacheAware) runGC() {
+func (t *KVCacheAware) runGC(ctx context.Context) {
 	ticker := time.NewTicker(kvCacheGCInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		t.gcStaleFields()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t.gcStaleFields()
+		}
 	}
 }
 
@@ -731,4 +764,42 @@ func (tbp *TokenBlockProcessor) computeBlockHashes(chunks [][]uint32) []uint64 {
 		hashes[i] = computeStandardizedHash(chunk)
 	}
 	return hashes
+}
+
+// ValidateKVCacheAwareArgs validates the kvcache-aware plugin arguments:
+// indexMode must be "redis" or "memory", the tokenizer/runtime ports must be
+// within [0, 65535], and size knobs must not be negative.
+func ValidateKVCacheAwareArgs(pluginArg runtime.RawExtension) error {
+	if len(pluginArg.Raw) == 0 {
+		return nil
+	}
+
+	var args KVCacheAwareArgs
+	if err := yaml.Unmarshal(pluginArg.Raw, &args); err != nil {
+		return fmt.Errorf("unmarshal kvcache-aware arguments: %w", err)
+	}
+
+	if args.IndexMode != "" && args.IndexMode != kvCacheIndexModeRedis && args.IndexMode != kvCacheIndexModeMemory {
+		return fmt.Errorf("indexMode must be %q or %q, got %q", kvCacheIndexModeRedis, kvCacheIndexModeMemory, args.IndexMode)
+	}
+	for name, port := range map[string]int{
+		"vllmTokenizerPort":   args.VLLMTokenizerPort,
+		"sglangTokenizerPort": args.SGLangTokenizerPort,
+		"runtimePort":         args.RuntimePort,
+	} {
+		if port < 0 || port > maxTokenizerPort {
+			return fmt.Errorf("%s must be within [0, %d], got %d", name, maxTokenizerPort, port)
+		}
+	}
+
+	if args.BlockSizeToHash < 0 {
+		return fmt.Errorf("blockSizeToHash must not be negative, got %d", args.BlockSizeToHash)
+	}
+	if args.MaxBlocksToMatch < 0 {
+		return fmt.Errorf("maxBlocksToMatch must not be negative, got %d", args.MaxBlocksToMatch)
+	}
+	if args.MaxBlocksPerPod < 0 {
+		return fmt.Errorf("maxBlocksPerPod must not be negative, got %d", args.MaxBlocksPerPod)
+	}
+	return nil
 }

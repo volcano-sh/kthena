@@ -17,7 +17,10 @@ limitations under the License.
 package plugins
 
 import (
+	"fmt"
 	"slices"
+
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
@@ -45,4 +48,13 @@ func (l *LoraAffinity) Filter(ctx *framework.Context, pods []*datastore.PodInfo)
 	return slices.DeleteFunc(pods, func(info *datastore.PodInfo) bool {
 		return !info.Contains(ctx.Model)
 	})
+}
+
+// ValidateLoraAffinityArgs validates the lora-affinity plugin arguments: the
+// plugin takes no arguments, so any non-empty args are rejected.
+func ValidateLoraAffinityArgs(pluginArg runtime.RawExtension) error {
+	if len(pluginArg.Raw) > 0 {
+		return fmt.Errorf("lora-affinity plugin takes no arguments")
+	}
+	return nil
 }
