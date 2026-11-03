@@ -80,6 +80,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/external-model-provider',
             'user-guide/config-router',
             'user-guide/standalone-router',
+            'user-guide/prefix-cache',
             'user-guide/kvcache-aware',
             'user-guide/tokenizer-service',
             'user-guide/fairness-scheduling',
