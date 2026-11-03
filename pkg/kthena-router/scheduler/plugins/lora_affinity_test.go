@@ -35,45 +35,79 @@ func TestLoraAffinityFilter(t *testing.T) {
 	matchingPod.UpdateModels([]string{"base-model", "adapter-a"})
 	otherPod := schedulerTestPod("other")
 	otherPod.UpdateModels([]string{"base-model", "adapter-b"})
-	emptyModelPod := schedulerTestPod("empty-model")
-	emptyModelPod.UpdateModels([]string{""})
+	unknownPod := schedulerTestPod("unknown")
 
 	tests := []struct {
 		name          string
 		model         string
+		isLora        bool
 		pods          []*datastore.PodInfo
 		expectedNames []string
 	}{
 		{
 			name:          "empty pod list",
 			model:         "adapter-a",
+			isLora:        true,
 			pods:          []*datastore.PodInfo{},
 			expectedNames: []string{},
 		},
 		{
 			name:          "keeps pods containing requested model",
 			model:         "adapter-a",
-			pods:          []*datastore.PodInfo{matchingPod, otherPod},
+			isLora:        true,
+			pods:          []*datastore.PodInfo{otherPod, matchingPod, unknownPod},
 			expectedNames: []string{"matching"},
 		},
 		{
 			name:          "filters pods without requested model",
 			model:         "missing-adapter",
+			isLora:        true,
 			pods:          []*datastore.PodInfo{matchingPod, otherPod},
 			expectedNames: []string{},
 		},
 		{
-			name:          "empty model name uses contains semantics",
+			name:          "empty model name passes all pods",
 			model:         "",
-			pods:          []*datastore.PodInfo{matchingPod, emptyModelPod},
-			expectedNames: []string{"empty-model"},
+			isLora:        true,
+			pods:          []*datastore.PodInfo{matchingPod, unknownPod},
+			expectedNames: []string{"matching", "unknown"},
+		},
+		{
+			name:          "base model passes pods before model discovery",
+			model:         "base-model",
+			pods:          []*datastore.PodInfo{matchingPod, otherPod, unknownPod},
+			expectedNames: []string{"matching", "other", "unknown"},
+		},
+		{
+			name:          "base alias need not appear in loaded models",
+			model:         "public-model-alias",
+			pods:          []*datastore.PodInfo{matchingPod, otherPod, unknownPod},
+			expectedNames: []string{"matching", "other", "unknown"},
+		},
+		{
+			name:          "adapter before model discovery has no eligible pods",
+			model:         "adapter-a",
+			isLora:        true,
+			pods:          []*datastore.PodInfo{unknownPod},
+			expectedNames: []string{},
+		},
+		{
+			name:          "all pods advertise requested base model",
+			model:         "base-model",
+			pods:          []*datastore.PodInfo{matchingPod, otherPod},
+			expectedNames: []string{"matching", "other"},
+		},
+		{
+			name:   "nil pods",
+			model:  "adapter-a",
+			isLora: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			plugin := NewLoraAffinity()
-			filtered := plugin.Filter(&framework.Context{Model: tt.model}, append([]*datastore.PodInfo(nil), tt.pods...))
+			filtered := plugin.Filter(&framework.Context{Model: tt.model, IsLora: tt.isLora}, append([]*datastore.PodInfo(nil), tt.pods...))
 			if len(filtered) != len(tt.expectedNames) {
 				t.Fatalf("expected %d pods, got %d", len(tt.expectedNames), len(filtered))
 			}
