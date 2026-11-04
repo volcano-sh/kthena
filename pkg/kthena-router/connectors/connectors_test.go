@@ -66,6 +66,14 @@ func TestFactory(t *testing.T) {
 		t.Errorf("Expected NIXL connector name 'nixl', got '%s'", nixlConnector.Name())
 	}
 
+	trtConnector := factory.GetConnector(ConnectorTypeTensorRTLLM)
+	if trtConnector == nil {
+		t.Error("Expected TensorRT-LLM connector to be registered")
+	}
+	if trtConnector != nil && trtConnector.Name() != "tensorrtllm" {
+		t.Errorf("Expected TensorRT-LLM connector name 'tensorrtllm', got '%s'", trtConnector.Name())
+	}
+
 	// Test LMCache connector (currently uses HTTP implementation)
 	lmcacheConnector := factory.GetConnector(v1alpha1.ConnectorTypeLMCache)
 	if lmcacheConnector == nil {

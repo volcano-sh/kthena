@@ -28,18 +28,23 @@ spec:
                     mountPath: /models
             containers:
               - name: prefill
-                # Official NGC TensorRT-LLM release image.
-                # Router HTTP PD: max_tokens=1 non-stream to Prefill, then Decode.
+                # Official NGC TensorRT-LLM release image (NIXL KV transceiver).
                 image: nvcr.io/nvidia/tensorrt-llm/release:1.0.0
                 command: ["sh", "-c"]
                 args:
                   - |
                     # --extra_llm_api_options points at this file:
                     #
+                    #   disable_overlap_scheduler: true
                     #   enable_iter_perf_stats: true
+                    #   cache_transceiver_config:
+                    #     backend: NIXL
                     #
                     cat >/tmp/extra_llm_api_options.yaml <<'EOF'
+                    disable_overlap_scheduler: true
                     enable_iter_perf_stats: true
+                    cache_transceiver_config:
+                      backend: NIXL
                     EOF
                     trtllm-serve serve /models/TinyLlama-1.1B-Chat-v1.0 \
                       --host 0.0.0.0 \
@@ -55,6 +60,10 @@ spec:
                 resources:
                   limits:
                     nvidia.com/gpu: 1
+                securityContext:
+                  capabilities:
+                    add:
+                      - IPC_LOCK
                 readinessProbe:
                   initialDelaySeconds: 30
                   periodSeconds: 10
@@ -101,8 +110,16 @@ spec:
                 command: ["sh", "-c"]
                 args:
                   - |
+                    # --extra_llm_api_options points at this file:
+                    #
+                    #   enable_iter_perf_stats: true
+                    #   cache_transceiver_config:
+                    #     backend: NIXL
+                    #
                     cat >/tmp/extra_llm_api_options.yaml <<'EOF'
                     enable_iter_perf_stats: true
+                    cache_transceiver_config:
+                      backend: NIXL
                     EOF
                     trtllm-serve serve /models/TinyLlama-1.1B-Chat-v1.0 \
                       --host 0.0.0.0 \
@@ -118,6 +135,10 @@ spec:
                 resources:
                   limits:
                     nvidia.com/gpu: 1
+                securityContext:
+                  capabilities:
+                    add:
+                      - IPC_LOCK
                 readinessProbe:
                   initialDelaySeconds: 30
                   periodSeconds: 10
@@ -149,7 +170,7 @@ metadata:
   name: trtllm-tinyllama-pd
   namespace: default
 spec:
-  # Default HTTP connector: router proxies Prefill (max_tokens=1) then Decode.
+  # TensorRTLLM engine auto-selects the native NIXL PD connector
   workloadSelector:
     matchLabels:
       modelserving.volcano.sh/name: trtllm-tinyllama-pd

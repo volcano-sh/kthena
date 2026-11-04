@@ -4,8 +4,8 @@ metadata:
   name: trtllm-tinyllama-pd
   namespace: default
 spec:
-  # Default HTTP connector: Prefill (max_tokens=1, non-stream) then Decode.
-  # Pair with examples/model-serving/gpu-pd-tensorrtllm.yaml.
+  # Pair with examples/model-serving/gpu-pd-tensorrtllm.yaml (NIXL transceiver).
+  # inferenceEngine TensorRTLLM auto-selects the native PD connector.
   workloadSelector:
     matchLabels:
       modelserving.volcano.sh/name: trtllm-tinyllama-pd
