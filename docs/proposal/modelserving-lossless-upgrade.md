@@ -143,21 +143,18 @@ teardown never overlap.
 
 #### Router: drain on deletionTimestamp
 
-Today the router reacts to a deleted Pod by removing it from the store (losing
-in-flight tracking). The change is small and local: `deletionTimestamp` is
-carried on the Pod object itself, so no extra marker is needed — the router
-keeps the `PodInfo` when the Pod enters deletion (in-flight metrics keep being
-scraped) and the scheduling-candidate queries exclude Pods carrying a
-`deletionTimestamp` (via the existing `IsDraining` checks, now driven by the
-Pod's own deletionTimestamp). The exclusion points cover `GetPodsByModelServer`,
-`GetDecodePods`, `GetPrefillPods`, `GetPrefillPodsForDecodeGroup`, and
-`GetPodsByInferencePool`; the router surface stays "stop dispatching only" — it
-never judges completion and never writes to Pods, so **no `pods/patch`
-permission is needed**. The signal delivery is guaranteed by the standard
-client-go informer behavior: setting `deletionTimestamp` is a Pod update
-(bumping resourceVersion), and the router's Pod informer registers unfiltered
-handlers — every replica receives the transition event. The Pod leaves the
-store on the object-delete event, as today.
+On `deletionTimestamp` the router keeps the Pod in its store — in-flight
+metrics keep being scraped — while the scheduling-candidate queries exclude
+Pods carrying a `deletionTimestamp` (via the existing `IsDraining` checks,
+driven by the Pod's own deletionTimestamp). The exclusion points cover
+`GetPodsByModelServer`, `GetDecodePods`, `GetPrefillPods`,
+`GetPrefillPodsForDecodeGroup`, and `GetPodsByInferencePool`. New requests
+therefore go only to non-draining Pods, while the in-flight requests on the
+draining Pod keep running to completion. The signal delivery is guaranteed by
+the standard client-go informer behavior: setting `deletionTimestamp` is a Pod
+update (bumping resourceVersion), and the router's Pod informer registers
+unfiltered handlers — every replica receives the transition event. The Pod
+leaves the store on the object-delete event.
 
 #### preStop: judge in-flight from engine metrics
 
@@ -169,7 +166,7 @@ the counters stay at zero for N consecutive polls (with a short settle delay) �
 the repetition closes the dispatch-to-admission window where a request has been
 forwarded by the router but not yet admitted by the engine. The hook also runs
 with an internal timeout — the effective wait is `min(DRAIN_TIMEOUT,
-GRACE_SECONDS - SHUTDOWN_RESERVE)` (see
+70% × GRACE_SECONDS)` (see
 [Configuration](#configuration)): if zero is not reached in time, it logs a
 warning and exits, letting SIGTERM + grace handle the residual.
 
@@ -235,25 +232,16 @@ skips preStop entirely). The router drains unconditionally either way; for Pods
 without a hook this is harmless (SIGTERM follows within seconds) and strictly
 better than today (in-flight tracking is kept instead of dropped).
 
-**Three values, one auto-correction**: the hook reads two env vars and the
-controller injects a third at Pod creation (the grace period is already in the
-Pod spec being rendered):
-
-- `DRAIN_TIMEOUT` — how long the hook waits for in-flight to drain (user
-  intent; e.g. 300s)
-- `GRACE_SECONDS` — the Pod's `terminationGracePeriodSeconds`, injected by the
-  controller (e.g. 600)
-- `SHUTDOWN_RESERVE` — time reserved for the engine's SIGTERM shutdown (e.g.
-  60s, template default)
-
-The hook's effective wait is `min(DRAIN_TIMEOUT, GRACE_SECONDS -
-SHUTDOWN_RESERVE)`. This auto-correction removes a silent misconfiguration
-trap: if a user sets `DRAIN_TIMEOUT` longer than the grace period, the kubelet
-would SIGKILL the Pod mid-drain with no SIGTERM window at all — with the
-minimum, the hook always yields before the grace deadline and the engine keeps
-a shutdown window. Users who set a modest `DRAIN_TIMEOUT` see exactly that
-value; an oversized one is clipped, not honored. `SHUTDOWN_RESERVE` has a
-conservative template default (60s) since engine SIGTERM exit time varies.
+**Two values, one split rule**: the hook reads `DRAIN_TIMEOUT` (how long to
+wait for in-flight to drain; user intent, e.g. 300s) and the controller injects
+`GRACE_SECONDS` (the Pod's `terminationGracePeriodSeconds`, e.g. 600) at Pod
+creation. The effective wait is `min(DRAIN_TIMEOUT, 70% × GRACE_SECONDS)`: the
+drain never takes more than 70% of the grace budget, so at least 30% always
+remains for the engine's SIGTERM shutdown — a hook that waits until the grace
+deadline would starve the SIGTERM window entirely and end in a bare SIGKILL.
+With the 70% split the two settings cannot conflict: a modest `DRAIN_TIMEOUT`
+is honored exactly, an oversized one is clipped at the 70% line. Example:
+`GRACE_SECONDS=600` caps the drain at 420s and reserves 180s for shutdown.
 
 **Deployment practice**: keeping `maxUnavailable: 0` + `maxSurge: 1` remains
 the recommended configuration so serving capacity never dips during an update,
@@ -275,20 +263,14 @@ semantics of that setting, not something the drain adds).
 
 ### Alternatives
 
-- **Controller-side gate with annotation handshake**: the controller annotates
-  draining Pods and deletes only after the router confirms in-flight zero.
-  Rejected: it grows the controller's delete path (a two-phase state machine on
-  an already complex component), needs `pods/patch` on both components, and
-  relies on the router's local `onFlight` counter, which splits per-replica in
-  multi-router deployments without Redis.
-- **Finalizer-based gating**: a finalizer holds back the deletion of the API
-  object, but not the container teardown — the kubelet kills the container as
-  soon as `deletionTimestamp` is set, regardless of finalizers. Without a
-  blocking preStop the drain would start after the engine is already being
-  terminated.
-- **preStop waiting for a router-written confirmation** (annotation or
-  finalizer): requires API read access (SA + RBAC) on every inference Pod, and
-  makes drain correctness depend on the hook surviving to see the signal.
-  Judging from local engine metrics removes both.
-- **preStop with a fixed sleep**: every Pod waits the full fixed duration even
-  when it drains in one second. Rejected in favor of metric-based exit.
+Earlier iterations of this proposal (and the community discussion that shaped
+it) considered: a **controller-side gate with an annotation handshake** —
+rejected because it grows the controller's delete path and relies on the
+router's local `onFlight` counter, which splits per-replica in multi-router
+deployments without Redis; **finalizer-based gating** — rejected because a
+finalizer holds back the deletion of the API object, not the container teardown
+(the kubelet kills the container as soon as `deletionTimestamp` is set);
+**preStop waiting for a router-written confirmation** — rejected because it
+requires API read access on every inference Pod; and a **fixed sleep in
+preStop** — rejected as non-adaptive. The engine-metric zero-check and the PD
+paired-decode rule carried over across all of these.
