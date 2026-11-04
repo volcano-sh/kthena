@@ -19,6 +19,10 @@ TensorRT-LLM 1.0.0 exposes the buffered HTTP path when
 `kv_cache_config.enable_block_reuse=true` and
 `kv_cache_config.event_buffer_max_size>0`. Streaming ZMQ KVEventsConfig is
 not required for this path.
+
+Polling cadence follows NVIDIA Dynamo's TRT-LLM publisher: when the drain
+returns events, sleep resets to a short minimum; when empty, sleep grows
+with exponential backoff up to a cap (default 5ms → 20ms, factor 1.5).
 """
 
 from __future__ import annotations
@@ -42,8 +46,18 @@ from kthena.runtime.events import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_POLL_INTERVAL = 1.0
+# Aligned with ai-dynamo/dynamo trtllm publisher.py KV event polling.
+DEFAULT_MIN_SLEEP_SEC = 0.005
+DEFAULT_MAX_SLEEP_SEC = 0.02
+DEFAULT_BACKOFF_FACTOR = 1.5
 DEFAULT_EVENTS_PATH = "/kv_cache_events"
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return float(raw)
 
 
 def _token_ids_from_block(block: Dict[str, Any]) -> List[int]:
@@ -66,7 +80,9 @@ class TensorRTLLMKVEventPoller:
         pod_identifier: str,
         model_name: str,
         client: Optional[httpx.AsyncClient] = None,
-        poll_interval: Optional[float] = None,
+        min_sleep: Optional[float] = None,
+        max_sleep: Optional[float] = None,
+        backoff_factor: Optional[float] = None,
         events_path: Optional[str] = None,
     ):
         self.engine_base_url = engine_base_url.rstrip("/")
@@ -75,11 +91,33 @@ class TensorRTLLMKVEventPoller:
         self.events_path = events_path or os.getenv(
             "TRTLLM_KV_EVENTS_PATH", DEFAULT_EVENTS_PATH
         )
-        self.poll_interval = (
-            poll_interval
-            if poll_interval is not None
-            else float(os.getenv("TRTLLM_KV_EVENTS_POLL_INTERVAL", DEFAULT_POLL_INTERVAL))
+
+        self.min_sleep = (
+            min_sleep
+            if min_sleep is not None
+            else _env_float("TRTLLM_KV_EVENTS_MIN_SLEEP_SEC", DEFAULT_MIN_SLEEP_SEC)
         )
+        self.max_sleep = (
+            max_sleep
+            if max_sleep is not None
+            else _env_float("TRTLLM_KV_EVENTS_MAX_SLEEP_SEC", DEFAULT_MAX_SLEEP_SEC)
+        )
+        self.backoff_factor = (
+            backoff_factor
+            if backoff_factor is not None
+            else _env_float(
+                "TRTLLM_KV_EVENTS_BACKOFF_FACTOR", DEFAULT_BACKOFF_FACTOR
+            )
+        )
+        if self.min_sleep <= 0 or self.max_sleep < self.min_sleep:
+            raise ValueError(
+                f"invalid KV poll sleep bounds: min={self.min_sleep}, max={self.max_sleep}"
+            )
+        if self.backoff_factor < 1.0:
+            raise ValueError(
+                f"invalid KV poll backoff_factor={self.backoff_factor}, must be >= 1"
+            )
+
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(5.0))
         self.event_publisher = get_event_publisher()
@@ -92,10 +130,13 @@ class TensorRTLLMKVEventPoller:
         self.running = True
         self._task = asyncio.create_task(self._run())
         logger.info(
-            "TensorRT-LLM KV event poller started (%s%s, interval=%.2fs)",
+            "TensorRT-LLM KV event poller started (%s%s, "
+            "min_sleep=%.3fs max_sleep=%.3fs backoff=%.2f)",
             self.engine_base_url,
             self.events_path,
-            self.poll_interval,
+            self.min_sleep,
+            self.max_sleep,
+            self.backoff_factor,
         )
         await self._task
 
@@ -112,21 +153,37 @@ class TensorRTLLMKVEventPoller:
             await self.client.aclose()
         logger.info("TensorRT-LLM KV event poller stopped")
 
+    def _next_idle_sleep(self, sleep_s: float) -> float:
+        """Grow idle sleep toward max_sleep (Dynamo backoff)."""
+        return min(self.max_sleep, sleep_s * self.backoff_factor)
+
     async def _run(self) -> None:
         url = f"{self.engine_base_url}{self.events_path}"
+        sleep_s = self.min_sleep
         while self.running:
+            had_data = False
             try:
                 resp = await self.client.post(url, json={})
                 resp.raise_for_status()
                 events = resp.json()
                 if isinstance(events, list) and events:
+                    had_data = True
                     await self._handle_events(events)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning("TensorRT-LLM KV event poll failed: %s", e)
+
+            if had_data:
+                # Dynamo: data resets backoff to the minimum.
+                sleep_s = self.min_sleep
+                next_sleep = sleep_s
+            else:
+                next_sleep = sleep_s
+                sleep_s = self._next_idle_sleep(sleep_s)
+
             try:
-                await asyncio.sleep(self.poll_interval)
+                await asyncio.sleep(next_sleep)
             except asyncio.CancelledError:
                 break
 

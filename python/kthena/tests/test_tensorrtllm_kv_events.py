@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock
 
@@ -121,3 +122,71 @@ async def test_handle_events_wraps_created_and_stored():
     assert len(published) == 1
     assert published[0].vllm_event.block_hashes == [4565548111910448042]
     assert len(published[0].vllm_event.token_ids) == 32
+
+
+def test_dynamo_style_backoff_defaults():
+    poller = TensorRTLLMKVEventPoller(
+        engine_base_url="http://127.0.0.1:9",
+        pod_identifier="pod-a",
+        model_name="m",
+        client=AsyncMock(),
+    )
+    assert poller.min_sleep == 0.005
+    assert poller.max_sleep == 0.02
+    assert poller.backoff_factor == 1.5
+    assert poller._next_idle_sleep(0.005) == pytest.approx(0.0075)
+    assert poller._next_idle_sleep(0.02) == pytest.approx(0.02)
+
+
+@pytest.mark.asyncio
+async def test_run_backoff_resets_on_data(monkeypatch):
+    """Idle grows sleep; a non-empty drain resets to min_sleep (Dynamo)."""
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        if len(sleeps) >= 4:
+            poller.running = False
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    responses = [
+        [],  # idle -> sleep 0.005, grow to 0.0075
+        [],  # idle -> sleep 0.0075, grow to 0.01125
+        [{"event_id": 1, "data": {"type": "created"}}],  # data -> reset to 0.005
+        [],  # idle -> sleep 0.005
+    ]
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    client = AsyncMock()
+
+    async def fake_post(*_a, **_k):
+        return FakeResp(responses.pop(0) if responses else [])
+
+    client.post = fake_post
+
+    poller = TensorRTLLMKVEventPoller(
+        engine_base_url="http://127.0.0.1:9",
+        pod_identifier="pod-a",
+        model_name="m",
+        client=client,
+        min_sleep=0.005,
+        max_sleep=0.02,
+        backoff_factor=1.5,
+    )
+    poller.event_publisher = AsyncMock()
+    poller.running = True
+    await poller._run()
+    assert sleeps[0] == pytest.approx(0.005)
+    assert sleeps[1] == pytest.approx(0.0075)
+    assert sleeps[2] == pytest.approx(0.005)
+    assert sleeps[3] == pytest.approx(0.005)

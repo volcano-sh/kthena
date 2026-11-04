@@ -33,7 +33,6 @@ spec:
                 command: ["sh", "-c"]
                 args:
                   - |
-                    # Standard trtllm-serve: YAML via --extra_llm_api_options (= --config).
                     cat >/tmp/extra_llm_api_options.yaml <<'EOF'
                     enable_iter_perf_stats: true
                     EOF

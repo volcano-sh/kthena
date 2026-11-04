@@ -33,8 +33,15 @@ spec:
                 command: ["sh", "-c"]
                 args:
                   - |
-                    # Buffered KV events (POST /kv_cache_events) for Kthena runtime.
-                    # Requires enable_block_reuse + event_buffer_max_size > 0.
+                    # --extra_llm_api_options points at this file:
+                    #
+                    #   enable_iter_perf_stats: true
+                    #   kv_cache_config:
+                    #     enable_block_reuse: true
+                    #     event_buffer_max_size: 1024
+                    #
+                    # enable_block_reuse + event_buffer_max_size>0 enable
+                    # POST /kv_cache_events for the Kthena runtime sidecar.
                     cat >/tmp/extra_llm_api_options.yaml <<'EOF'
                     enable_iter_perf_stats: true
                     kv_cache_config:

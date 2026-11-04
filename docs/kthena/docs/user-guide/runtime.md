@@ -9,7 +9,7 @@ Kthena Runtime is a lightweight sidecar service designed to standardize Promethe
 - Model downloading: supports downloading models from S3/OBS/PVC/HuggingFace to a local path.
 - KV cache event ingestion: publishes standardized token block hashes for the router's [`kvcache-aware`](kvcache-aware.md) score plugin.
   - vLLM / SGLang: subscribe to the engine ZMQ `kv-events` stream.
-  - TensorRT-LLM (`--engine tensorrtllm`): poll buffered `POST /kv_cache_events` and normalize into the same vLLM-compatible handlers.
+  - TensorRT-LLM (`--engine tensorrtllm`): poll buffered `POST /kv_cache_events` (Dynamo-style idle backoff: default 5–20 ms, factor 1.5) and normalize into the same vLLM-compatible handlers.
   - Two sync modes (env `KV_EVENT_SYNC_MODE`):
     - `redis` (default): block hashes are written into Redis and queried by the router per request.
     - `memory`: router instances register with the runtime via `POST /kvcache/routers/register` and keep the request open; the runtime streams KV events (starting with its full block index) back in the response, so the router can score from its local in-memory index without Redis.
@@ -75,7 +75,7 @@ ModelBooster is deprecated in v1.1; use ModelServing, ModelServer, and ModelRout
 
 Startup arguments:
 
-- `-E, --engine` (required): engine name, supports `vllm`, `sglang`
+- `-E, --engine` (required): engine name, supports `vllm`, `sglang`, `tensorrtllm`
 - `-H, --host` (default `0.0.0.0`): listen address for Runtime
 - `-P, --port` (default `9000`): listen port for Runtime
 - `-B, --engine-base-url` (default `http://localhost:8000`): engine base URL
@@ -87,6 +87,11 @@ Environment variables:
 
 - `KV_EVENT_SYNC_MODE` (default `redis`): KV cache event sync backend, `redis` or `memory`. In `memory` mode the runtime does not connect to Redis; instead it streams KV events to router instances that registered themselves via `POST /kvcache/routers/register`. See the [`kvcache-aware`](kvcache-aware.md) guide for the full setup.
 - `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`: Redis connection used in `redis` mode.
+- TensorRT-LLM KV poller (only when `--engine tensorrtllm`):
+  - `TRTLLM_KV_EVENTS_MIN_SLEEP_SEC` (default `0.005`): idle sleep after a drain with events, and the backoff floor.
+  - `TRTLLM_KV_EVENTS_MAX_SLEEP_SEC` (default `0.02`): idle sleep cap when `/kv_cache_events` keeps returning empty.
+  - `TRTLLM_KV_EVENTS_BACKOFF_FACTOR` (default `1.5`): multiply idle sleep when empty (clamped by max).
+  - `TRTLLM_KV_EVENTS_PATH` (default `/kv_cache_events`): engine events path.
 
 In the ModelBooster YAML, you can control Runtime startup values via `spec.backend.env`:
 

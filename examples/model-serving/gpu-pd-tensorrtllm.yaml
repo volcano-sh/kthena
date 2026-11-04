@@ -29,12 +29,15 @@ spec:
             containers:
               - name: prefill
                 # Official NGC TensorRT-LLM release image.
+                # Router HTTP PD: max_tokens=1 non-stream to Prefill, then Decode.
                 image: nvcr.io/nvidia/tensorrt-llm/release:1.0.0
                 command: ["sh", "-c"]
                 args:
                   - |
-                    # Prefill worker for Kthena HTTP PD (default connector).
-                    # Router sends max_tokens=1 non-stream to this role, then decode.
+                    # --extra_llm_api_options points at this file:
+                    #
+                    #   enable_iter_perf_stats: true
+                    #
                     cat >/tmp/extra_llm_api_options.yaml <<'EOF'
                     enable_iter_perf_stats: true
                     EOF
@@ -147,7 +150,6 @@ metadata:
   namespace: default
 spec:
   # Default HTTP connector: router proxies Prefill (max_tokens=1) then Decode.
-  # TensorRT-LLM 1.0 OpenAI path accepts this PD shape (no include_usage injection).
   workloadSelector:
     matchLabels:
       modelserving.volcano.sh/name: trtllm-tinyllama-pd
