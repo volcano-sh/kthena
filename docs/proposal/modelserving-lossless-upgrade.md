@@ -103,10 +103,11 @@ sequenceDiagram
         R->>A: 3. patch Pod: traffic-drained=true
         A-->>C: Pod update event
         C->>A: 4. delete Pod
+        Note over P: kubelet teardown: preStop → SIGTERM<br/>(in-flight already zero, engine exits fast)
     else drainTimeout elapses
         C->>A: 4'. force delete Pod
+        Note over P: kubelet teardown: preStop → SIGTERM → grace → SIGKILL<br/>(residual in-flight bounded by preStop + grace)
     end
-    A->>P: preStop → SIGTERM → grace period → SIGKILL
 ```
 
 Phase 1 is declare-and-drain (steps 1-2): the controller declares the drain via
