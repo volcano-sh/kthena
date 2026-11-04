@@ -80,7 +80,7 @@ Three components, each with one small job:
 | Component | Job |
 |-----------|-----|
 | controller | issues the delete as today; at Pod creation, injects env vars (paired decode discovery for PD prefill Pods, and `GRACE_SECONDS` for the hook's auto-correction — see [Configuration](#configuration)) |
-| router | on `deletionTimestamp`: mark the Pod draining — keep it tracked, exclude it from all scheduling-candidate queries (no new dispatch, in-flight still served) |
+| router | on `deletionTimestamp`: keep the Pod tracked and exclude it from all scheduling-candidate queries (no new dispatch, in-flight still served) |
 | Pod (`preStop` hook) | poll the engine's own metrics; exit only when in-flight reaches zero; kubelet then sends SIGTERM to an idle engine |
 
 ```mermaid
@@ -93,7 +93,7 @@ sequenceDiagram
 
     C->>A: delete Pod (unchanged path)
     A-->>R: Pod event (deletionTimestamp)
-    R->>R: mark draining, exclude from candidate pool<br/>(no new dispatch, in-flight still tracked)
+    R->>R: keep tracking, exclude from candidate pool<br/>(no new dispatch, in-flight still served)
     Note over P: kubelet runs preStop → SIGTERM is held back
     loop preStop hook (inside Pod)
         P->>P: poll localhost engine metrics
@@ -144,15 +144,20 @@ teardown never overlap.
 #### Router: drain on deletionTimestamp
 
 Today the router reacts to a deleted Pod by removing it from the store (losing
-in-flight tracking). The change is small and local: on `deletionTimestamp`
-(consistent across every router replica through each replica's own Pod
-informer), mark the Pod draining instead — keep the `PodInfo` (in-flight
-metrics keep being scraped) and exclude it from all scheduling-candidate
-queries. The exclusion points already exist as `IsDraining` filters in
-`GetPodsByModelServer`, `GetDecodePods`, `GetPrefillPods`,
-`GetPrefillPodsForDecodeGroup`, and `GetPodsByInferencePool`; the router
-surface stays "stop dispatching only" — it never judges completion and never
-writes to Pods, so **no `pods/patch` permission is needed**.
+in-flight tracking). The change is small and local: `deletionTimestamp` is
+carried on the Pod object itself, so no extra marker is needed — the router
+keeps the `PodInfo` when the Pod enters deletion (in-flight metrics keep being
+scraped) and the scheduling-candidate queries exclude Pods carrying a
+`deletionTimestamp` (via the existing `IsDraining` checks, now driven by the
+Pod's own deletionTimestamp). The exclusion points cover `GetPodsByModelServer`,
+`GetDecodePods`, `GetPrefillPods`, `GetPrefillPodsForDecodeGroup`, and
+`GetPodsByInferencePool`; the router surface stays "stop dispatching only" — it
+never judges completion and never writes to Pods, so **no `pods/patch`
+permission is needed**. The signal delivery is guaranteed by the standard
+client-go informer behavior: setting `deletionTimestamp` is a Pod update
+(bumping resourceVersion), and the router's Pod informer registers unfiltered
+handlers — every replica receives the transition event. The Pod leaves the
+store on the object-delete event, as today.
 
 #### preStop: judge in-flight from engine metrics
 
