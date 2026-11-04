@@ -21,8 +21,8 @@ SIGKILLed immediately by `DeleteCollection`. The drain lives at the Pod
 boundary, so no component's core logic grows:
 
 - The **controller issues the delete unchanged** — its delete path grows by
-  nothing (only two optional env vars injected at Pod creation, for PD
-  deployments).
+  nothing (one annotation on the ModelServing; the controller injects the
+  preStop hook and a few env vars at Pod creation).
 - The **router drains reactively**: when it sees `deletionTimestamp` it stops
   dispatching new requests to that Pod while keeping the Pod tracked, so
   in-flight requests finish against real traffic.
@@ -55,7 +55,7 @@ waits for its in-flight requests to finish.
   in-flight finishes, then SIGTERM.
 - Keep the **controller's delete path unchanged** — the drain must not add
   controller complexity.
-- No Redis dependency, no new annotations or finalizers, no K8s API access from
+- No Redis dependency, no new CRD fields or finalizers, no K8s API access from
   inference Pods, and no new engine metrics.
 - Cover PD disaggregated workloads: a prefill Pod waits for its paired decodes
   to drain before exiting (pairing resolved via an injected env + headless
@@ -77,7 +77,7 @@ Three components, each with one small job:
 
 | Component | Job |
 |-----------|-----|
-| controller | issues the delete as today; at Pod creation, injects env vars (paired decode discovery for PD prefill Pods, and `GRACE_SECONDS` for the hook's auto-correction — see [Configuration](#configuration)) |
+| controller | issues the delete as today; at Pod creation, reads the `drain-timeout` annotation and injects the preStop hook plus the env vars the hook reads (`DRAIN_TIMEOUT`, `GRACE_SECONDS`, PD pairing vars — see [Configuration](#configuration)) |
 | router | on `deletionTimestamp`: keep the Pod tracked and exclude it from all scheduling-candidate queries (no new dispatch, in-flight still served) |
 | Pod (`preStop` hook) | poll the engine's own metrics; exit only when in-flight reaches zero; kubelet then sends SIGTERM to an idle engine |
 
@@ -124,7 +124,7 @@ teardown never overlap.
 
 #### Risks and Mitigations
 
-- **preStop fails silently** (tooling missing in the image, script bug, RBAC):
+- **preStop fails silently** (tooling missing in the image, script bug):
   the hook exits early and the Pod degrades to today's behavior. Mitigation:
   the hook logs every step, kubelet emits a `FailedPreStopHook` event on
   failure, and the grace period still bounds termination — degraded, not stuck.
@@ -156,7 +156,9 @@ leaves the store on the object-delete event.
 
 #### preStop: judge in-flight from engine metrics
 
-The hook (part of the Pod template, engine-agnostic) polls
+The hook is injected by the controller at Pod creation (triggered by the
+`drain-timeout` annotation, see
+[Configuration](#configuration)) and is engine-agnostic: it polls
 `localhost:<port>/metrics` and reads the engine-agnostic counters
 (`RequestRunningNum` / `RequestWaitingNum`, mapped per engine through the
 `backend/vllm` / `backend/sglang` adapters' same metric names). Exit condition:
@@ -185,7 +187,7 @@ The rule: a prefill is safe to exit only when every paired decode Pod is at
 zero in-flight. The pairing is resolved without any controller/router
 signaling:
 
-- At Pod creation the controller injects two env vars into PD prefill Pods:
+- The same Pod-creation injection adds two env vars to PD prefill Pods:
   the paired decode role's headless service DNS name and its metrics port.
 - The hook resolves the headless service DNS each poll, so the decode list is
   always current (recreated or scaled decodes are picked up automatically; a
@@ -220,15 +222,27 @@ unchanged.
 
 #### Configuration
 
-**Enablement**: lossless drain is on by default — the built-in engine templates
-ship with the preStop hook and a default `DRAIN_TIMEOUT`. The switch lives at
-the Pod template layer: `DRAIN_TIMEOUT=0` (or removing the hook) disables the
-wait for that workload — the hook exits immediately and the Pod degrades to
-today's delete behavior. An explicit one-off fast delete remains available via
+**Enablement**: lossless drain is **opt-in** — only users who cannot tolerate
+interrupted in-flight requests need it. Enabling is one annotation on the
+ModelServing:
+
+    modelserving.volcano.sh/drain-timeout: "300s"
+
+At Pod creation the controller reads this annotation and, when it is present
+with a positive value, injects the preStop hook (the standard drain script,
+maintained by the controller — nothing is copied into user templates) plus the
+env vars the hook reads (`DRAIN_TIMEOUT` from the annotation, `GRACE_SECONDS`,
+and the PD pairing vars). Removing the annotation, or setting it to `0`,
+disables the wait: new Pods are created without the hook and terminate as
+today. Invalid or too-small values (below a minimal floor of 60s) do not
+enable the drain either: the controller skips the injection and emits a warning
+event on the ModelServing, so a typo degrades to today's behavior loudly
+instead of silently pretending the drain is on (`0` stays a valid explicit
+off). Optionally the ModelServing webhook rejects invalid annotation values at
+write time. The router's drain tracking is harmless for hook-less Pods (SIGTERM
+follows within seconds). An explicit one-off fast delete remains available via
 the platform escape hatch (`kubectl delete pod --force --grace-period=0`, which
-skips preStop entirely). The router drains unconditionally either way; for Pods
-without a hook this is harmless (SIGTERM follows within seconds) and strictly
-better than today (in-flight tracking is kept instead of dropped).
+skips preStop entirely).
 
 **Two values, one split rule**: the hook reads `DRAIN_TIMEOUT` (how long to
 wait for in-flight to drain; user intent, e.g. 300s) and the controller injects
