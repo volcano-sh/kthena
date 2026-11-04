@@ -13,20 +13,38 @@ creation-date: 2026-10-20
 
 ## Lossless Upgrade for ModelServing
 
+> **Revision note (2026-11)**: the mechanism in this proposal has been redesigned
+> after the community review. The earlier version added a two-phase annotation
+> handshake between the controller and the router, with the controller gating the
+> delete. The feedback was that the controller is already complex and should not
+> grow further, and multi-replica router deployments raised an in-flight
+> visibility question. This version moves the whole drain to the Pod boundary:
+> the router drains on `deletionTimestamp` (stop dispatching only), and a
+> `preStop` hook inside the Pod judges in-flight completion from engine metrics.
+> The controller stays untouched. The earlier design and the finalizer
+> discussion are kept in [Alternatives](#alternatives).
+
 ### Summary
 
 This proposal adds a drain step to `ModelServing` rolling updates: an old Pod is
-deleted only after its in-flight inference requests finish (or a timeout
-fallback fires), instead of being SIGKILLed immediately by `DeleteCollection`.
-The drain is a two-phase annotation handshake between
-`model-serving-controller` and `kthena-router` over two Pod annotations. Drain
-granularity follows the existing rollout
-strategy (ServingGroup or Role instance), so the mechanism is group-aware,
-including for PD disaggregated workloads.
+deleted only after its in-flight inference requests finish, instead of being
+SIGKILLed immediately by `DeleteCollection`. The drain lives at the Pod
+boundary:
 
-This is best-effort lossless: the normal path is fully lossless, and residual
-cases (stuck requests, engines the router does not adapt) fall back to a
-`drainTimeout` so the update always completes.
+- The **controller issues the delete unchanged** — its delete path grows by
+  nothing (only two optional env vars injected at Pod creation, for PD
+  deployments).
+- The **router drains reactively**: when it sees `deletionTimestamp` it stops
+  dispatching new requests to that Pod while keeping the Pod tracked, so
+  in-flight requests finish against real traffic.
+- A **`preStop` hook inside the Pod** polls the engine's own metrics and exits
+  only once in-flight reaches zero; SIGTERM then reaches an idle engine.
+- `terminationGracePeriodSeconds` (plus an in-hook timeout) bounds the wait, so
+  the update always completes.
+
+This is best-effort lossless: the normal path is lossless for engines whose
+metrics the hook can read (vLLM including ascend, SGLang), and residual cases
+fall back to the grace period — never worse than today.
 
 ### Motivation
 
@@ -41,47 +59,41 @@ Lossless upgrade has two halves:
 
 - **No downtime**: already guaranteed by the existing rolling strategy
   (`maxUnavailable: 0` + `maxSurge: 1`). This proposal does not change it.
-- **No interruption**: the missing half — a drain step before the delete.
+- **No interruption**: the missing half — stop new traffic, wait for in-flight
+  to finish, then delete.
 
 #### Goals
 
-- Drain an old Pod before deleting it: stop new traffic, wait for in-flight to
-  finish, then delete.
-- Cover both rollout strategies (`ServingGroupRollingUpdate` /
-  `RoleRollingUpdate`), plus scale-down and failure-rebuild — all converge on
-  the same deletion path.
-- Group-aware drain for PD disaggregated workloads (prefill judged together
-  with its paired decodes).
-- Work for engines the router already adapts (vLLM including ascend, SGLang).
+- Drain an old Pod before its containers are terminated: no new dispatch, then
+  in-flight finishes, then SIGTERM.
+- Keep the **controller's delete path unchanged** — the drain must not add
+  controller complexity (community feedback on the earlier revision).
+- No Redis dependency, no new annotations or finalizers, no K8s API access from
+  inference Pods, and no new engine metrics.
+- Cover PD disaggregated workloads: a prefill Pod waits for its paired decodes
+  to drain before exiting (pairing resolved via an injected env + headless
+  service DNS — no API access needed).
+- Be robust to multi-replica router deployments by construction (see
+  [Multi-replica routers](#multi-replica-routers)).
 
 #### Non-Goals
 
-- Engines the router does not support (MindIE): no MindIE traffic flows through
-  the router, so there is nothing to drain; the timeout fallback still ensures
-  the update completes.
+- Engines whose metrics the hook cannot parse: those Pods fall back to the
+  grace period (same behavior as today, bounded by `preStop` +
+  `terminationGracePeriodSeconds`).
 - Changing the rolling strategy itself.
-- Absolute lossless: normal path is lossless, residual cases fall back to
-  `drainTimeout`.
+- Absolute lossless: normal path is lossless, residual cases fall back to the
+  grace period.
 
 ### Proposal
 
-The controller and router cooperate over two Pod annotations:
+Three components, each with one small job:
 
-- `modelserving.volcano.sh/traffic-draining` (controller; RFC3339 timestamp) —
-  start draining: the router stops scheduling new requests to the Pod.
-- `modelserving.volcano.sh/traffic-drained` (router; `true`) — in-flight
-  reached zero, the Pod is safe to delete.
-
-Deletion has two triggers (either fires the delete):
-
-- **drained (precise)**: the router confirms in-flight zero, the controller
-  deletes immediately.
-- **drainTimeout (fallback)**: after `--drain-timeout` elapses since the
-  earliest draining timestamp, the controller force-deletes; residual in-flight
-  is bounded by `terminationGracePeriodSeconds` + preStop.
-
-The two phases in one picture — the controller declares the drain, the router
-confirms it:
+| Component | Job |
+|-----------|-----|
+| controller | issues the delete as today; at Pod creation, injects env vars (paired decode discovery for PD prefill Pods, and `GRACE_SECONDS` for the hook's auto-correction — see [Configuration](#configuration)) |
+| router | on `deletionTimestamp`: mark the Pod draining — keep it tracked, exclude it from all scheduling-candidate queries (no new dispatch, in-flight still served) |
+| Pod (`preStop` hook) | poll the engine's own metrics; exit only when in-flight reaches zero; kubelet then sends SIGTERM to an idle engine |
 
 ```mermaid
 sequenceDiagram
@@ -91,158 +103,215 @@ sequenceDiagram
     participant R as kthena-router
     participant P as old Pod
 
-    Note over C: delete budget available<br/>(new Pod ready under maxUnavailable: 0)
-    C->>A: 1. patch Pod: traffic-draining=<timestamp>
-    A-->>R: Pod update event (informer)
-    R->>R: 2. mark draining, exclude from candidate pool<br/>(no new traffic, in-flight still tracked)
-    loop metrics scrape cycle
-        R->>P: scrape engine metrics
-        P-->>R: Running / Waiting
+    C->>A: delete Pod (unchanged path)
+    A-->>R: Pod event (deletionTimestamp)
+    R->>R: mark draining, exclude from candidate pool<br/>(no new dispatch, in-flight still tracked)
+    Note over P: kubelet runs preStop → SIGTERM is held back
+    loop preStop hook (inside Pod)
+        P->>P: poll localhost engine metrics
     end
     alt in-flight reaches zero
-        R->>A: 3. patch Pod: traffic-drained=true
-        A-->>C: Pod update event
-        C->>A: 4. delete Pod
-        Note over P: kubelet teardown: preStop → SIGTERM<br/>(in-flight already zero, engine exits fast)
-    else drainTimeout elapses
-        C->>A: 4'. force delete Pod
-        Note over P: kubelet teardown: preStop → SIGTERM → grace → SIGKILL<br/>(residual in-flight bounded by preStop + grace)
+        P->>P: preStop exits
+        A->>P: SIGTERM → engine exits fast
+    else in-hook timeout elapses
+        P->>P: preStop exits (logs a warning)
+        A->>P: SIGTERM → residual in-flight finishes during grace
     end
+    Note over P: grace period ends → SIGKILL (last resort)
 ```
 
-Phase 1 is declare-and-drain (steps 1-2): the controller declares the drain via
-the annotation, and the router acts on it — the Pod stops receiving new traffic
-(the router's doing) but stays alive with its in-flight tracked. Phase 2 is
-confirm-and-delete (steps 3-4): the router — the party that actually holds the
-traffic — confirms in-flight reached zero, and the controller performs the
-delete. Each component spans one phase; the drain completes through their
-cooperation.
+Because the hook runs before SIGTERM, the container keeps serving its in-flight
+requests at full speed while the drain completes — the drain and the engine
+teardown never overlap.
 
 #### User Stories
 
 - **Image update under live traffic**: without drain, a Pod serving a long
   streaming request is killed mid-response. With drain, the old Pod finishes its
-  in-flight response before removal — no client-visible interruption.
+  in-flight response before SIGTERM — no client-visible interruption.
 - **Scale-down**: the Pod about to be removed drains first, so no request is
   dropped.
-- **PD disaggregated update**: the whole ServingGroup drains together; a
-  prefill Pod is deleted only once its paired decodes are also at zero in-flight
-  — its KV has been delivered (push) or pulled, so no PD request is broken.
+- **PD disaggregated update**: under the default ServingGroup-level drain, the
+  whole group drains together; the prefill Pod's hook waits until every paired
+  decode Pod reaches zero in-flight — its KV has been delivered (push) or
+  pulled, so no PD request is broken.
 
 #### Risks and Mitigations
 
-- **Drain gets stuck** (engine unreachable, metrics scrape failing):
-  `drainTimeout` forces deletion, so the update always completes.
-- **Router restart during drain**: drain state is re-derived from the Pod
-  annotation after restart.
-- **Long drain window under PD group drain**: waits for the slowest Pod
-  (typically decode); users wanting independent drain can choose
-  `RoleRollingUpdate` (see PD section).
+- **preStop fails silently** (tooling missing in the image, script bug, RBAC):
+  the hook exits early and the Pod degrades to today's behavior. Mitigation:
+  the hook logs every step, kubelet emits a `FailedPreStopHook` event on
+  failure, and the grace period still bounds termination — degraded, not stuck.
+- **Drain and engine shutdown share the grace budget**: preStop execution time
+  counts against `terminationGracePeriodSeconds`. Mitigation: document that the
+  grace period must cover the in-hook drain timeout plus the engine's SIGTERM
+  shutdown, and keep the in-hook timeout modest by default.
+- **Drain window length under PD group drain**: waits for the slowest Pod
+  (typically decode). Safe, but lengthens the window; the in-hook timeout
+  bounds it.
 
 ### Design Details
 
-#### Controller
+#### Router: drain on deletionTimestamp
 
-A drain gate is added to the two deletion convergence points,
-`deleteServingGroup` and `DeleteRole`, so rolling update, scale-down, and
-failure-rebuild all share one drain path (failure-recovery deletes can bypass
-via `skipDrain`). Phase 1 annotates the Pods with `traffic-draining` and
-requeues; Phase 2 waits for `traffic-drained` on every Ready Pod, or for
-`drainTimeout` measured from the earliest draining timestamp. Pods that are
-NotReady, or that fail annotation after retries, are force-deleted (the K8s
-`DeletionTimestamp` still removes them from scheduling).
+Today the router reacts to a deleted Pod by removing it from the store (losing
+in-flight tracking). The change is small and local: on `deletionTimestamp`
+(consistent across every router replica through each replica's own Pod
+informer), mark the Pod draining instead — keep the `PodInfo` (in-flight
+metrics keep being scraped) and exclude it from all scheduling-candidate
+queries. The exclusion points already exist as `IsDraining` filters in
+`GetPodsByModelServer`, `GetDecodePods`, `GetPrefillPods`,
+`GetPrefillPodsForDecodeGroup`, and `GetPodsByInferencePool`; the router
+surface stays "stop dispatching only" — it never judges completion and never
+writes to Pods, so **no `pods/patch` permission is needed**.
 
-#### Router
+#### preStop: judge in-flight from engine metrics
 
-The router observes the annotation via the Pod informer and sets an in-memory
-draining flag on the `PodInfo`. Draining Pods stay in the store (in-flight
-tracking preserved) but are excluded from all scheduling-candidate queries.
-`store.Run` scrapes engine metrics per Pod and patches `traffic-drained=true`
-once in-flight reaches zero (`markPodDrainedIfZero`).
+The hook (part of the Pod template, engine-agnostic) polls
+`localhost:<port>/metrics` and reads the engine-agnostic counters
+(`RequestRunningNum` / `RequestWaitingNum`, mapped per engine through the
+`backend/vllm` / `backend/sglang` adapters' same metric names). Exit condition:
+the counters stay at zero for N consecutive polls (with a short settle delay) —
+the repetition closes the dispatch-to-admission window where a request has been
+forwarded by the router but not yet admitted by the engine. The hook also runs
+with an internal timeout — the effective wait is `min(DRAIN_TIMEOUT,
+GRACE_SECONDS - SHUTDOWN_RESERVE)` (see
+[Configuration](#configuration)): if zero is not reached in time, it logs a
+warning and exits, letting SIGTERM + grace handle the residual.
 
-#### Drain zero-check
+Judging from engine metrics has a visibility advantage: the counters reflect
+direct-to-engine traffic as well, and they are local to the Pod — no K8s API
+access, no ServiceAccount/RBAC changes, no cross-component signaling.
 
-Drain completion is judged from engine metrics (`RequestRunningNum` /
-`RequestWaitingNum`, engine-agnostic via the `backend/vllm` / `backend/sglang`
-adapters), with the router's `onFlight` counter as a final confirmation. The
-zero check requires all three counts at zero — `Running==0 && Waiting==0 &&
-OnFlight==0` — where onFlight covers requests dispatched by the router but not
-yet admitted by the engine.
-
-- Engine metrics are the primary signal: they see all traffic sources
-  (including direct-to-engine) and need no Redis (a multi-replica router
-  without Redis cannot aggregate onFlight and could falsely report zero).
-- onFlight closes the dispatch-to-admission window engine metrics alone cannot
-  see.
-
-For PD, a prefill Pod's own metrics are unreliable (SGLang prefill
-`num_running_reqs` is always 0; NIXL prefill reports zero before decode finishes
-pulling), so a prefill is judged from **both** its own counts and its paired
-decodes' counts — safe to delete only when it and every paired decode are all at
-zero. No new engine metrics are introduced.
-
-#### Drain granularity follows rollout strategy
-
-| Strategy | Drain unit | What gets `traffic-draining` |
-|----------|-----------|------------------------------|
-| `ServingGroupRollingUpdate` (default) | whole ServingGroup | all Pods of all roles in the group |
-| `RoleRollingUpdate` | role instance | the entry + worker Pods of one role instance |
-
-There is no per-Pod drain path: the drain unit equals the budget unit
-(`maxUnavailable`/`maxSurge` count the strategy's deletion unit, not Pods), so
-budget and drain are never mismatched.
-
-#### PD disaggregation
+#### PD disaggregation: pairing without API access
 
 A PD request has a prefill phase (compute KV) and a decode phase (generate),
-connected by a KV handoff (HTTP passthrough, SGLang push, NIXL/Mooncake pull).
-On the push/pull connectors a prefill Pod's own metrics fire too early — the KV
-may still be needed by a decode. Since decode runs the normal engine loop on
-every connector, decode metrics are reliable: the group-aware rule "prefill at
-zero **and** every paired decode at zero" is precise on the normal path and
-needs no new scrape surface. Residual cases (e.g. cross-request KV reuse) fall
-back to `drainTimeout`.
+connected by a KV handoff (SGLang push, NIXL/Mooncake pull). On the push/pull
+connectors a prefill Pod's own metrics fire too early — SGLang's prefill
+`num_running_reqs` is always 0 (the request lives in a separate inflight
+queue), and NIXL's prefill reports zero before decode finishes pulling — so a
+prefill cannot judge itself.
+
+The rule from the earlier revision still holds — a prefill is safe to exit
+only when every paired decode Pod is at zero in-flight — but the pairing is
+resolved without any controller/router signaling:
+
+- At Pod creation the controller injects two env vars into PD prefill Pods:
+  the paired decode role's headless service DNS name and its metrics port.
+- The hook resolves the headless service DNS each poll, so the decode list is
+  always current (recreated or scaled decodes are picked up automatically; a
+  decode that no longer resolves is treated as drained — it cannot pull KV
+  anymore).
+- The hook polls each decode's metrics endpoint directly. PD deployments
+  already require prefill↔decode network reachability for KV transfer, and the
+  metrics port is the serving port, so the endpoints are reachable.
+
+| Topology | Hook exit condition |
+|----------|--------------------|
+| Single-pod / aggregated | own `Running==0 && Waiting==0` (N consecutive polls) |
+| PD decode | own `Running==0 && Waiting==0` (reliable on all connectors) |
+| PD prefill | every paired decode at zero (own counters ignored where unreliable) |
+
+Under the default `ServingGroupRollingUpdate` the whole group drains together
+and the budget unit equals the drain unit, so prefill and decode are never
+deleted independently. Residual cases (e.g. cross-request KV reuse) fall back
+to the in-hook timeout and the grace period.
+
+#### Multi-replica routers
+
+The drain signal (`deletionTimestamp`) is persisted on the Pod object, and
+every router replica watches Pods independently, so every replica drains the
+Pod — there is no "replica A saw it, replica B did not" state to lose. The
+replicas' informer latencies differ by milliseconds; requests dispatched in
+that window become the Pod's in-flight work, and the hook waits for exactly
+that — a longer drain, never a lost request. Because completion is judged from
+engine metrics inside the Pod, no replica's local in-flight counter is trusted
+for the drain decision, so the multi-replica counter-splitting concern raised
+in the community review does not apply to this design.
 
 #### Configuration
 
-A `--drain-timeout` flag on `kthena-controller-manager`, **default `0`
-(disabled)**; a positive value enables drain. Helm exposes it as
-`controllerManager.drainTimeout`. Drain is enabled only when **all three**
-conditions hold (checked per deletion unit); otherwise deletion proceeds
-immediately as before:
+**Enablement**: lossless drain is on by default — the built-in engine templates
+ship with the preStop hook and a default `DRAIN_TIMEOUT`. The switch lives at
+the Pod template layer: `DRAIN_TIMEOUT=0` (or removing the hook) disables the
+wait for that workload — the hook exits immediately and the Pod degrades to
+today's delete behavior. An explicit one-off fast delete remains available via
+the platform escape hatch (`kubectl delete pod --force --grace-period=0`, which
+skips preStop entirely). The router drains unconditionally either way; for Pods
+without a hook this is harmless (SIGTERM follows within seconds) and strictly
+better than today (in-flight tracking is kept instead of dropped).
 
-- `drainTimeout > 0`;
-- the deletion unit's `maxUnavailable == 0` (a new Pod must be ready before an
-  old one is deleted, so the drain window never reduces availability);
-- the deletion unit's `maxSurge > 0` (a replacement Pod can be created first).
+**Three values, one auto-correction**: the hook reads two env vars and the
+controller injects a third at Pod creation (the grace period is already in the
+Pod spec being rendered):
 
-Under `RoleRollingUpdate` each role is judged by its own `maxSurge` /
-`maxUnavailable`. `drainTimeout` bounds the wait **before** delete;
-`terminationGracePeriodSeconds` bounds the engine's SIGTERM grace **after** —
-both should cover the longest expected generation.
+- `DRAIN_TIMEOUT` — how long the hook waits for in-flight to drain (user
+  intent; e.g. 300s)
+- `GRACE_SECONDS` — the Pod's `terminationGracePeriodSeconds`, injected by the
+  controller (e.g. 600)
+- `SHUTDOWN_RESERVE` — time reserved for the engine's SIGTERM shutdown (e.g.
+  60s, template default)
 
-#### RBAC and engine coverage
+The hook's effective wait is `min(DRAIN_TIMEOUT, GRACE_SECONDS -
+SHUTDOWN_RESERVE)`. This auto-correction removes a silent misconfiguration
+trap: if a user sets `DRAIN_TIMEOUT` longer than the grace period, the kubelet
+would SIGKILL the Pod mid-drain with no SIGTERM window at all — with the
+minimum, the hook always yields before the grace deadline and the engine keeps
+a shutdown window. Users who set a modest `DRAIN_TIMEOUT` see exactly that
+value; an oversized one is clipped, not honored. `SHUTDOWN_RESERVE` has a
+conservative template default (60s) since engine SIGTERM exit time varies.
 
-Both ClusterRoles (`kthena-controller-manager`, `kthena-router`) get
-`pods/patch` for writing the annotations. Drain works for engines the router
-already adapts (vLLM including ascend, SGLang); MindIE is not routed by the
-router and is covered only by the timeout fallback.
+**Deployment practice**: keeping `maxUnavailable: 0` + `maxSurge: 1` remains
+the recommended configuration so serving capacity never dips during an update,
+but it is not an enablement condition — the drain activates on deletion
+regardless, and with `maxUnavailable > 0` the drain still protects whatever
+in-flight the deleted Pod holds (the temporary capacity dip is the existing
+semantics of that setting, not something the drain adds).
+
+#### Status
+
+The earlier revision implemented the controller-side two-phase gate
+(`chenhui/lossless-upgrade` branch). Under this redesign those controller
+changes will be reverted, and the remaining work is: the router's
+deletionTimestamp-driven drain (small, local change) and the preStop hook
+scripts for the engine templates.
 
 ### Test Plan
 
-- Unit tests: drain gate on both convergence points, annotation retry /
-  force-delete, router `markPodDrainedIfZero` (including the PD paired-decode
-  rule).
-- E2E: rolling update under `RoleRollingUpdate` with `maxUnavailable: 0` +
-  `maxSurge: 1` — old Pod drained then deleted after in-flight finishes; PD
-  update under `ServingGroupRollingUpdate` — prefill not deleted while a paired
-  decode still has in-flight.
+- Unit tests: preStop hook parsing and exit conditions (N-consecutive-zero,
+  in-hook timeout, DNS resolution edge cases — decode gone treated as drained);
+  router drain-on-deletionTimestamp (Pod kept, excluded from candidates).
+- E2E: rolling update of a single-pod ModelServing under load — in-flight
+  requests complete, no client-visible interruption, converge to
+  `spec.replicas`; PD disaggregated update under `ServingGroupRollingUpdate` —
+  the prefill Pod's hook does not exit while a paired decode still has
+  in-flight.
 
 ### Alternatives
 
-- **`onFlight` as the primary signal**: rejected — it misses direct-to-engine
-  traffic, and multi-replica routers without Redis cannot aggregate it. It still
-  participates in the final zero check.
-- **`preStop` hook only**: rejected — a preStop can delay termination but cannot
-  make the router stop dispatching new traffic (the router watches Pods
-  directly, not via Service/Endpoints). Kept as a secondary safety net.
+- **Controller-side two-phase annotation handshake** (the earlier revision of
+  this proposal): the controller annotated draining Pods, the router confirmed
+  in-flight zero by writing `traffic-drained` back, and the controller deleted
+  on confirmation or timeout. Rejected after community review: it grew the
+  controller's delete path (a two-phase state machine on top of an already
+  complex component), and its in-flight judgment involved the router's local
+  `onFlight` counter, which under multi-replica deployments without Redis
+  splits per-replica and can falsely report zero (mitigable with Redis, but a
+  real constraint). Its core intellectual asset — the zero-check rule
+  (engine counters, PD prefill waits for paired decodes) — is carried over
+  verbatim into the preStop hook.
+- **Finalizer-based gating** (community discussion): a finalizer can hold back
+  the deletion of the API object, but not the container teardown — the kubelet
+  kills the container as soon as `deletionTimestamp` is set, regardless of
+  finalizers. Unless combined with a blocking preStop (below), the drain would
+  happen after the engine is already being terminated. An owner-side finalizer
+  additionally reduces to the annotation handshake with an extra layer.
+- **preStop waiting for a router-written confirmation** (annotation or
+  finalizer): workable, but the hook then needs API read access (SA + RBAC) on
+  every inference Pod, and the drain correctness depends on the hook surviving
+  to see the signal — the same waiter/deleter separation problem. Judging from
+  local engine metrics removes both the permission requirement and the
+  cross-component wait.
+- **preStop with a fixed sleep**: simplest (no polling at all), but every Pod
+  waits the full fixed duration even when it drains in one second — update
+  time scales as N × fixed value. Rejected in favor of metric-based exit.
