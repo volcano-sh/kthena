@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -259,50 +260,81 @@ func TestMemoryStoreDelete(t *testing.T) {
 	s.Delete(ctx, "missing")
 }
 
-func TestBindingFromRedisFields(t *testing.T) {
-	tests := []struct {
-		name string
-		vals []interface{}
-		want Binding
-		ok   bool
-	}{
-		{
-			name: "aggregated binding",
-			vals: []interface{}{"llama", "llama-0", ""},
-			want: Binding{ModelServer: "llama", Pod: "llama-0"},
-			ok:   true,
-		},
-		{
-			name: "PD binding",
-			vals: []interface{}{"llama", "decode-0", "prefill-0"},
-			want: Binding{ModelServer: "llama", Pod: "decode-0", PrefillPod: "prefill-0"},
-			ok:   true,
-		},
-		{name: "too few fields", vals: []interface{}{"llama", "llama-0"}},
-		{name: "no fields", vals: nil},
-		{name: "a missing key reads back as nil", vals: []interface{}{nil, nil, nil}},
-		{name: "missing model server", vals: []interface{}{"", "llama-0", ""}},
-		{name: "missing pod", vals: []interface{}{"llama", "", ""}},
-		{name: "non-string fields", vals: []interface{}{42, true, ""}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, ok := bindingFromRedisFields(tt.vals)
-			require.Equal(t, tt.ok, ok)
-			require.Equal(t, tt.want, got)
-		})
-	}
+func TestNewStoreRedisBackend(t *testing.T) {
+	mr := miniredis.RunT(t)
+	store, err := NewStore(&conf.SessionStickyConfig{
+		Backend: "redis",
+		Redis:   &conf.SessionStickyRedis{Address: mr.Addr()},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, store)
+	require.NoError(t, store.Close())
 }
 
-func TestBindingFromLuaResult(t *testing.T) {
-	got, ok := bindingFromLuaResult([]interface{}{"llama", "llama-0", ""})
-	require.True(t, ok)
-	require.Equal(t, Binding{ModelServer: "llama", Pod: "llama-0"}, got)
+// TestRedisStore drives the compare-and-refresh script end to end, so the field
+// parsers are exercised through real HMGET and EVAL replies.
+func TestRedisStore(t *testing.T) {
+	mr := miniredis.RunT(t)
+	store, err := NewRedisStore(mr.Addr())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, store.Close()) }()
 
-	// The script returns a Lua table; anything else is not a binding.
-	_, ok = bindingFromLuaResult("llama")
+	ctx := t.Context()
+	key := "ns/llama/session-1"
+	first := Binding{ModelServer: "llama", Pod: "llama-0"}
+	second := Binding{ModelServer: "llama", Pod: "llama-1"}
+
+	got, err := store.Commit(ctx, key, first, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+
+	// A conflicting binding loses and the caller is told what is stored, so every
+	// router replica agrees on one Pod for the session.
+	got, err = store.Commit(ctx, key, second, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+
+	got, ok := store.Get(ctx, key)
+	require.True(t, ok)
+	require.Equal(t, first, got)
+
+	// A matching binding refreshes the TTL rather than being rejected.
+	mr.FastForward(30 * time.Second)
+	got, err = store.Commit(ctx, key, first, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+	require.InDelta(t, time.Minute.Seconds(), mr.TTL(key).Seconds(), 2)
+
+	store.Delete(ctx, key)
+	_, ok = store.Get(ctx, key)
 	require.False(t, ok)
-	_, ok = bindingFromLuaResult(nil)
-	require.False(t, ok)
+}
+
+func TestRedisStorePDBinding(t *testing.T) {
+	mr := miniredis.RunT(t)
+	store, err := NewRedisStore(mr.Addr())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, store.Close()) }()
+
+	ctx := t.Context()
+	pd := Binding{ModelServer: "llama", Pod: "decode-0", PrefillPod: "prefill-0"}
+
+	got, err := store.Commit(ctx, "pd-key", pd, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, pd, got)
+
+	got, ok := store.Get(ctx, "pd-key")
+	require.True(t, ok)
+	require.Equal(t, pd, got)
+	require.True(t, got.ValidPD())
+}
+
+func TestRedisStoreRejectsAnInvalidBinding(t *testing.T) {
+	mr := miniredis.RunT(t)
+	store, err := NewRedisStore(mr.Addr())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, store.Close()) }()
+
+	_, err = store.Commit(t.Context(), "k", Binding{ModelServer: "llama"}, time.Minute)
+	require.Error(t, err)
 }
