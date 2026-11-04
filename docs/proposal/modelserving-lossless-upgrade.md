@@ -44,11 +44,10 @@ requests. LLM inference requests, especially streaming, often run for tens of
 seconds to minutes, so an immediate delete SIGKILLs in-flight work and clients
 see 502 / connection resets.
 
-The existing rolling strategy (`maxUnavailable: 0` + `maxSurge: 1`) already
-keeps serving capacity intact during an update — what is missing is the
-transition on the "delete old" step: nothing stops the router from dispatching
-new requests to the Pod being deleted, and nothing waits for its in-flight
-requests to finish.
+Rolling updates keep replacement capacity in place, so the gap is narrow: the
+missing piece is the transition on the "delete old" step — nothing stops the
+router from dispatching new requests to the Pod being deleted, and nothing
+waits for its in-flight requests to finish.
 
 #### Goals
 
@@ -69,7 +68,6 @@ requests to finish.
 - Engines whose metrics the hook cannot parse: those Pods fall back to the
   grace period (same behavior as today, bounded by `preStop` +
   `terminationGracePeriodSeconds`).
-- Changing the rolling strategy itself.
 - Absolute lossless: normal path is lossless, residual cases fall back to the
   grace period.
 
@@ -242,13 +240,6 @@ deadline would starve the SIGTERM window entirely and end in a bare SIGKILL.
 With the 70% split the two settings cannot conflict: a modest `DRAIN_TIMEOUT`
 is honored exactly, an oversized one is clipped at the 70% line. Example:
 `GRACE_SECONDS=600` caps the drain at 420s and reserves 180s for shutdown.
-
-**Deployment practice**: keeping `maxUnavailable: 0` + `maxSurge: 1` remains
-the recommended configuration so serving capacity never dips during an update,
-but it is not an enablement condition — the drain activates on deletion
-regardless, and with `maxUnavailable > 0` the drain still protects whatever
-in-flight the deleted Pod holds (the temporary capacity dip is the existing
-semantics of that setting, not something the drain adds).
 
 ### Test Plan
 
