@@ -226,23 +226,94 @@ chain, not globally:
 
 ### Plugin lifecycle
 
-Each profile chain builds its own plugin instances and rebuilds them on
-every profile update. This keeps the instances simple, but two trade-offs
-are accepted for now:
+#### Stateful plugins hold long-lived resources
 
-- `RegisterCallback` has no unregister, so profile updates leak the old
-  instances' Pod callbacks and background goroutines (the GC loop, the
-  KV event subscriber). A **Close hook** on replaced chains is the
-  planned fix; it runs when a chain is replaced by a rebuild.
-  Closing only stops background work (goroutines, callbacks) — the
-  closed instance stays usable for in-flight requests' post hooks, since
-  the object outlives the swap.
-- Tuning a profile's args discards the learned cache data of its
-  instances; the cache warms up again as traffic flows.
+Two score plugins are stateful: their instances hold resources that
+outlive a single request and must be stopped when the instance goes away.
 
-Both are low-frequency costs (profile updates are rare operations) and
-can be revisited with a shared-resource design if they matter in
-practice.
+`prefix-cache` — each instance owns a `ModelPrefixStore` (per-pod hash
+LRUs for prefix matching) and registers two process-wide attachments:
+
+- a `"Pod"` store callback that purges a pod's hash entries on deletion
+- a provider that feeds the `kthena_router_prefix_cache_entries` gauge
+
+`kvcache-aware` — memory mode (the default) owns a `KVBlockMemoryIndex`
+plus two background workers: a KV event subscriber that dials runtime
+sidecars and streams block events into the index, and an index GC loop.
+It registers a `"Pod"` store callback that feeds pod lifecycle into the
+subscriber. Redis mode runs a ticker-based GC loop over stale fields.
+
+Since every profile chain builds its own plugin instances and every
+profile update rebuilds the chain, one update without cleanup leaks one
+set of goroutines, callbacks and metric providers per instance.
+
+#### Store: callbacks are now unregisterable
+
+`datastore.Store.RegisterCallback` used to append to a slice with no way
+to remove an entry. It now returns an unregister function: callbacks are
+stored as `{id, fn}` entries (Go function values are not comparable, so
+removal is by assigned id), and the idempotent unregister closure deletes
+its own entry. Existing callers are unaffected — the return value is
+optional to use. `triggerCallbacks` snapshots the callback list under the
+read lock, so concurrent unregister during event dispatch is safe.
+
+#### The two plugins now release their resources
+
+Both plugins keep the unregister function from registration and expose an
+idempotent `Close`:
+
+- `prefix-cache`: `Close` unregisters the pod-deletion callback and the
+  gauge provider. The hash data stays readable for in-flight requests; it
+  only stops being maintained.
+- `kvcache-aware`: `Close` cancels the subscriber and GC goroutines and
+  unregisters the pod callback (memory mode), or stops the GC ticker
+  (redis mode).
+
+#### Close hook and its timing
+
+Plugins holding resources implement `framework.PluginCloser`
+(`Close() error`, must be idempotent). The ChainManager closes the
+plugins of replaced and deleted chains. The global chain is never closed:
+it is built once at startup, never rebuilt, and not owned by the
+ChainManager — its lifetime is the router process itself.
+
+Close does not run at swap time. In-flight requests carry the old chain
+on their context and keep using its instances across their whole
+lifetime — scoring during `Schedule`, bookkeeping during `RunPostHooks` —
+and a `Close` racing those uses could free a resource a request is still
+using. Instead, a chain
+tracks its in-flight requests: `Acquire` when a request resolves it,
+`Release` when `doLoadbalance` returns (post hooks run inside that call
+stack). A replaced or deleted chain is retired and closed only when its
+in-flight count drains to zero. The gate applies to every chain — for
+chains whose plugins hold nothing, the wait simply ends in a no-op
+`Close`. The counter is router-local (no
+cross-instance coordination) and a crashing router releases everything
+with the process.
+
+Plugin lifecycle timeline:
+
+```mermaid
+sequenceDiagram
+    participant E as store event (profile add/update/delete)
+    participant CM as ChainManager
+    participant NC as new plugin instances
+    participant OC as old plugin instances
+    participant R as in-flight requests
+
+    E->>CM: onProfileEvent
+    CM->>NC: build plugin instances
+    NC->>NC: start background workers, register store callbacks and metrics providers
+    CM->>CM: swap chain cache to the new chain
+    CM->>OC: retire (no new request resolves it)
+    R->>OC: Acquire'd earlier: Schedule + RunPostHooks keep using old instances
+    R-->>OC: request done, Release
+    OC->>OC: in-flight == 0 → Close
+    OC->>OC: stop goroutines, unregister Pod callbacks and metrics provider
+```
+
+Tuning a profile's args discards the learned cache data of its instances;
+the cache warms up again as traffic flows.
 
 ### Chain management and resolution
 
@@ -285,17 +356,23 @@ Per-request resolution (data plane) — `doLoadbalance` resolves once against
 the profile chain cache and carries the result on the request context;
 `Schedule` falls back to the global chain only when the ModelServer has no
 profile reference. A broken reference fails the request instead of
-falling back:
+falling back. The request `Acquire`s its chain on resolve and `Release`s
+it when `doLoadbalance` returns (post hooks run inside that call stack) —
+a retired chain closes only after its last in-flight request releases:
 
 ```mermaid
 flowchart TD
     R["doLoadbalance"] --> RES{"resolve: ModelServer → schedulerProfile"}
-    RES -- "no reference" --> G["global chain (router ConfigMap)"]
-    RES -- "hit: profile chain built" --> SET["ctx.ScheduleChain = chain"]
+    RES -- "no reference" --> G["global chain (router ConfigMap, never closed)"]
+    RES -- "hit: profile chain built" --> ACQ["chain.Acquire + ctx.ScheduleChain = chain"]
     RES -- "broken reference: build failed / profile deleted" --> FAIL["request fails: 503 + reason"]
-    SET --> SCH["Schedule: filters → scores"]
+    ACQ --> SCH["Schedule: filters → scores (chain via ctx)"]
     G --> SCH
     SCH --> H["RunPostHooks: post-schedule bookkeeping (same chain via ctx)"]
+    H --> REL["doLoadbalance returns → chain.Release"]
+    REL --> DRAIN{"chain retired and in-flight == 0?"}
+    DRAIN -- "yes" --> CLOSE["close old chain's plugins"]
+    DRAIN -- "no" --> KEEP["chain stays open for remaining requests"]
 ```
 
 ### Update and deletion semantics
