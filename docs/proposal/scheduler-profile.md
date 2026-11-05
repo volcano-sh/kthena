@@ -144,12 +144,6 @@ Two cases decide which chain serves a ModelServer's requests:
   (build failure or dangling reference): its requests fail directly
   (503 with a reason).
 
-Users migrating from the global config must copy every plugin and arg
-they rely on into the profile — nothing carries over. This differs from
-the semantics discussed for the field-based approach in #1899, where a
-per-ModelServer setting adjusted a single knob on top of the global
-config.
-
 Each profile chain builds its own plugin instances from its own args
 (see [Plugin lifecycle](#plugin-lifecycle)), so every plugin's args —
 including the stateful prefix-cache and kvcache-aware — take effect per
