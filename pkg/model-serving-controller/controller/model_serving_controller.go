@@ -999,12 +999,6 @@ func (c *ModelServingController) syncRoleReplicas(
 			}
 		}
 
-		// An incomplete gang core is repaired as one unit across roles so the
-		// group's PodGroup can become schedulable in a single step.
-		if err := c.planBootstrapGroupCore(bootstrap.AdmitterFrom(ctx), ms, servingGroup.Name, rolesToManage); err != nil {
-			return err
-		}
-
 		for _, targetRole := range rolesToManage {
 			if err := c.manageRoleReplicasPerGroup(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse, rolloutPolicy.allowTargetStart(servingGroup.Name, targetRole.Name), chain); err != nil {
 				syncErrors = append(syncErrors, err)
@@ -1214,10 +1208,9 @@ func (c *ModelServingController) scaleUpRoles(
 
 	roleTemplateHash := utils.CalRoleTemplateHash(targetRole)
 	var scaleUpErr error
-	// Bootstrap admission defers a replica whose pool has no Ready source yet.
-	// A denial blocks the pool for this sync, so later ordinals need not be tried.
+	// Without a Ready source, exhausted pool budgets defer further replicas this sync.
 	bootstrapAdmits := func(ordinal int, roleToApply workloadv1alpha1.Role) bool {
-		if bootstrap.AdmitterFrom(ctx).AdmitRole(groupName, roleToApply) {
+		if bootstrap.AdmitterFrom(ctx).AdmitRole(roleToApply) {
 			return true
 		}
 		klog.V(4).Infof("scaleUpRoles: deferring role %s ordinal %d in ServingGroup %s until a bootstrap source is ready", roleToApply.Name, ordinal, groupName)

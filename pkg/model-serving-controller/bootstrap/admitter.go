@@ -59,12 +59,6 @@ type poolState struct {
 	ready    int
 	inFlight int
 	admitted int
-	blocked  bool
-}
-
-type coreDecision struct {
-	admitted  bool
-	remaining map[PoolKey]int
 }
 
 // PoolSummary reports one pool's admissions in a reconcile.
@@ -81,9 +75,8 @@ type Admitter struct {
 	ms      *workloadv1alpha1.ModelServing
 	options Options
 
-	roleSpecs   map[string]workloadv1alpha1.Role
-	pools       map[PoolKey]*poolState
-	coreByGroup map[string]coreDecision
+	roleSpecs map[string]workloadv1alpha1.Role
+	pools     map[PoolKey]*poolState
 }
 
 // NewAdmitter builds the admission state from the observed in-scope replicas.
@@ -93,11 +86,10 @@ func NewAdmitter(ms *workloadv1alpha1.ModelServing, replicas []Replica, options 
 		return nil
 	}
 	a := &Admitter{
-		ms:          ms,
-		options:     options,
-		roleSpecs:   make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles)),
-		pools:       make(map[PoolKey]*poolState),
-		coreByGroup: make(map[string]coreDecision),
+		ms:        ms,
+		options:   options,
+		roleSpecs: make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles)),
+		pools:     make(map[PoolKey]*poolState),
 	}
 	for _, role := range ms.Spec.Template.Roles {
 		a.roleSpecs[role.Name] = role
@@ -183,7 +175,7 @@ func (a *Admitter) SeedBudget(roleName string) int {
 
 // AdmitGroup decides whether a new ServingGroup may be created from roles. On
 // success it returns how many replicas of each role to create now: the gang
-// minimum for in-scope roles and every replica otherwise. A nil map with ok
+// minimum for cold in-scope roles and every replica otherwise. A nil map with ok
 // means no role is gated and all replicas may be created.
 func (a *Admitter) AdmitGroup(roles []workloadv1alpha1.Role) (map[string]int, bool) {
 	if a == nil {
@@ -196,77 +188,45 @@ func (a *Admitter) AdmitGroup(roles []workloadv1alpha1.Role) (map[string]int, bo
 			replicasToCreate[role.Name] = roleReplicas(role)
 			continue
 		}
-		core := a.GangMinimum(role)
-		replicasToCreate[role.Name] = core
-		minReplicaToCreate[PoolFor(role)] = core
+		key := PoolFor(role)
+		count := roleReplicas(role)
+		if a.pool(key).ready == 0 {
+			count = a.GangMinimum(role)
+		}
+		replicasToCreate[role.Name] = count
+		if count > 0 {
+			minReplicaToCreate[key] += count
+		}
 	}
 	if len(minReplicaToCreate) == 0 {
 		return nil, true
 	}
-	if !a.admit(minReplicaToCreate, true) {
+	if !a.admit(minReplicaToCreate) {
 		return nil, false
 	}
 	return replicasToCreate, true
 }
 
-// PlanGroupCore admits the missing gang-minimum replicas of an existing group
-// as one unit; present holds each role's existing replica count.
-// Repairs ignore pools blocked by earlier denials in this reconcile: an existing
-// group's incomplete core must not be starved by a deferred new group.
-func (a *Admitter) PlanGroupCore(group string, roles []workloadv1alpha1.Role, present map[string]int) {
-	if a == nil {
-		return
-	}
-	minReplicaToCreate := make(map[PoolKey]int)
-	for _, role := range roles {
-		if !a.InScope(role.Name) {
-			continue
-		}
-		missing := max(0, a.GangMinimum(role)-present[role.Name])
-		if missing == 0 {
-			continue
-		}
-		minReplicaToCreate[PoolFor(role)] += missing
-	}
-	if len(minReplicaToCreate) == 0 {
-		return
-	}
-	a.coreByGroup[group] = coreDecision{admitted: a.admit(minReplicaToCreate, false), remaining: minReplicaToCreate}
-}
-
-// AdmitRole decides whether one missing replica of role may be created in group now.
-func (a *Admitter) AdmitRole(group string, role workloadv1alpha1.Role) bool {
+// AdmitRole admits one missing replica using the global pool budget.
+func (a *Admitter) AdmitRole(role workloadv1alpha1.Role) bool {
 	if a == nil || !a.InScope(role.Name) {
 		return true
 	}
-	key := PoolFor(role)
-	if decision, ok := a.coreByGroup[group]; ok && decision.remaining[key] > 0 {
-		if !decision.admitted {
-			return false
-		}
-		decision.remaining[key]--
-		return true
-	}
-	return a.admit(map[PoolKey]int{key: 1}, true)
+	return a.admit(map[PoolKey]int{PoolFor(role): 1})
 }
 
 // admit reserves all pools or none so an unschedulable partial gang cannot consume seed budgets.
-func (a *Admitter) admit(minReplicaToCreate map[PoolKey]int, respectBlocks bool) bool {
+func (a *Admitter) admit(minReplicaToCreate map[PoolKey]int) bool {
 	for key, count := range minReplicaToCreate {
 		pool := a.pool(key)
 		if pool.ready > 0 {
 			continue
 		}
 		budget := a.SeedBudget(key.Role)
-		if (respectBlocks && pool.blocked) || pool.inFlight+count > budget {
-			for blockedKey := range minReplicaToCreate {
-				if blocked := a.pool(blockedKey); blocked.ready == 0 {
-					blocked.blocked = true
-				}
-			}
+		if pool.inFlight+count > budget {
 			klog.V(4).InfoS("Deferring bootstrap replicas until a source is ready",
 				"modelServing", klog.KObj(a.ms), "pool", key, "requested", count,
-				"inFlight", pool.inFlight, "seedBudget", budget, "blocked", pool.blocked)
+				"inFlight", pool.inFlight, "seedBudget", budget)
 			return false
 		}
 	}

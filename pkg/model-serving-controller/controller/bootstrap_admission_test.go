@@ -34,7 +34,6 @@ import (
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/model-serving-controller/bootstrap"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
@@ -194,7 +193,7 @@ func TestBootstrapCreatesGangCoreThenRemainingReplicas(t *testing.T) {
 	assert.Len(t, h.listPods(ms), 4)
 }
 
-func TestBootstrapGroupCoreUsesReplicaCount(t *testing.T) {
+func TestBootstrapAdmissionCountsNonzeroOrdinals(t *testing.T) {
 	for _, ordinal := range []int{0, 7} {
 		t.Run(fmt.Sprintf("existing-ordinal-%d", ordinal), func(t *testing.T) {
 			ms := bootstrapModelServing("bootstrap-core-count", 1, 4)
@@ -207,11 +206,11 @@ func TestBootstrapGroupCoreUsesReplicaCount(t *testing.T) {
 			hash := utils.CalRoleTemplateHash(role)
 			h.controller.store.AddServingGroup(key, 0, revision)
 			h.controller.store.AddRole(key, group, role.Name, utils.GenerateRoleID(role.Name, ordinal), revision, hash)
-			admitter := bootstrap.NewAdmitter(ms, []bootstrap.Replica{{Role: role.Name, TemplateHash: hash}}, bootstrap.Options{GangScheduling: true})
-
-			require.NoError(t, h.controller.planBootstrapGroupCore(admitter, ms, group, ms.Spec.Template.Roles))
-			assert.True(t, admitter.AdmitRole(group, role), "one existing replica leaves one core replica to admit regardless of its ordinal")
-			assert.False(t, admitter.AdmitRole(group, role), "the existing replica and the reservation exhaust the seed budget")
+			admitter, err := h.controller.newBootstrapAdmitter(ms)
+			require.NoError(t, err)
+			require.NotNil(t, admitter)
+			assert.True(t, admitter.AdmitRole(role), "one existing replica leaves budget for one more regardless of its ordinal")
+			assert.False(t, admitter.AdmitRole(role), "the existing replica and the admission exhaust the seed budget")
 			summary := admitter.Summary()
 			require.Len(t, summary, 1)
 			assert.Equal(t, 1, summary[0].Admitted)

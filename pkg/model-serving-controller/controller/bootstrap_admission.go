@@ -71,27 +71,6 @@ func (c *ModelServingController) newBootstrapAdmitter(ms *workloadv1alpha1.Model
 	return bootstrap.NewAdmitter(ms, replicas, bootstrap.Options{GangScheduling: gang}), nil
 }
 
-// planBootstrapGroupCore admits the missing gang-minimum replicas of an
-// existing ServingGroup as one unit before its roles are reconciled.
-func (c *ModelServingController) planBootstrapGroupCore(admitter *bootstrap.Admitter, ms *workloadv1alpha1.ModelServing, groupName string, roles []workloadv1alpha1.Role) error {
-	if admitter == nil {
-		return nil
-	}
-	present := make(map[string]int, len(roles))
-	for _, role := range roles {
-		if !admitter.InScope(role.Name) {
-			continue
-		}
-		roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), groupName, role.Name)
-		if err != nil {
-			return fmt.Errorf("list Role %s of ServingGroup %s for bootstrap admission: %w", role.Name, groupName, err)
-		}
-		present[role.Name] = len(roleList)
-	}
-	admitter.PlanGroupCore(groupName, roles, present)
-	return nil
-}
-
 func (c *ModelServingController) emitBootstrapEvents(ms *workloadv1alpha1.ModelServing, admitter *bootstrap.Admitter) {
 	for _, pool := range admitter.Summary() {
 		c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "BootstrapBatchCreated",

@@ -83,7 +83,7 @@ func TestNewAdmitterDisabled(t *testing.T) {
 	replicasToCreate, ok := nilAdmitter.AdmitGroup(ms.Spec.Template.Roles)
 	assert.True(t, ok)
 	assert.Nil(t, replicasToCreate)
-	assert.True(t, nilAdmitter.AdmitRole("ms-0", ms.Spec.Template.Roles[0]))
+	assert.True(t, nilAdmitter.AdmitRole(ms.Spec.Template.Roles[0]))
 	assert.False(t, nilAdmitter.InScope("prefill"))
 	assert.Nil(t, nilAdmitter.Summary())
 	assert.Nil(t, AdmitterFrom(WithAdmitter(context.Background(), nil)))
@@ -141,7 +141,7 @@ func TestAdmitGroupSeedThenAll(t *testing.T) {
 		_, ok := admitter.AdmitGroup(ms.Spec.Template.Roles)
 		assert.False(t, ok, "group %d must wait for the seed", i)
 	}
-	assert.False(t, admitter.AdmitRole("ms-3", role), "a denied pool stays blocked for the sync")
+	assert.False(t, admitter.AdmitRole(role), "the seed budget is exhausted")
 	summary := admitter.Summary()
 	require.Len(t, summary, 1)
 	assert.Equal(t, 1, summary[0].Admitted)
@@ -188,6 +188,33 @@ func TestAdmitGroupScaleUpWithReadySources(t *testing.T) {
 	}
 }
 
+func TestAdmitGroupReadyPoolsCreateAllReplicas(t *testing.T) {
+	prefill, decode := testRole("prefill", 4), testRole("decode", 4)
+	ms := withStrategy(testModelServing(3, prefill, decode), seed("prefill", nil), seed("decode", nil))
+	ms.Spec.Template.GangPolicy = &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 2, "decode": 2}}
+	tests := []struct {
+		name     string
+		replicas []Replica
+		want     map[string]int
+	}{
+		{name: "both cold", want: map[string]int{"prefill": 2, "decode": 2}},
+		{name: "only prefill ready", replicas: observed(prefill, 1, 0), want: map[string]int{"prefill": 4, "decode": 2}},
+		{name: "both ready", replicas: append(observed(prefill, 1, 0), observed(decode, 1, 0)...), want: map[string]int{"prefill": 4, "decode": 4}},
+		{name: "another template ready", replicas: []Replica{{Role: "prefill", TemplateHash: "old", Running: true}}, want: map[string]int{"prefill": 2, "decode": 2}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			admitter := NewAdmitter(ms, tt.replicas, Options{GangScheduling: true})
+			counts, ok := admitter.AdmitGroup(ms.Spec.Template.Roles)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, counts)
+			for _, summary := range admitter.Summary() {
+				assert.Equal(t, tt.want[summary.Key.Role], summary.Admitted)
+			}
+		})
+	}
+}
+
 func TestAdmitGroupOutOfScopeRolesAreNotGated(t *testing.T) {
 	prefill, decode := testRole("prefill", 2), testRole("decode", 4)
 	ms := withStrategy(testModelServing(2, prefill, decode), seed("prefill", nil))
@@ -196,7 +223,7 @@ func TestAdmitGroupOutOfScopeRolesAreNotGated(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, map[string]int{"prefill": 1, "decode": 4}, replicasToCreate)
 	assert.False(t, admitter.InScope("decode"))
-	assert.True(t, admitter.AdmitRole("ms-0", decode))
+	assert.True(t, admitter.AdmitRole(decode))
 
 	noScoped := testModelServing(2, prefill, decode)
 	noScoped.Spec.BootstrapAccelerateStrategy = &workloadv1alpha1.BootstrapAccelerateStrategy{Roles: []workloadv1alpha1.BootstrapRole{{Name: "absent"}}}
@@ -221,8 +248,8 @@ func TestAdmitGroupMultiRoleGangCore(t *testing.T) {
 	assert.Equal(t, map[string]int{"prefill": 1, "decode": 2}, replicasToCreate)
 	_, ok = admitter.AdmitGroup(ms.Spec.Template.Roles)
 	assert.False(t, ok, "group 1 core does not fit the prefill seed budget")
-	assert.False(t, admitter.AdmitRole("ms-0", prefill), "non-core prefill waits")
-	assert.False(t, admitter.AdmitRole("ms-0", decode), "non-core decode waits")
+	assert.False(t, admitter.AdmitRole(prefill), "non-core prefill waits")
+	assert.False(t, admitter.AdmitRole(decode), "non-core decode waits")
 
 	replicas := append(observed(prefill, 1, 0), observed(decode, 2, 0)...)
 	admitter = NewAdmitter(ms, replicas, Options{GangScheduling: true})
@@ -230,8 +257,8 @@ func TestAdmitGroupMultiRoleGangCore(t *testing.T) {
 		_, ok := admitter.AdmitGroup(ms.Spec.Template.Roles)
 		assert.True(t, ok, "group %d core", i)
 	}
-	assert.True(t, admitter.AdmitRole("ms-0", prefill))
-	assert.True(t, admitter.AdmitRole("ms-0", decode))
+	assert.True(t, admitter.AdmitRole(prefill))
+	assert.True(t, admitter.AdmitRole(decode))
 }
 
 func TestAdmitGroupNeedsEveryPool(t *testing.T) {
@@ -242,17 +269,17 @@ func TestAdmitGroupNeedsEveryPool(t *testing.T) {
 	admitter := NewAdmitter(ms, replicas, Options{GangScheduling: true})
 	_, ok := admitter.AdmitGroup(ms.Spec.Template.Roles)
 	assert.False(t, ok, "a unit must fit every pool without a source")
-	assert.True(t, admitter.AdmitRole("ms-0", prefill), "the pool with a source is unlimited")
+	assert.True(t, admitter.AdmitRole(prefill), "the pool with a source is unlimited")
 }
 
 func TestAdmitReplicaStopsWhenSeedLoweredBelowInFlight(t *testing.T) {
 	role := testRole("prefill", 1)
 	ms := withStrategy(testModelServing(8, role), seed("prefill", ptr.To(intstr.FromInt32(1))))
 	admitter := NewAdmitter(ms, observed(role, 0, 3), Options{})
-	assert.False(t, admitter.AdmitRole("ms-3", role))
+	assert.False(t, admitter.AdmitRole(role))
 }
 
-func TestPlanGroupCoreRepairsBypassBlocksButNotBudget(t *testing.T) {
+func TestAdmitRoleRepairsBypassGroupBlocksButNotBudget(t *testing.T) {
 	prefill, decode := testRole("prefill", 1), testRole("decode", 1)
 	ms := withStrategy(testModelServing(2, prefill, decode), seed("prefill", nil), seed("decode", nil))
 	// Group 0 created prefill but decode failed: prefill in flight, decode missing.
@@ -261,46 +288,67 @@ func TestPlanGroupCoreRepairsBypassBlocksButNotBudget(t *testing.T) {
 	// The new group 1 is denied and blocks both pools.
 	_, ok := admitter.AdmitGroup(ms.Spec.Template.Roles)
 	require.False(t, ok)
-	assert.False(t, admitter.AdmitRole("ms-1", decode), "units of one respect the block")
+	assert.True(t, admitter.AdmitRole(decode), "an existing group repairs despite the deferred new group")
+	assert.False(t, admitter.AdmitRole(decode), "the repair is counted once and exhausts the budget")
+	assert.False(t, admitter.AdmitRole(prefill), "a full pool still denies repairs")
+	summary := admitter.Summary()
+	require.Len(t, summary, 1)
+	assert.Equal(t, PoolFor(decode), summary[0].Key)
+	assert.Equal(t, 1, summary[0].Admitted)
 
-	// Repairing group 0's core still fits decode's budget and must proceed.
-	admitter.PlanGroupCore("ms-0", ms.Spec.Template.Roles, map[string]int{"prefill": 1})
-	assert.True(t, admitter.AdmitRole("ms-0", decode))
-	assert.False(t, admitter.AdmitRole("ms-0", prefill), "prefill is present, not planned, and its pool is full")
-
-	// A repair that exceeds the budget is denied as a whole.
 	admitter = NewAdmitter(ms, observed(decode, 0, 1), Options{GangScheduling: true})
-	admitter.PlanGroupCore("ms-1", ms.Spec.Template.Roles, map[string]int{})
-	assert.False(t, admitter.AdmitRole("ms-1", prefill), "a multi-role core is denied when any pool is full")
-	assert.False(t, admitter.AdmitRole("ms-1", decode))
+	assert.True(t, admitter.AdmitRole(prefill), "repairs use each role's global pool independently")
+	assert.False(t, admitter.AdmitRole(decode))
 }
 
-func TestPlanGroupCoreUnitCountsOnce(t *testing.T) {
+func TestAdmitRoleReadyPoolsAreUnlimited(t *testing.T) {
+	prefill, decode := testRole("prefill", 4), testRole("decode", 4)
+	ms := withStrategy(testModelServing(1, prefill, decode), seed("prefill", nil), seed("decode", nil))
+	ms.Spec.Template.GangPolicy = &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 2, "decode": 2}}
+	tests := []struct {
+		name        string
+		replicas    []Replica
+		decodeReady bool
+	}{
+		{name: "all ready", replicas: append(observed(prefill, 1, 0), observed(decode, 1, 0)...), decodeReady: true},
+		{name: "decode cold and full", replicas: append(observed(prefill, 1, 0), observed(decode, 0, 2)...)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			admitter := NewAdmitter(ms, tt.replicas, Options{GangScheduling: true})
+			assert.Empty(t, admitter.Summary())
+			for count := 0; count < 4; count++ {
+				assert.True(t, admitter.AdmitRole(prefill), "Ready prefill is independent of cold decode")
+				assert.Equal(t, tt.decodeReady, admitter.AdmitRole(decode))
+			}
+		})
+	}
+}
+
+func TestAdmitRoleCountsEachReplicaOnce(t *testing.T) {
 	role := testRole("prefill", 4)
 	ms := withStrategy(testModelServing(1, role), seed("prefill", nil))
 	ms.Spec.Template.GangPolicy = &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 2}}
 	admitter := NewAdmitter(ms, nil, Options{GangScheduling: true})
-	admitter.PlanGroupCore("ms-0", ms.Spec.Template.Roles, map[string]int{})
-	assert.True(t, admitter.AdmitRole("ms-0", role))
-	assert.True(t, admitter.AdmitRole("ms-0", role))
-	assert.False(t, admitter.AdmitRole("ms-0", role), "non-core replicas wait for the seed budget")
+	assert.True(t, admitter.AdmitRole(role))
+	assert.True(t, admitter.AdmitRole(role))
+	assert.False(t, admitter.AdmitRole(role), "additional replicas wait for the seed budget")
 	summary := admitter.Summary()
 	require.Len(t, summary, 1)
 	assert.Equal(t, 2, summary[0].Admitted)
 }
 
-func TestPlanGroupCoreReservationMatchesTemplate(t *testing.T) {
+func TestAdmitRoleUsesMatchingTemplatePool(t *testing.T) {
 	role := testRole("prefill", 4)
 	ms := withStrategy(testModelServing(1, role), seed("prefill", nil))
 	ms.Spec.Template.GangPolicy = &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 2}}
 	oldRole := *role.DeepCopy()
 	oldRole.EntryTemplate.Spec.Containers[0].Image = "old-image"
 	admitter := NewAdmitter(ms, observed(oldRole, 0, 2), Options{GangScheduling: true})
-	admitter.PlanGroupCore("ms-0", ms.Spec.Template.Roles, nil)
-	assert.False(t, admitter.AdmitRole("ms-0", oldRole), "another template cannot consume the core reservation")
-	assert.True(t, admitter.AdmitRole("ms-0", role))
-	assert.True(t, admitter.AdmitRole("ms-0", role))
-	assert.False(t, admitter.AdmitRole("ms-0", role), "the core reservation is exhausted")
+	assert.False(t, admitter.AdmitRole(oldRole), "the old template pool is full")
+	assert.True(t, admitter.AdmitRole(role))
+	assert.True(t, admitter.AdmitRole(role))
+	assert.False(t, admitter.AdmitRole(role), "the matching template pool is full")
 }
 
 func TestReplicaAttribution(t *testing.T) {
