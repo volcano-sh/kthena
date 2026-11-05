@@ -142,6 +142,21 @@ func NewRoleDeleteChain(registry *Registry, specs []workloadv1alpha1.PluginSpec)
 	return chain, nil
 }
 
+// WithManagedPlugin returns a chain that runs plugin after the configured
+// plugins, restricted to scope. Managed plugins are enabled by the controller
+// from other spec fields and are never listed in spec.plugins.
+func (c *Chain) WithManagedPlugin(plugin Plugin, scope *workloadv1alpha1.PluginScope) *Chain {
+	result := &Chain{}
+	if c != nil {
+		result.entries = slices.Clone(c.entries)
+	}
+	result.entries = append(result.entries, entry{
+		plugin: plugin,
+		spec:   workloadv1alpha1.PluginSpec{Name: plugin.Name(), Type: workloadv1alpha1.PluginTypeBuiltIn, Scope: scope},
+	})
+	return result
+}
+
 // OnPodCreate executes plugins in order. Mutations are applied to req.Pod.
 func (c *Chain) OnPodCreate(ctx context.Context, req *HookRequest) error {
 	if c == nil {

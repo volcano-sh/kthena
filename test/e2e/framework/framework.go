@@ -40,6 +40,7 @@ type KthenaConfig struct {
 	NetworkingEnabled         bool
 	GatewayAPIEnabled         bool
 	InferenceExtensionEnabled bool
+	ModelExpressServerAddress string
 	ImageTag                  string
 	ChartPath                 string
 }
@@ -83,6 +84,9 @@ func InstallKthena(cfg *KthenaConfig) error {
 		"--set", fmt.Sprintf("workload.controllerManager.image.tag=%s", cfg.ImageTag),
 		"--set", fmt.Sprintf("workload.controllerManager.downloaderImage.tag=%s", cfg.ImageTag),
 		"--set", fmt.Sprintf("workload.controllerManager.runtimeImage.tag=%s", cfg.ImageTag),
+	}
+	if cfg.ModelExpressServerAddress != "" {
+		args = append(args, "--set", fmt.Sprintf("workload.controllerManager.modelExpressServerAddress=%s", cfg.ModelExpressServerAddress))
 	}
 
 	cmd := exec.Command("helm", args...)
