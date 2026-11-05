@@ -93,6 +93,8 @@ func main() {
 	pflag.IntVar(&cc.DebugPort, "debug-port", 0, "Port for debug server to dump internal cache. If 0, debug server is disabled.")
 	pflag.IntVar(&cc.AutoscalingSyncPeriodSeconds, "autoscaling-sync-period-seconds", util.AutoscalingSyncPeriodSeconds,
 		"Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 falls back to the default (15).")
+	pflag.StringVar(&cc.ModelExpressServerAddress, "modelexpress-server-address", "",
+		"host:port of the ModelExpress server injected as MX_SERVER_ADDRESS into engine containers of ModelServings using bootstrapAccelerateStrategy. Empty leaves the variable unset.")
 	pflag.Parse()
 
 	cc.Controllers = parseControllers(controllers)

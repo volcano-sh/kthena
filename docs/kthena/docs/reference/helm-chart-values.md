@@ -78,6 +78,7 @@ A Helm chart for deploying Kthena
 | workload.controllerManager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the Controller Manager. |
 | workload.controllerManager.image.repository | string | `"ghcr.io/volcano-sh/kthena-controller-manager"` | Image repository for the Controller Manager. |
 | workload.controllerManager.image.tag | string | `"latest"` | Image tag for the Controller Manager. |
+| workload.controllerManager.modelExpressServerAddress | string | `""` | host:port of the ModelExpress server injected as MX_SERVER_ADDRESS into engine containers of ModelServings using spec.bootstrapAccelerateStrategy. Empty leaves it unset. |
 | workload.controllerManager.replicas | int | `1` | Number of Controller Manager instances to run. |
 | workload.controllerManager.runtimeImage.repository | string | `"ghcr.io/volcano-sh/runtime"` | Image repository for the Runtime. |
 | workload.controllerManager.runtimeImage.tag | string | `"latest"` | Image tag for the Runtime. |

@@ -35,4 +35,10 @@ const (
 
 	// InPlaceUpdateStateAnnotationKey is the pod annotation that records in-place update state.
 	InPlaceUpdateStateAnnotationKey = "modelserving.volcano.sh/inplace-update-state"
+
+	// BootstrapConfigHashAnnotationKey is the pod annotation that records the effective
+	// bootstrap acceleration configuration a Pod was rendered with. Role replicas whose
+	// Pods all carry the same hash as the current configuration are peer-to-peer sources
+	// for new replicas of the same role template.
+	BootstrapConfigHashAnnotationKey = "modelserving.volcano.sh/bootstrap-config-hash"
 )

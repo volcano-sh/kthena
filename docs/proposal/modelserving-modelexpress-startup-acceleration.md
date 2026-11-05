@@ -236,7 +236,7 @@ Admission is computed per **pool** = (role name, role template hash, bootstrap-c
 
 The **bootstrap-config hash** covers what changes a Pod's MX setup but is not in the role template: provider, whether the role is in scope, the controller's configured ModelExpress server address, `modelExpress.engineContainers`, and the user plugin configuration (keys canonicalized, order preserved). `initialSeedReplicas`, replica counts, `readyURL`, and per-Pod values are excluded.
 
-- The MX plugin writes the hash on every Pod as `workload.serving.volcano.sh/bootstrap-config-hash`.
+- The MX plugin writes the hash on every Pod as `modelserving.volcano.sh/bootstrap-config-hash`.
 - A replica is a source only if **all** its Pods carry the expected template and config hashes. Pods without the annotation (for example, created before the feature was enabled) are never sources.
 - `syncAll` rebuilds the hash from Pod annotations, never from the current spec.
 
@@ -326,31 +326,33 @@ Storage serves 1 cold load instead of 8.
 
 #### 4. Controller changes
 
-A new package `pkg/model-serving-controller/bootstrap/` holds a pure `Admitter`. [syncModelServing](../../pkg/model-serving-controller/controller/model_serving_controller.go#L545-L589) builds one `Admitter` per reconcile from the datastore ($R$, $I$ per pool) and passes it down both creation paths:
+A new package `pkg/model-serving-controller/bootstrap/` holds a pure `Admitter`. [syncModelServing](../../pkg/model-serving-controller/controller/model_serving_controller.go) builds one `Admitter` per reconcile from the datastore and the Pods' configuration annotation ($R$, $I$ per pool), attaches it to the reconcile context, and both creation paths consult it:
 
 ```text
 syncModelServing
-├─ admitter := bootstrap.NewAdmitter(ms, store)
+├─ admitter := newBootstrapAdmitter(ms); ctx = bootstrap.WithAdmitter(ctx, admitter)
 ├─ syncServingGroupReplicas → scaleUpServingGroups       (A) new groups
 ├─ syncRoleReplicas → for each group: core deficit      (B)
 │                   → for each role:  scaleUpRoles       (C) units of one
 └─ rollout, services, status                              unchanged
 ```
 
-- **(A) New groups.** For each missing ordinal, `Admit` the unit (the gang core of in-scope roles). If it is admitted, create the PodGroup (`minMember` unchanged), then only the core's in-scope replicas plus all out-of-scope replicas, then `AddServingGroup`. If it is denied, the group is not created: no PodGroup and no Pods.
-- **(B) Core deficit.** Before the per-role loop, if an existing group is missing part of its core (for example after `RoleRecreate`), those replicas across all roles are admitted as one unit and created together. If the unit is denied, (C) skips them.
-- **(C) Remaining replicas.** In `scaleUpRoles`, each missing in-scope replica beyond the core is a unit of one. Out-of-scope roles are not gated.
+- **(A) New groups.** For each missing ordinal, `AdmitGroup` the unit (the gang core of in-scope roles). If it is admitted, create the PodGroup (`minMember` unchanged), then only the core's in-scope replicas plus all out-of-scope replicas, then `AddServingGroup`. If it is denied, the group is not created: no PodGroup and no Pods.
+- **(B) Core deficit.** Before the per-role loop, if an existing group is missing part of its core (for example after `RoleRecreate`), those replicas across all roles are admitted as one unit (`PlanGroupCore`) and created together. If the unit is denied, (C) skips them. A repair must fit the budget but ignores pools blocked by an earlier denial in the same reconcile: new groups are reconciled first, and a deferred new group must never starve an existing group whose core was only partially created.
+- **(C) Remaining replicas.** In `scaleUpRoles`, each missing in-scope replica beyond the core is a unit of one (`AdmitReplica`). Out-of-scope roles are not gated.
 - A denied unit blocks its pools for the rest of the reconcile ([Order](#2-admission)). Admitted replicas are added to $I$, and they are also in the datastore right after creation, so the next reconcile sees them.
-- **Datastore.** Each role replica records its observed bootstrap-configuration hash next to `RoleTemplateHash`, derived from its Pods' annotations on creation, Pod events, and `syncAll`. It is empty when any Pod lacks the annotation or the Pods disagree.
+- **Observation.** Nothing new is persisted in the datastore. Each reconcile derives a replica's configuration hash from the `modelserving.volcano.sh/bootstrap-config-hash` annotation of its live Pods in the informer cache: it is empty when any Pod lacks the annotation or the Pods disagree, so such a replica is never a source. A replica whose Pods are not observed yet is attributed to the current pool as in flight, never as a source, so a lagging cache can only defer creation.
 - **Wake-ups.** No new handlers. `RoleRunning` transitions already enqueue (the next batch), and so do deletions (lower $I$) and spec edits.
 - **Disabling** the policy: the next reconcile creates every missing replica. **Crash safety:** only the configuration identity is persisted on Pods, not batch progress; after a restart, `syncAll` rebuilds the datastore from observed Pods and admission is recomputed.
-- **Events:** `BootstrapBatchCreated` with the pool and the count; deferred counts are logged at V(4).
+- **Events:** `BootstrapBatchCreated` per pool with the count and the number of ready sources; deferred counts are logged at V(4).
+- **In-place updates.** The managed plugin does not implement `InPlaceUpdatePlugin`, because `MX_MODEL_REVISION` is bound to the role template hash at creation and cannot be patched in place. With the strategy set, `updateMethod: InPlace` falls back to recreating outdated replicas, which then pass admission like any other missing replica.
+- **Configuration.** The ModelExpress server address is a controller flag, `--modelexpress-server-address` (Helm: `controllerManager.modelExpressServerAddress`).
 
 ##### Environment injection
 
 A built-in `modelexpress` plugin implements the existing [OnPodCreate hook](../../pkg/model-serving-controller/plugins/manager.go#L86-L100). `buildPluginChain` appends it automatically after user plugins when `bootstrapAccelerateStrategy.provider` is `ModelExpress`, scoped to the strategy's roles and both entry and worker Pods. Users do not need a duplicate `spec.plugins` entry; explicit registration of this managed plugin is rejected. Its `OnPodReady` is a no-op. Admission remains in the controller because a per-Pod plugin cannot defer a whole gang unit.
 
-The plugin injects the variables below **only into inference-engine containers**, selected by `modelExpress.engineContainers` from `pod.spec.containers`, and writes the configuration-hash annotation on the Pod. Init containers and unselected regular containers (including sidecars) are never modified. Besides the webhook check, the controller renders all Pods of an admitted unit before creating any; if a user plugin leaves a Pod without a selected engine container, the whole unit fails with a configuration event and nothing is created. The plugin does not infer engine containers from images or command lines. If `modelExpress` is omitted, no environment variables are injected; users configure their engine containers themselves. Container selection participates in the bootstrap-configuration hash.
+The plugin injects the variables below **only into inference-engine containers**, selected by `modelExpress.engineContainers` from `pod.spec.containers`, and writes the configuration-hash annotation on the Pod. Init containers and unselected regular containers (including sidecars) are never modified. The webhook requires every in-scope template to contain a selected engine container; if a user plugin still leaves a rendered Pod without one, the plugin fails that Pod's creation with a `PluginError` event and the reconcile is retried. The plugin does not infer engine containers from images or command lines. If `modelExpress` is omitted, the annotation is still written but no environment variables are injected; users configure their engine containers themselves. Container selection participates in the bootstrap-configuration hash.
 
 `GenerateEntryPod` and `GenerateWorkerPod` remain unchanged. A variable already defined in a selected container wins, including values added by earlier plugins. Inject `MX_SERVER_ADDRESS` (from the controller's ModelExpress server address configuration) and `MX_ARTIFACT_READY_URL` (from `modelExpress.readyURL`) only when the variable is absent and the corresponding value is nonempty; no deprecated endpoint variable is injected. This integration requires an MX client that supports `MX_SERVER_ADDRESS`. Clients that read only the deprecated `MODEL_EXPRESS_URL` (for example, TRT-LLM live transfer) are unsupported, and because MX prefers `MODEL_EXPRESS_URL` when both are set, templates or images (for example, a Dockerfile `ENV`) that set it must remove it. Injected `env` entries take precedence over `envFrom`, and the plugin does not resolve `envFrom`; users who supply any variable below through `envFrom` must move it to `env` (or leave the corresponding field empty).
 
@@ -358,8 +360,8 @@ For the central-server deployment covered by this proposal, inject the following
 
 | Variable | Value | Why |
 |---|---|---|
-| `MX_MODEL_REVISION` | Role template hash (`workload.serving.volcano.sh/role-template-hash`) when not already set in the container | Scopes the MX source identity to the role template revision unless the user supplies an explicit checkpoint revision. |
-| `MX_SERVER_ADDRESS` | Controller's ModelExpress server address configuration; inject only when the variable is absent and the address is nonempty | The client's gRPC endpoint; do not assume `localhost:8001` points to an external MX server. |
+| `MX_MODEL_REVISION` | Role template hash (`modelserving.volcano.sh/role-template-hash`) when not already set in the container | Scopes the MX source identity to the role template revision unless the user supplies an explicit checkpoint revision. |
+| `MX_SERVER_ADDRESS` | Controller's `--modelexpress-server-address`; inject only when the variable is absent and the address is nonempty | The client's gRPC endpoint; do not assume `localhost:8001` points to an external MX server. |
 | `MX_P2P_METADATA` | `'1'` | Enables P2P weight metadata registration and discovery. |
 | `MX_METADATA_PORT` | `'5555'` | Fixed base TCP port for NIXL metadata exchange (never `0` in Kubernetes). |
 | `MX_WORKER_GRPC_PORT` | `'6555'` | Fixed base TCP port for worker gRPC status/coordination (never `0` in Kubernetes). |
