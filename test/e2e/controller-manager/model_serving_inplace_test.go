@@ -94,18 +94,6 @@ func listPodsByName(t *testing.T, ctx context.Context, kubeClient *kubernetes.Cl
 	return byName
 }
 
-func isPodReady(pod corev1.Pod) bool {
-	if pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil {
-		return false
-	}
-	for _, cond := range pod.Status.Conditions {
-		if cond.Type == corev1.PodReady {
-			return cond.Status == corev1.ConditionTrue
-		}
-	}
-	return false
-}
-
 // waitForInPlaceUpdated waits until every Pod of the roles in updatedRoles runs
 // image, is Ready, and has finished its in-place update (state done, no longer in progress).
 func waitForInPlaceUpdated(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, msName, image string, updatedRoles ...string) {
@@ -125,7 +113,7 @@ func waitForInPlaceUpdated(t *testing.T, ctx context.Context, kubeClient *kubern
 				continue
 			}
 			state := inplace.StateOf(pod)
-			if !isPodReady(*pod) || pod.Spec.Containers[0].Image != image || state == nil || !state.Done || inplace.InProgress(pod) {
+			if !utils.IsPodReady(*pod) || pod.Spec.Containers[0].Image != image || state == nil || !state.Done || inplace.InProgress(pod) {
 				return false
 			}
 		}
@@ -173,7 +161,7 @@ func trackUnavailableUnits(t *testing.T, ctx context.Context, kubeClient *kubern
 			}
 			unavailable := map[string]bool{}
 			for _, p := range pods {
-				if unit, ok := unitOf(p); ok && (!isPodReady(p) || inplace.InProgress(&p)) {
+				if unit, ok := unitOf(p); ok && (!utils.IsPodReady(p) || inplace.InProgress(&p)) {
 					unavailable[unit] = true
 				}
 			}
@@ -375,7 +363,7 @@ func TestModelServingInPlaceUpdateFallsBackToRecreate(t *testing.T) {
 				current := listPodsByName(t, ctx, kubeClient, ms.Name)
 				for _, name := range originals {
 					pod, ok := current[name]
-					if !ok || pod.UID == before[name].uid || !isPodReady(pod) || pod.Spec.Containers[0].Image != nginxAlpineImage {
+					if !ok || pod.UID == before[name].uid || !utils.IsPodReady(pod) || pod.Spec.Containers[0].Image != nginxAlpineImage {
 						return false
 					}
 				}

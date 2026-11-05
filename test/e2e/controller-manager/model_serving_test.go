@@ -521,7 +521,7 @@ func TestModelServingPodRecovery(t *testing.T) {
 			return false
 		}
 		for _, pod := range pods.Items {
-			if pod.UID == originalPodUID || pod.DeletionTimestamp != nil || !utils.IsPodReady(pod) {
+			if pod.UID == originalPodUID || !utils.IsPodReady(pod) {
 				continue
 			}
 			if pod.Labels[workload.GroupNameLabelKey] == originalGroupName &&
