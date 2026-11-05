@@ -68,6 +68,10 @@ waits for its in-flight requests to finish.
 - Engines whose metrics the hook cannot parse: those Pods fall back to the
   grace period (same behavior as today, bounded by `preStop` +
   `terminationGracePeriodSeconds`).
+- ModelServing deployments without the kthena-router in the traffic path: the
+  drain relies on the router to stop new dispatch; without it new requests keep
+  arriving and the hook would idle out its full timeout on every delete. Keep
+  the drain disabled (do not set the annotation) for such deployments.
 - Absolute lossless: normal path is lossless, residual cases fall back to the
   grace period.
 
@@ -242,7 +246,11 @@ off). Optionally the ModelServing webhook rejects invalid annotation values at
 write time. The router's drain tracking is harmless for hook-less Pods (SIGTERM
 follows within seconds). An explicit one-off fast delete remains available via
 the platform escape hatch (`kubectl delete pod --force --grace-period=0`, which
-skips preStop entirely).
+skips preStop entirely). Note the scope: the drain assumes traffic flows
+through kthena-router — the router is what stops new dispatch. For
+ModelServing deployed without the router (traffic bypassing it), keep the drain
+disabled: no one else stops new requests, so the hook would just wait out its
+full timeout on every delete.
 
 **Two values, one split rule**: the hook reads `DRAIN_TIMEOUT` (how long to
 wait for in-flight to drain; user intent, e.g. 300s) and the controller injects
