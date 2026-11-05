@@ -26,10 +26,6 @@ type ModelExpressConfigApplyConfiguration struct {
 	// EngineContainers names regular inference-engine containers in entry and
 	// worker Pods of in-scope roles. Sidecars and init containers are not selected.
 	EngineContainers []string `json:"engineContainers,omitempty"`
-	// ServerAddress is the ModelExpress server's gRPC address (host:port).
-	// It is injected as MX_SERVER_ADDRESS only if that variable is not already
-	// set in the selected container. If empty, users supply the endpoint themselves.
-	ServerAddress *string `json:"serverAddress,omitempty"`
 	// ReadyURL is the engine endpoint that ModelExpress polls before a source
 	// publishes its metadata; it may differ from the Pod readiness probe.
 	// It is injected as MX_ARTIFACT_READY_URL only if that variable is not already
@@ -50,14 +46,6 @@ func (b *ModelExpressConfigApplyConfiguration) WithEngineContainers(values ...st
 	for i := range values {
 		b.EngineContainers = append(b.EngineContainers, values[i])
 	}
-	return b
-}
-
-// WithServerAddress sets the ServerAddress field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the ServerAddress field is set to the value of the last call.
-func (b *ModelExpressConfigApplyConfiguration) WithServerAddress(value string) *ModelExpressConfigApplyConfiguration {
-	b.ServerAddress = &value
 	return b
 }
 

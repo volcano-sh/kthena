@@ -32,12 +32,6 @@ type BootstrapAccelerateStrategyApplyConfiguration struct {
 	// Roles limits acceleration to the listed roles and configures each of them.
 	// At least one role must be specified.
 	Roles []BootstrapRoleApplyConfiguration `json:"roles,omitempty"`
-	// SourceFanOut is the number of P2P targets that one source can serve, i.e.
-	// starting role replicas (created but not yet Running) per ready replica of
-	// the same role. Once a role replica becomes ready, it acts as a new source
-	// for the other replicas of that role, so the budget grows as more replicas
-	// become ready. The effective budget is at least the role's gang minimum.
-	SourceFanOut *int32 `json:"sourceFanOut,omitempty"`
 	// ModelExpress configures environment injection for inference engines.
 	// If unset, users configure the engine environment themselves.
 	ModelExpress *ModelExpressConfigApplyConfiguration `json:"modelExpress,omitempty"`
@@ -67,14 +61,6 @@ func (b *BootstrapAccelerateStrategyApplyConfiguration) WithRoles(values ...*Boo
 		}
 		b.Roles = append(b.Roles, *values[i])
 	}
-	return b
-}
-
-// WithSourceFanOut sets the SourceFanOut field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the SourceFanOut field is set to the value of the last call.
-func (b *BootstrapAccelerateStrategyApplyConfiguration) WithSourceFanOut(value int32) *BootstrapAccelerateStrategyApplyConfiguration {
-	b.SourceFanOut = &value
 	return b
 }
 

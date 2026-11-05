@@ -86,12 +86,6 @@ spec:
                         x-kubernetes-validations:
                         - message: readyURL must be an absolute http or https URL
                           rule: isURL(self) && url(self).getScheme() in ['http', 'https']
-                      serverAddress:
-                        description: |-
-                          ServerAddress is the ModelExpress server's gRPC address (host:port).
-                          It is injected as MX_SERVER_ADDRESS only if that variable is not already
-                          set in the selected container. If empty, users supply the endpoint themselves.
-                        type: string
                     required:
                     - engineContainers
                     type: object
@@ -134,17 +128,6 @@ spec:
                     x-kubernetes-list-map-keys:
                     - name
                     x-kubernetes-list-type: map
-                  sourceFanOut:
-                    default: 1
-                    description: |-
-                      SourceFanOut is the number of P2P targets that one source can serve, i.e.
-                      starting role replicas (created but not yet Running) per ready replica of
-                      the same role. Once a role replica becomes ready, it acts as a new source
-                      for the other replicas of that role, so the budget grows as more replicas
-                      become ready. The effective budget is at least the role's gang minimum.
-                    format: int32
-                    minimum: 1
-                    type: integer
                 required:
                 - roles
                 type: object

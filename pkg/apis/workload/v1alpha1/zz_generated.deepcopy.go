@@ -292,11 +292,6 @@ func (in *BootstrapAccelerateStrategy) DeepCopyInto(out *BootstrapAccelerateStra
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.SourceFanOut != nil {
-		in, out := &in.SourceFanOut, &out.SourceFanOut
-		*out = new(int32)
-		**out = **in
-	}
 	if in.ModelExpress != nil {
 		in, out := &in.ModelExpress, &out.ModelExpress
 		*out = new(ModelExpressConfig)
