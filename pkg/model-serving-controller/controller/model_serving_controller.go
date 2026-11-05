@@ -845,11 +845,10 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 	// when bootstrap admission defers the group to a later reconcile.
 	createServingGroup := func(ordinal int, revision string, roles []workloadv1alpha1.Role) (bool, error) {
 		groupName := utils.GenerateServingGroupName(ms.Name, ordinal)
-		// A deferred group gets neither a PodGroup nor Pods; an admitted group
-		// starts with its gang core, and scaleUpRoles adds the rest later.
-		limits, admitted := bootstrap.AdmitterFrom(ctx).AdmitGroup(roles)
+		// starts with its gang granularity, and scaleUpRoles adds the rest later.
+		replicasToCreate, admitted := bootstrap.AdmitterFrom(ctx).AdmitGroup(roles)
 		if !admitted {
-			klog.V(4).Infof("scaleUpServingGroups: deferring ServingGroup %s until a bootstrap source is ready", groupName)
+			klog.V(4).Infof("scaleUpServingGroups: deferring ServingGroup %s until a p2p source is ready", groupName)
 			return false, nil
 		}
 		klog.V(4).Infof("scaleUpServingGroups: creating/updating PodGroup for ServingGroup=%s", groupName)
@@ -859,7 +858,7 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 		}
 		klog.V(4).Infof("Creating ServingGroup %s at ordinal %d with revision %s", groupName, ordinal, revision)
 		// Create pods for ServingGroup using the provided roles template
-		if err := c.createPodsForServingGroup(ctx, ms, ordinal, revision, roles, limits); err != nil {
+		if err := c.createPodsForServingGroup(ctx, ms, ordinal, revision, roles, replicasToCreate); err != nil {
 			return false, fmt.Errorf("create Serving group failed: %v", err)
 		}
 		// Insert new ServingGroup to global storage
@@ -1218,7 +1217,7 @@ func (c *ModelServingController) scaleUpRoles(
 	// Bootstrap admission defers a replica whose pool has no Ready source yet.
 	// A denial blocks the pool for this sync, so later ordinals need not be tried.
 	bootstrapAdmits := func(ordinal int, roleToApply workloadv1alpha1.Role) bool {
-		if bootstrap.AdmitterFrom(ctx).AdmitReplica(groupName, roleToApply, ordinal) {
+		if bootstrap.AdmitterFrom(ctx).AdmitRole(groupName, roleToApply) {
 			return true
 		}
 		klog.V(4).Infof("scaleUpRoles: deferring role %s ordinal %d in ServingGroup %s until a bootstrap source is ready", roleToApply.Name, ordinal, groupName)
@@ -3066,15 +3065,15 @@ func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, 
 	return c.createPodsForServingGroup(ctx, ms, servingGroupIndex, revision, roles, nil)
 }
 
-// createPodsForServingGroup creates the first limits[role] replicas of each
-// role, or every replica when limits is nil.
-func (c *ModelServingController) createPodsForServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupIndex int, revision string, roles []workloadv1alpha1.Role, limits map[string]int) error {
+// createPodsForServingGroup creates the first replicasToCreate[role] replicas
+// of each role, or every replica when replicasToCreate is nil.
+func (c *ModelServingController) createPodsForServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupIndex int, revision string, roles []workloadv1alpha1.Role, replicasToCreate map[string]int) error {
 	servingGroupName := utils.GenerateServingGroupName(ms.Name, servingGroupIndex)
 	for _, role := range roles {
 		roleTemplateHash := utils.CalRoleTemplateHash(role)
 		replicas := int(*role.Replicas)
-		if limits != nil {
-			replicas = min(replicas, limits[role.Name])
+		if replicasToCreate != nil {
+			replicas = replicasToCreate[role.Name]
 		}
 		for i := 0; i < replicas; i++ {
 			appliedHash, err := c.createPodsByRole(ctx, *role.DeepCopy(), ms, i, servingGroupIndex, revision, roleTemplateHash)

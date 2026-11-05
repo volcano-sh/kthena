@@ -22,7 +22,6 @@ import (
 	"sort"
 
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -30,35 +29,27 @@ import (
 )
 
 // PoolKey identifies the replicas that can serve each other as weight sources.
+// It mirrors MX_MODEL_REVISION, which the managed plugin derives from the role
+// template hash, so the controller and ModelExpress agree on compatibility.
 type PoolKey struct {
 	Role         string
 	TemplateHash string
-	ConfigHash   string
 }
 
 func (k PoolKey) String() string {
-	return fmt.Sprintf("%s/%s/%s", k.Role, k.TemplateHash, k.ConfigHash)
+	return fmt.Sprintf("%s/%s", k.Role, k.TemplateHash)
 }
 
 // Replica is one observed role replica.
 type Replica struct {
 	Role         string
 	TemplateHash string
-	// ConfigHash is the bootstrap configuration hash shared by all of the
-	// replica's Pods. It is empty when they disagree or carry no annotation.
-	ConfigHash string
-	// HashKnown is false when no Pod of the replica has been observed yet. Such a
-	// replica is attributed to the current pool so admission stays conservative.
-	HashKnown bool
 	// Running is true when every Pod of the replica is Ready.
 	Running bool
 }
 
 // Options configures NewAdmitter.
 type Options struct {
-	// ServerAddress is the controller's ModelExpress server address, part of the
-	// configuration hash.
-	ServerAddress string
 	// GangScheduling is true when ServingGroups get a PodGroup, so a role's gang
 	// minimum must be created together.
 	GangScheduling bool
@@ -72,8 +63,8 @@ type poolState struct {
 }
 
 type coreDecision struct {
-	admitted bool
-	roles    sets.Set[string]
+	admitted  bool
+	remaining map[PoolKey]int
 }
 
 // PoolSummary reports one pool's admissions in a reconcile.
@@ -91,58 +82,35 @@ type Admitter struct {
 	options Options
 
 	roleSpecs   map[string]workloadv1alpha1.Role
-	configHash  map[string]string
 	pools       map[PoolKey]*poolState
 	coreByGroup map[string]coreDecision
 }
 
-// NewAdmitter builds the admission state from the observed replicas. It returns
-// nil when ms does not use bootstrap acceleration.
-func NewAdmitter(ms *workloadv1alpha1.ModelServing, replicas []Replica, options Options) (*Admitter, error) {
+// NewAdmitter builds the admission state from the observed in-scope replicas.
+// It returns nil when ms does not use bootstrap acceleration.
+func NewAdmitter(ms *workloadv1alpha1.ModelServing, replicas []Replica, options Options) *Admitter {
 	if !Enabled(ms) {
-		return nil, nil
+		return nil
 	}
 	a := &Admitter{
 		ms:          ms,
 		options:     options,
 		roleSpecs:   make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles)),
-		configHash:  make(map[string]string),
 		pools:       make(map[PoolKey]*poolState),
 		coreByGroup: make(map[string]coreDecision),
 	}
 	for _, role := range ms.Spec.Template.Roles {
 		a.roleSpecs[role.Name] = role
-		if _, ok := RoleConfig(ms, role.Name); !ok {
-			continue
-		}
-		hash, err := ConfigHash(ms, role.Name, options.ServerAddress)
-		if err != nil {
-			return nil, err
-		}
-		a.configHash[role.Name] = hash
 	}
 	for _, replica := range replicas {
-		current, inScope := a.configHash[replica.Role]
-		if !inScope {
-			continue
-		}
-		hash := replica.ConfigHash
-		if !replica.HashKnown {
-			if replica.Running {
-				// Readiness is observed from Pods, so this cannot happen; never
-				// invent a source from it.
-				continue
-			}
-			hash = current
-		}
-		pool := a.pool(PoolKey{Role: replica.Role, TemplateHash: replica.TemplateHash, ConfigHash: hash})
+		pool := a.pool(PoolKey{Role: replica.Role, TemplateHash: replica.TemplateHash})
 		if replica.Running {
 			pool.ready++
 		} else {
 			pool.inFlight++
 		}
 	}
-	return a, nil
+	return a
 }
 
 func (a *Admitter) pool(key PoolKey) *poolState {
@@ -159,17 +127,13 @@ func (a *Admitter) InScope(roleName string) bool {
 	if a == nil {
 		return false
 	}
-	_, ok := a.configHash[roleName]
+	_, ok := RoleConfig(a.ms, roleName)
 	return ok
 }
 
 // PoolFor returns the pool new replicas of role join.
-func (a *Admitter) PoolFor(role workloadv1alpha1.Role) PoolKey {
-	key := PoolKey{Role: role.Name, TemplateHash: utils.CalRoleTemplateHash(role)}
-	if a != nil {
-		key.ConfigHash = a.configHash[role.Name]
-	}
-	return key
+func PoolFor(role workloadv1alpha1.Role) PoolKey {
+	return PoolKey{Role: role.Name, TemplateHash: utils.CalRoleTemplateHash(role)}
 }
 
 // GangMinimum is the number of replicas of role that one ServingGroup must
@@ -179,13 +143,13 @@ func (a *Admitter) GangMinimum(role workloadv1alpha1.Role) int {
 	if replicas <= 0 {
 		return 0
 	}
-	if a == nil || !a.options.GangScheduling {
+	if !a.options.GangScheduling {
 		return 1
 	}
 	minimum := replicas
 	if gang := a.ms.Spec.Template.GangPolicy; gang != nil {
 		if configured, ok := gang.MinRoleReplicas[role.Name]; ok {
-			minimum = min(int(configured), replicas)
+			minimum = min(int(configured), minimum)
 		}
 	}
 	return max(1, minimum)
@@ -225,85 +189,77 @@ func (a *Admitter) AdmitGroup(roles []workloadv1alpha1.Role) (map[string]int, bo
 	if a == nil {
 		return nil, true
 	}
-	unit := make(map[PoolKey]int)
-	limits := make(map[string]int, len(roles))
+	minReplicaToCreate := make(map[PoolKey]int)
+	replicasToCreate := make(map[string]int, len(roles))
 	for _, role := range roles {
 		if !a.InScope(role.Name) {
-			limits[role.Name] = roleReplicas(role)
+			replicasToCreate[role.Name] = roleReplicas(role)
 			continue
 		}
 		core := a.GangMinimum(role)
-		limits[role.Name] = core
-		if core > 0 {
-			unit[a.PoolFor(role)] += core
-		}
+		replicasToCreate[role.Name] = core
+		minReplicaToCreate[PoolFor(role)] = core
 	}
-	if len(unit) == 0 {
+	if len(minReplicaToCreate) == 0 {
 		return nil, true
 	}
-	if !a.admit(unit, true) {
+	if !a.admit(minReplicaToCreate, true) {
 		return nil, false
 	}
-	return limits, true
+	return replicasToCreate, true
 }
 
 // PlanGroupCore admits the missing gang-minimum replicas of an existing group
-// as one unit so a repaired core becomes schedulable together. present holds
-// the ordinals each role already has. The decision is replayed by AdmitReplica.
+// as one unit; present holds each role's existing replica count.
 // Repairs ignore pools blocked by earlier denials in this reconcile: an existing
 // group's incomplete core must not be starved by a deferred new group.
-func (a *Admitter) PlanGroupCore(group string, roles []workloadv1alpha1.Role, present map[string]sets.Set[int]) {
+func (a *Admitter) PlanGroupCore(group string, roles []workloadv1alpha1.Role, present map[string]int) {
 	if a == nil {
 		return
 	}
-	unit := make(map[PoolKey]int)
-	planned := sets.New[string]()
+	minReplicaToCreate := make(map[PoolKey]int)
 	for _, role := range roles {
 		if !a.InScope(role.Name) {
 			continue
 		}
-		missing := 0
-		for ordinal := 0; ordinal < a.GangMinimum(role); ordinal++ {
-			if !present[role.Name].Has(ordinal) {
-				missing++
-			}
-		}
+		missing := max(0, a.GangMinimum(role)-present[role.Name])
 		if missing == 0 {
 			continue
 		}
-		unit[a.PoolFor(role)] += missing
-		planned.Insert(role.Name)
+		minReplicaToCreate[PoolFor(role)] += missing
 	}
-	if len(unit) == 0 {
+	if len(minReplicaToCreate) == 0 {
 		return
 	}
-	a.coreByGroup[group] = coreDecision{admitted: a.admit(unit, false), roles: planned}
+	a.coreByGroup[group] = coreDecision{admitted: a.admit(minReplicaToCreate, false), remaining: minReplicaToCreate}
 }
 
-// AdmitReplica decides whether one missing replica of role at ordinal may be
-// created in group now.
-func (a *Admitter) AdmitReplica(group string, role workloadv1alpha1.Role, ordinal int) bool {
+// AdmitRole decides whether one missing replica of role may be created in group now.
+func (a *Admitter) AdmitRole(group string, role workloadv1alpha1.Role) bool {
 	if a == nil || !a.InScope(role.Name) {
 		return true
 	}
-	if ordinal < a.GangMinimum(role) {
-		if decision, ok := a.coreByGroup[group]; ok && decision.roles.Has(role.Name) {
-			return decision.admitted
+	key := PoolFor(role)
+	if decision, ok := a.coreByGroup[group]; ok && decision.remaining[key] > 0 {
+		if !decision.admitted {
+			return false
 		}
+		decision.remaining[key]--
+		return true
 	}
-	return a.admit(map[PoolKey]int{a.PoolFor(role): 1}, true)
+	return a.admit(map[PoolKey]int{key: 1}, true)
 }
 
-// admit reserves unit in every pool it touches, or denies it as a whole.
-func (a *Admitter) admit(unit map[PoolKey]int, respectBlocks bool) bool {
-	for key, count := range unit {
+// admit reserves all pools or none so an unschedulable partial gang cannot consume seed budgets.
+func (a *Admitter) admit(minReplicaToCreate map[PoolKey]int, respectBlocks bool) bool {
+	for key, count := range minReplicaToCreate {
 		pool := a.pool(key)
 		if pool.ready > 0 {
 			continue
 		}
 		budget := a.SeedBudget(key.Role)
 		if (respectBlocks && pool.blocked) || pool.inFlight+count > budget {
-			for blockedKey := range unit {
+			for blockedKey := range minReplicaToCreate {
 				if blocked := a.pool(blockedKey); blocked.ready == 0 {
 					blocked.blocked = true
 				}
@@ -314,7 +270,7 @@ func (a *Admitter) admit(unit map[PoolKey]int, respectBlocks bool) bool {
 			return false
 		}
 	}
-	for key, count := range unit {
+	for key, count := range minReplicaToCreate {
 		pool := a.pool(key)
 		pool.inFlight += count
 		pool.admitted += count

@@ -19,15 +19,7 @@ limitations under the License.
 package bootstrap
 
 import (
-	"encoding/json"
-	"fmt"
-	"hash/fnv"
-	"slices"
-
-	"k8s.io/apimachinery/pkg/util/rand"
-
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
 // Enabled reports whether ms opts into bootstrap acceleration.
@@ -69,47 +61,4 @@ func ScopedRoleNames(ms *workloadv1alpha1.ModelServing) []string {
 		names = append(names, role.Name)
 	}
 	return names
-}
-
-// configHashInput is everything that changes a Pod's bootstrap rendering but is
-// not part of the role template. Seeds, replica counts, and readyURL are
-// excluded on purpose: they never change which replicas can serve each other.
-type configHashInput struct {
-	Provider         workloadv1alpha1.BootstrapAccelerateStrategyProvider `json:"provider"`
-	Role             string                                               `json:"role"`
-	ServerAddress    string                                               `json:"serverAddress"`
-	EngineContainers []string                                             `json:"engineContainers"`
-	// Plugins is the canonical revision projection of spec.plugins.
-	Plugins json.RawMessage `json:"plugins"`
-}
-
-// ConfigHash returns the bootstrap configuration hash written on Pods of
-// roleName. It is empty when roleName is not in scope.
-func ConfigHash(ms *workloadv1alpha1.ModelServing, roleName, serverAddress string) (string, error) {
-	if _, ok := RoleConfig(ms, roleName); !ok {
-		return "", nil
-	}
-	plugins, err := utils.BuildRevisionData(&workloadv1alpha1.ModelServing{
-		Spec: workloadv1alpha1.ModelServingSpec{Plugins: ms.Spec.Plugins},
-	})
-	if err != nil {
-		return "", fmt.Errorf("canonicalize plugin configuration: %w", err)
-	}
-	input := configHashInput{
-		Provider:      Provider(ms),
-		Role:          roleName,
-		ServerAddress: serverAddress,
-		Plugins:       plugins,
-	}
-	if mx := ms.Spec.BootstrapAccelerateStrategy.ModelExpress; mx != nil {
-		input.EngineContainers = slices.Clone(mx.EngineContainers)
-		slices.Sort(input.EngineContainers)
-	}
-	data, err := json.Marshal(input)
-	if err != nil {
-		return "", fmt.Errorf("marshal bootstrap configuration: %w", err)
-	}
-	hasher := fnv.New32a()
-	_, _ = hasher.Write(data)
-	return rand.SafeEncodeString(fmt.Sprint(hasher.Sum32())), nil
 }

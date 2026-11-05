@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/bootstrap"
@@ -31,7 +30,8 @@ import (
 
 // newBootstrapAdmitter snapshots every live role replica of ms into the
 // admission state for this reconcile. Sources and in-flight replicas are read
-// from the datastore and the Pods' configuration annotation, never persisted.
+// from the datastore; pools are keyed by role template hash, the same input the
+// managed plugin turns into MX_MODEL_REVISION.
 func (c *ModelServingController) newBootstrapAdmitter(ms *workloadv1alpha1.ModelServing) (*bootstrap.Admitter, error) {
 	if !bootstrap.Enabled(ms) {
 		return nil, nil
@@ -50,58 +50,25 @@ func (c *ModelServingController) newBootstrapAdmitter(ms *workloadv1alpha1.Model
 			return nil, fmt.Errorf("list Roles of ServingGroup %s for bootstrap admission: %w", group.Name, err)
 		}
 		for roleName, instances := range roles {
-			if _, inScope := bootstrap.RoleConfig(ms, roleName); !inScope {
+			if _, ok := bootstrap.RoleConfig(ms, roleName); !ok {
 				continue
 			}
-			for roleID, role := range instances {
+			for _, role := range instances {
 				if role == nil || role.Status == datastore.RoleDeleting {
 					continue
 				}
-				hash, known := c.observedBootstrapConfigHash(ms, group.Name, roleName, roleID)
+				// Legacy records without a hash resolve it from their revision.
+				templateHash, _ := c.resolveRoleTemplateHashForComparison(ms, group, roleName, *role)
 				replicas = append(replicas, bootstrap.Replica{
 					Role:         roleName,
-					TemplateHash: role.RoleTemplateHash,
-					ConfigHash:   hash,
-					HashKnown:    known,
+					TemplateHash: templateHash,
 					Running:      role.Status == datastore.RoleRunning,
 				})
 			}
 		}
 	}
 	gang := ms.Spec.SchedulerName == "volcano" && c.podGroupManager != nil && c.podGroupManager.HasPodGroupCRD()
-	return bootstrap.NewAdmitter(ms, replicas, bootstrap.Options{
-		ServerAddress:  c.modelExpressServerAddress,
-		GangScheduling: gang,
-	})
-}
-
-// observedBootstrapConfigHash returns the configuration hash shared by all
-// live Pods of a role replica. known is false when no Pod has been observed.
-// Pods that disagree or lack the annotation yield an empty hash, so the replica
-// can never be a source for the current configuration.
-func (c *ModelServingController) observedBootstrapConfigHash(ms *workloadv1alpha1.ModelServing, group, roleName, roleID string) (string, bool) {
-	if c.podsInformer == nil {
-		return "", false
-	}
-	pods, err := c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, roleName, roleID))
-	if err != nil {
-		return "", false
-	}
-	hash, observed := "", false
-	for _, pod := range pods {
-		if pod.DeletionTimestamp != nil || !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
-			continue
-		}
-		podHash := pod.Annotations[workloadv1alpha1.BootstrapConfigHashAnnotationKey]
-		if !observed {
-			hash, observed = podHash, true
-			continue
-		}
-		if podHash != hash {
-			return "", true
-		}
-	}
-	return hash, observed
+	return bootstrap.NewAdmitter(ms, replicas, bootstrap.Options{GangScheduling: gang}), nil
 }
 
 // planBootstrapGroupCore admits the missing gang-minimum replicas of an
@@ -110,7 +77,7 @@ func (c *ModelServingController) planBootstrapGroupCore(admitter *bootstrap.Admi
 	if admitter == nil {
 		return nil
 	}
-	present := make(map[string]sets.Set[int], len(roles))
+	present := make(map[string]int, len(roles))
 	for _, role := range roles {
 		if !admitter.InScope(role.Name) {
 			continue
@@ -119,13 +86,7 @@ func (c *ModelServingController) planBootstrapGroupCore(admitter *bootstrap.Admi
 		if err != nil {
 			return fmt.Errorf("list Role %s of ServingGroup %s for bootstrap admission: %w", role.Name, groupName, err)
 		}
-		ordinals := sets.New[int]()
-		for _, instance := range roleList {
-			if _, ordinal := utils.GetParentNameAndOrdinal(instance.Name); ordinal >= 0 {
-				ordinals.Insert(ordinal)
-			}
-		}
-		present[role.Name] = ordinals
+		present[role.Name] = len(roleList)
 	}
 	admitter.PlanGroupCore(groupName, roles, present)
 	return nil

@@ -140,9 +140,6 @@ func TestBootstrapCreatesSeedThenRemainingGroups(t *testing.T) {
 	require.Len(t, pods, 1)
 	seed := pods[0]
 
-	hash, err := bootstrap.ConfigHash(ms, "prefill", bootstrapTestServerAddress)
-	require.NoError(t, err)
-	assert.Equal(t, hash, seed.Annotations[workloadv1alpha1.BootstrapConfigHashAnnotationKey])
 	env := map[string]string{}
 	for _, variable := range seed.Spec.Containers[0].Env {
 		env[variable.Name] = variable.Value
@@ -197,6 +194,31 @@ func TestBootstrapCreatesGangCoreThenRemainingReplicas(t *testing.T) {
 	assert.Len(t, h.listPods(ms), 4)
 }
 
+func TestBootstrapGroupCoreUsesReplicaCount(t *testing.T) {
+	for _, ordinal := range []int{0, 7} {
+		t.Run(fmt.Sprintf("existing-ordinal-%d", ordinal), func(t *testing.T) {
+			ms := bootstrapModelServing("bootstrap-core-count", 1, 4)
+			ms.Spec.Template.GangPolicy = &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 2}}
+			h, _ := newBootstrapTestController(t, ms)
+			group := ms.Name + "-0"
+			key := utils.GetNamespaceName(ms)
+			revision := utils.ModelServingRevision(ms)
+			role := ms.Spec.Template.Roles[0]
+			hash := utils.CalRoleTemplateHash(role)
+			h.controller.store.AddServingGroup(key, 0, revision)
+			h.controller.store.AddRole(key, group, role.Name, utils.GenerateRoleID(role.Name, ordinal), revision, hash)
+			admitter := bootstrap.NewAdmitter(ms, []bootstrap.Replica{{Role: role.Name, TemplateHash: hash}}, bootstrap.Options{GangScheduling: true})
+
+			require.NoError(t, h.controller.planBootstrapGroupCore(admitter, ms, group, ms.Spec.Template.Roles))
+			assert.True(t, admitter.AdmitRole(group, role), "one existing replica leaves one core replica to admit regardless of its ordinal")
+			assert.False(t, admitter.AdmitRole(group, role), "the existing replica and the reservation exhaust the seed budget")
+			summary := admitter.Summary()
+			require.Len(t, summary, 1)
+			assert.Equal(t, 1, summary[0].Admitted)
+		})
+	}
+}
+
 func TestBootstrapLeavesOutOfScopeRolesUngated(t *testing.T) {
 	ms := bootstrapModelServing("bootstrap-scope", 1, 2)
 	ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, workloadv1alpha1.Role{
@@ -221,7 +243,6 @@ func TestBootstrapLeavesOutOfScopeRolesUngated(t *testing.T) {
 	assert.ElementsMatch(t, []string{"decode-0", "decode-1", "decode-2"}, roleNames(decode), "out-of-scope roles are created whole")
 	for _, pod := range h.listPods(ms) {
 		if utils.GetRoleName(&pod) == "decode" {
-			assert.NotContains(t, pod.Annotations, workloadv1alpha1.BootstrapConfigHashAnnotationKey)
 			assert.Len(t, pod.Spec.Containers[0].Env, 2, "no MX environment on out-of-scope roles")
 		}
 	}
@@ -255,7 +276,7 @@ func TestBootstrapDisablingCreatesEverything(t *testing.T) {
 		if pod.Name == ms.Name+"-0-prefill-0-0" {
 			continue
 		}
-		assert.NotContains(t, pod.Annotations, workloadv1alpha1.BootstrapConfigHashAnnotationKey, "new Pods are rendered without the strategy")
+		assert.Len(t, pod.Spec.Containers[0].Env, 2, "new Pods are rendered without the strategy")
 	}
 }
 
@@ -300,61 +321,6 @@ func TestBootstrapRepairsGangCoreDespiteDeferredGroups(t *testing.T) {
 	assert.ElementsMatch(t, []string{group + "-prefill-0-0", group + "-decode-0-0"}, podNames(h.listPods(ms)))
 }
 
-func TestObservedBootstrapConfigHash(t *testing.T) {
-	ms := bootstrapModelServing("bootstrap-observe", 1, 1)
-	c := newRevisionTestController(t, ms)
-	group := ms.Name + "-0"
-	indexer := c.podsInformer.GetIndexer()
-	role := ms.Spec.Template.Roles[0]
-	role.WorkerReplicas = 1
-	role.WorkerTemplate = role.EntryTemplate.DeepCopy()
-	revision := utils.ModelServingRevision(ms)
-	hash := utils.CalRoleTemplateHash(role)
-	member := func(index int, annotation string, mutate func(*corev1.Pod)) *corev1.Pod {
-		pod := utils.GenerateEntryPod(*role.DeepCopy(), ms, group, "prefill-0", revision, hash)
-		if index > 0 {
-			pod = utils.GenerateWorkerPod(*role.DeepCopy(), ms, group, "prefill-0", index, revision, hash)
-		}
-		if annotation != "" {
-			pod.Annotations = map[string]string{workloadv1alpha1.BootstrapConfigHashAnnotationKey: annotation}
-		}
-		if mutate != nil {
-			mutate(pod)
-		}
-		require.NoError(t, indexer.Add(pod))
-		return pod
-	}
-
-	observed, known := c.observedBootstrapConfigHash(ms, group, "prefill", "prefill-0")
-	assert.False(t, known, "no Pod observed yet")
-	assert.Empty(t, observed)
-
-	entry := member(0, "cfg-a", nil)
-	observed, known = c.observedBootstrapConfigHash(ms, group, "prefill", "prefill-0")
-	assert.True(t, known)
-	assert.Equal(t, "cfg-a", observed)
-
-	member(1, "cfg-a", func(pod *corev1.Pod) { pod.DeletionTimestamp = ptr.To(metav1.Now()) })
-	observed, _ = c.observedBootstrapConfigHash(ms, group, "prefill", "prefill-0")
-	assert.Equal(t, "cfg-a", observed, "terminating Pods are ignored")
-
-	member(2, "cfg-a", func(pod *corev1.Pod) { pod.OwnerReferences[0].UID = "someone-else" })
-	observed, _ = c.observedBootstrapConfigHash(ms, group, "prefill", "prefill-0")
-	assert.Equal(t, "cfg-a", observed, "foreign Pods are ignored")
-
-	worker := member(3, "cfg-b", nil)
-	observed, known = c.observedBootstrapConfigHash(ms, group, "prefill", "prefill-0")
-	assert.True(t, known)
-	assert.Empty(t, observed, "disagreeing Pods are never a source")
-
-	require.NoError(t, indexer.Delete(worker))
-	member(3, "", nil)
-	observed, _ = c.observedBootstrapConfigHash(ms, group, "prefill", "prefill-0")
-	assert.Empty(t, observed, "a Pod without the annotation disqualifies the replica")
-
-	require.NoError(t, indexer.Delete(entry))
-}
-
 // Sources are counted per role template: a changed template starts a new pool
 // whose first replica is a seed even while old-revision replicas are serving.
 func TestBootstrapAdmitterCountsSourcesPerTemplate(t *testing.T) {
@@ -364,16 +330,16 @@ func TestBootstrapAdmitterCountsSourcesPerTemplate(t *testing.T) {
 	key := utils.GetNamespaceName(ms)
 	oldRole := ms.Spec.Template.Roles[0]
 	oldRevision, oldHash := utils.ModelServingRevision(ms), utils.CalRoleTemplateHash(oldRole)
-	configHash, err := bootstrap.ConfigHash(ms, "prefill", bootstrapTestServerAddress)
-	require.NoError(t, err)
 	for ordinal := 0; ordinal < 2; ordinal++ {
 		group := utils.GenerateServingGroupName(ms.Name, ordinal)
 		c.store.AddServingGroup(key, ordinal, oldRevision)
-		c.store.AddRole(key, group, "prefill", "prefill-0", oldRevision, oldHash)
+		// A legacy record without a hash resolves it from the ControllerRevision.
+		hash := oldHash
+		if ordinal == 1 {
+			hash = ""
+		}
+		c.store.AddRole(key, group, "prefill", "prefill-0", oldRevision, hash)
 		require.NoError(t, c.store.UpdateRoleStatus(key, group, "prefill", "prefill-0", datastore.RoleRunning))
-		pod := utils.GenerateEntryPod(*oldRole.DeepCopy(), ms, group, "prefill-0", oldRevision, oldHash)
-		pod.Annotations = map[string]string{workloadv1alpha1.BootstrapConfigHashAnnotationKey: configHash}
-		require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
 	}
 
 	admitter, err := c.newBootstrapAdmitter(ms)

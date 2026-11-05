@@ -78,6 +78,7 @@ Override any of them in the container `env` of the template. The plugin cannot b
 
 - **Gang scheduling.** With `schedulerName: volcano`, a ServingGroup's gang-required replicas of each role (`minRoleReplicas`, or all replicas by default) are created together with its PodGroup, and the seed budget is raised to at least that number. The remaining replicas are added once a source is Ready.
 - **Scale-up and recovery.** New replicas join the pool of their role template. If a Ready replica of that template exists, they are created immediately.
+- **Existing fleets.** Sources are identified by role template, not by how their Pods were rendered. Enabling the strategy on a fleet created without ModelExpress, or changing the controller's server address or `engineContainers`, does not throttle new replicas; they start together and ModelExpress falls back to storage until the Pods are rolled.
 - **Rolling updates.** A changed role template is a new pool, so the first new-revision replicas are a seed batch; later rollout steps load from already-updated replicas. `maxUnavailable`, `maxSurge`, and `partition` keep their meaning. `updateMethod: InPlace` falls back to recreating outdated replicas while the strategy is set.
 - **Observability.** `BootstrapBatchCreated` events report how many replicas of each role were created and how many Ready sources they can use. The `ModelServing` stays `Progressing` until every replica is created.
 - **Disabling.** Removing `spec.bootstrapAccelerateStrategy` creates every missing replica on the next reconcile.

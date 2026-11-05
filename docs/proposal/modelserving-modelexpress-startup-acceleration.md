@@ -59,7 +59,7 @@ Weight loading dominates bootstrap of large models on initial deployment, scale-
 
 #### Batch creation
 
-The controller changes when role replicas are created; a built-in ModelServing plugin injects MX environment variables and a bootstrap-configuration annotation into in-scope Pods. Templates and existing labels are unchanged. Every engine runs the same MX load path: it looks for a compatible ready source, loads P2P if there is one, and otherwise falls back to storage. The seed batch simply finds no source.
+The controller changes when role replicas are created; a built-in ModelServing plugin injects MX environment variables into in-scope Pods. Templates and existing labels are unchanged. Every engine runs the same MX load path: it looks for a compatible ready source, loads P2P if there is one, and otherwise falls back to storage. The seed batch simply finds no source.
 
 ```mermaid
 sequenceDiagram
@@ -115,7 +115,7 @@ Rolling update of the engine image on 32 replicas. The first new-revision seed b
 | A role's `initialSeedReplicas` is smaller than its gang requirement. | The controller raises $S$ to at least $g$ at runtime, so a gang unit always fits when $I=0$. See [Seed budget and gang](#seed-budget-and-gang). |
 | MX known issue (nvbug 6519532): a source may stop serving new readers after one of its readers is deleted. Rolling update and scale-down delete readers. | Affected replicas stall until `MX_TRANSFER_TIMEOUT`, then try another source or fall back to storage. Document a lower `MX_TRANSFER_TIMEOUT`. |
 | Controller downgrade | Safe: an old controller simply creates the missing replicas. |
-| Security | No new privileges or RBAC. In-scope Pods get plain/downward-API environment variables and a configuration-hash annotation; the MX server address is configured on the controller. |
+| Security | No new privileges or RBAC. In-scope Pods get plain/downward-API environment variables; the MX server address is configured on the controller. |
 
 ### Design Details
 
@@ -222,25 +222,21 @@ spec:
 
 **Validation** ([validateModelServing](../../pkg/model-serving-controller/webhook/validator.go#L82)): each `roles[].name` must name an existing role, and names are unique (enforced by the list-map schema); each `roles[].initialSeedReplicas` is a positive integer or `1%`–`100%`, with percentages rounded up. A seed count below the gang minimum is accepted and raised to $g$ at runtime, including the default of 1 (see [Seed budget and gang](#seed-budget-and-gang)). `modelExpress.readyURL`, if set, must be an absolute `http` or `https` URL. The field is mutable and takes effect on the next reconcile.
 
-**Revision neutrality.** `ModelServingRevision` hashes roles; `CalRoleTemplateHash` hashes one role; `BuildRevisionData` captures roles, `schedulerName`, and user `plugins`. None includes `BootstrapAccelerateStrategy`. MX variables and the configuration annotation are added to generated Pods, not to the templates, so they do not change these revision inputs. Unit tests lock this in.
+**Revision neutrality.** `ModelServingRevision` hashes roles; `CalRoleTemplateHash` hashes one role; `BuildRevisionData` captures roles, `schedulerName`, and user `plugins`. None includes `BootstrapAccelerateStrategy`. MX variables are added to generated Pods, not to the templates, so they do not change these revision inputs. Unit tests lock this in.
 
 When `modelExpress` is specified, `engineContainers` must be nonempty and contain nonempty, unique container names, and the webhook requires every in-scope role's entry template and worker template (if any) to contain at least one of them.
 
-The automatically enabled MX plugin is not written into `spec.plugins` or the ControllerRevision. Policy edits therefore do not trigger a rollout, but changes to effective MX configuration start a new admission pool as described below.
+The automatically enabled MX plugin is not written into `spec.plugins` or the ControllerRevision. Policy edits therefore never trigger a rollout.
 
 #### 2. Admission
 
 ##### Pools
 
-Admission is computed per **pool** = (role name, role template hash, bootstrap-config hash). Only replicas in the same pool count as sources for each other. For partition-protected ordinals, the role template comes from the ControllerRevision.
+Admission is computed per **pool** = (role name, role template hash). Only replicas in the same pool count as sources for each other. For partition-protected ordinals, the role template comes from the ControllerRevision.
 
-The **bootstrap-config hash** covers what changes a Pod's MX setup but is not in the role template: provider, whether the role is in scope, the controller's configured ModelExpress server address, `modelExpress.engineContainers`, and the user plugin configuration (keys canonicalized, order preserved). `initialSeedReplicas`, replica counts, `readyURL`, and per-Pod values are excluded.
+The pool key is the same input the managed plugin turns into `MX_MODEL_REVISION`, so the controller's notion of a compatible source mirrors the identity ModelExpress itself matches on. Nothing is persisted on Pods: $R$ and $I$ are read from the datastore (`RoleTemplateHash` and `Status`), which `syncAll` rebuilds from the Pods' labels after a restart.
 
-- The MX plugin writes the hash on every Pod as `modelserving.volcano.sh/bootstrap-config-hash`.
-- A replica is a source only if **all** its Pods carry the expected template and config hashes. Pods without the annotation (for example, created before the feature was enabled) are never sources.
-- `syncAll` rebuilds the hash from Pod annotations, never from the current spec.
-
-So changing the endpoint, scope, or plugin configuration starts a new pool with $R=0$ (one extra seed batch, never false source reuse), while changing `initialSeedReplicas` keeps the pool. Changes hidden behind `envFrom` are not detected; users roll the Pods themselves.
+The template hash does not cover the controller's ModelExpress server address, `modelExpress.engineContainers`, or whether a role was in scope when its Pods were created. After enabling the strategy on an existing fleet or changing those settings, Running replicas of the current template still count as sources even though they may not publish to the expected server. New replicas are then created together and ModelExpress falls back to storage for them, which is the behavior without the feature. Roll the Pods to benefit; changing `initialSeedReplicas` or `readyURL` needs no roll.
 
 ##### Budget
 
@@ -297,11 +293,11 @@ Storage serves 3 cold loads instead of 24.
 
 `manageRollingUpdate` is unchanged. Replicas it deletes are re-created through `scaleUpServingGroups`/`scaleUpRoles` on a later reconcile, and those pass admission like any other missing replica.
 
-**R1. A changed role template or effective bootstrap configuration is a new pool.** It starts with a first batch of $S$; replicas with different template or configuration hashes are not counted in its $R$.
+**R1. A changed role template is a new pool.** It starts with a first batch of $S$; replicas with a different template hash are not counted in its $R$.
 
 - Why not share sources across revisions: MX matches sources by `SourceIdentity` (model, revision, TP/PP/EP, dtype, quantization, engine/torch/CUDA versions, GPU arch). The controller can't tell from a template diff whether that identity changed. Counting incompatible old replicas would release a large batch that all falls back to storage.
 - If the change is identity-neutral (for example, resources, probes, `--max-num-seqs`), the new pool's first batch still finds old-revision sources through MX and loads P2P. The only cost is that the first batch is the role's `initialSeedReplicas` wide.
-- Roles whose template and effective configuration didn't change keep their pool. Under `ServingGroupRollingUpdate`, their re-created replicas join the existing pool (usually $R > 0$) and are admitted immediately.
+- Roles whose template didn't change keep their pool. Under `ServingGroupRollingUpdate`, their re-created replicas join the existing pool (usually $R > 0$) and are admitted immediately.
 
 **R2. Pacing stays with the rollout.** A deferred group is absent from the datastore, which lowers `len(groups)` in `maxScaleDown` exactly as one unavailable new group would. `maxUnavailable` is never exceeded.
 
@@ -313,7 +309,7 @@ Storage serves 3 cold loads instead of 24.
 
 **R4. Deleting sources.** A replica pulling from a deleted source retries another candidate (MX tries up to 3) and then falls back to storage. On clean shutdown MX marks the source `STALE`, and the MX server's reaper removes stale metadata from its backend (Redis).
 
-**R5. Rollback.** Reverting to a template and effective configuration whose hashes still have Running replicas resolves to that pool, so re-created replicas are admitted with $R > 0$ immediately.
+**R5. Rollback.** Reverting to a template whose hash still has Running replicas resolves to that pool, so re-created replicas are admitted with $R > 0$ immediately.
 
 **R6. `RoleRollingUpdate`.** The same rules apply per role, and unchanged roles are not touched. In PD disaggregation, updating only `prefill` restarts from a seed batch only in the prefill pool.
 
@@ -326,7 +322,7 @@ Storage serves 1 cold load instead of 8.
 
 #### 4. Controller changes
 
-A new package `pkg/model-serving-controller/bootstrap/` holds a pure `Admitter`. [syncModelServing](../../pkg/model-serving-controller/controller/model_serving_controller.go) builds one `Admitter` per reconcile from the datastore and the Pods' configuration annotation ($R$, $I$ per pool), attaches it to the reconcile context, and both creation paths consult it:
+A new package `pkg/model-serving-controller/bootstrap/` holds a pure `Admitter`. [syncModelServing](../../pkg/model-serving-controller/controller/model_serving_controller.go) builds one `Admitter` per reconcile from the datastore ($R$, $I$ per pool), attaches it to the reconcile context, and both creation paths consult it:
 
 ```text
 syncModelServing
@@ -341,9 +337,9 @@ syncModelServing
 - **(B) Core deficit.** Before the per-role loop, if an existing group is missing part of its core (for example after `RoleRecreate`), those replicas across all roles are admitted as one unit (`PlanGroupCore`) and created together. If the unit is denied, (C) skips them. A repair must fit the budget but ignores pools blocked by an earlier denial in the same reconcile: new groups are reconciled first, and a deferred new group must never starve an existing group whose core was only partially created.
 - **(C) Remaining replicas.** In `scaleUpRoles`, each missing in-scope replica beyond the core is a unit of one (`AdmitReplica`). Out-of-scope roles are not gated.
 - A denied unit blocks its pools for the rest of the reconcile ([Order](#2-admission)). Admitted replicas are added to $I$, and they are also in the datastore right after creation, so the next reconcile sees them.
-- **Observation.** Nothing new is persisted in the datastore. Each reconcile derives a replica's configuration hash from the `modelserving.volcano.sh/bootstrap-config-hash` annotation of its live Pods in the informer cache: it is empty when any Pod lacks the annotation or the Pods disagree, so such a replica is never a source. A replica whose Pods are not observed yet is attributed to the current pool as in flight, never as a source, so a lagging cache can only defer creation.
+- **Observation.** Nothing new is persisted. Each reconcile counts $R$ and $I$ per (role, template hash) from the datastore's Role records; legacy records without a hash resolve it from their ControllerRevision. A replica that is not Running yet is in flight; a replica is a source only once every Pod is Ready.
 - **Wake-ups.** No new handlers. `RoleRunning` transitions already enqueue (the next batch), and so do deletions (lower $I$) and spec edits.
-- **Disabling** the policy: the next reconcile creates every missing replica. **Crash safety:** only the configuration identity is persisted on Pods, not batch progress; after a restart, `syncAll` rebuilds the datastore from observed Pods and admission is recomputed.
+- **Disabling** the policy: the next reconcile creates every missing replica. **Crash safety:** no batch progress is persisted; after a restart, `syncAll` rebuilds the datastore from observed Pods and admission is recomputed.
 - **Events:** `BootstrapBatchCreated` per pool with the count and the number of ready sources; deferred counts are logged at V(4).
 - **In-place updates.** The managed plugin does not implement `InPlaceUpdatePlugin`, because `MX_MODEL_REVISION` is bound to the role template hash at creation and cannot be patched in place. With the strategy set, `updateMethod: InPlace` falls back to recreating outdated replicas, which then pass admission like any other missing replica.
 - **Configuration.** The ModelExpress server address is a controller flag, `--modelexpress-server-address` (Helm: `controllerManager.modelExpressServerAddress`).
@@ -352,7 +348,7 @@ syncModelServing
 
 A built-in `modelexpress` plugin implements the existing [OnPodCreate hook](../../pkg/model-serving-controller/plugins/manager.go#L86-L100). `buildPluginChain` appends it automatically after user plugins when `bootstrapAccelerateStrategy.provider` is `ModelExpress`, scoped to the strategy's roles and both entry and worker Pods. Users do not need a duplicate `spec.plugins` entry; explicit registration of this managed plugin is rejected. Its `OnPodReady` is a no-op. Admission remains in the controller because a per-Pod plugin cannot defer a whole gang unit.
 
-The plugin injects the variables below **only into inference-engine containers**, selected by `modelExpress.engineContainers` from `pod.spec.containers`, and writes the configuration-hash annotation on the Pod. Init containers and unselected regular containers (including sidecars) are never modified. The webhook requires every in-scope template to contain a selected engine container; if a user plugin still leaves a rendered Pod without one, the plugin fails that Pod's creation with a `PluginError` event and the reconcile is retried. The plugin does not infer engine containers from images or command lines. If `modelExpress` is omitted, the annotation is still written but no environment variables are injected; users configure their engine containers themselves. Container selection participates in the bootstrap-configuration hash.
+The plugin injects the variables below **only into inference-engine containers**, selected by `modelExpress.engineContainers` from `pod.spec.containers`. Init containers and unselected regular containers (including sidecars) are never modified. The webhook requires every in-scope template to contain a selected engine container; if a user plugin still leaves a rendered Pod without one, the plugin fails that Pod's creation with a `PluginError` event and the reconcile is retried. The plugin does not infer engine containers from images or command lines. If `modelExpress` is omitted, nothing is injected; users configure their engine containers themselves.
 
 `GenerateEntryPod` and `GenerateWorkerPod` remain unchanged. A variable already defined in a selected container wins, including values added by earlier plugins. Inject `MX_SERVER_ADDRESS` (from the controller's ModelExpress server address configuration) and `MX_ARTIFACT_READY_URL` (from `modelExpress.readyURL`) only when the variable is absent and the corresponding value is nonempty; no deprecated endpoint variable is injected. This integration requires an MX client that supports `MX_SERVER_ADDRESS`. Clients that read only the deprecated `MODEL_EXPRESS_URL` (for example, TRT-LLM live transfer) are unsupported, and because MX prefers `MODEL_EXPRESS_URL` when both are set, templates or images (for example, a Dockerfile `ENV`) that set it must remove it. Injected `env` entries take precedence over `envFrom`, and the plugin does not resolve `envFrom`; users who supply any variable below through `envFrom` must move it to `env` (or leave the corresponding field empty).
 
@@ -419,13 +415,13 @@ Pod IP is a sensible default for `MX_WORKER_HOST`, not a guarantee of RDMA reach
 
 When `MX_ARTIFACT_TRANSFER=1` is used with disaggregated roles that have incompatible compilation settings, users should supply distinct `MX_ARTIFACT_COMPILE_CONFIG_DIGEST` values in the role templates. `VLLM_PLUGINS=modelexpress` is needed only for vLLM older than 0.23, not injected universally. The decentralized `k8s-service` backend needs its own Service/rank routing and pinned source identity, so it is outside this central-server integration.
 
-The injection happens at Pod creation, so changing the ModelExpress configuration affects only new Pods and doesn't trigger a rollout; only replicas with the new effective configuration can release their subsequent batches.
+The injection happens at Pod creation, so changing the ModelExpress configuration affects only new Pods and doesn't trigger a rollout.
 
 | Feature | Behavior |
 |---|---|
 | Gang scheduling / network topology | A group's gang core is created together with its PodGroup, and seed budgets are at least $g$ ([Seed budget and gang](#seed-budget-and-gang)). Deferred groups get no PodGroup yet. |
 | `RoleRecreate` / `ServingGroupRecreate` recovery | Re-created replicas pass admission, usually with $R > 0$. |
-| Pod re-creation inside an existing role replica | Not gated. The replacement Pod runs the MX plugin; a replica with mixed configuration hashes is not a source until all its Pods match the target pool. |
+| Pod re-creation inside an existing role replica | Not gated. The replacement Pod runs the MX plugin and rejoins its replica's pool. |
 | Scale-down | Deferred replicas don't exist, so there is nothing to delete. |
 | kthena-router | Unchanged. |
 | User plugins | Existing hooks are unchanged; the managed MX plugin runs last. Effective plugin configuration participates in source identity. |
@@ -435,7 +431,7 @@ The injection happens at Pod creation, so changing the ModelExpress configuratio
 Unit tests (table-driven, `-race` where concurrent):
 
 - **Admitter:** $S$ when $R=0$ and unbounded when $R>0$, per-role integer and percentage seeds, the default of 1 when a seed is unset, the gang floor $g$, $D=0$, whole-unit fit across pools, blocking after a denied unit, $I > S$ after the seed policy is lowered while $R=0$, and the batch sequences in the examples above.
-- **Pool identity:** the configuration hash is stable under plugin JSON key reordering and changes with the endpoint, scope, engine containers, and plugin configuration; replicas with missing or mismatched annotations are not sources; `syncAll` rebuilds the observed hash without substituting the current spec's.
+- **Pool identity:** replicas of another role template are neither sources nor in flight for the current pool; Running replicas without a template hash are not sources; legacy datastore records resolve their hash from the ControllerRevision.
 - **Controller:** new-group core creation with its PodGroup, core-deficit units, units of one, out-of-scope roles ungated, a failed unit render creating nothing, disabling the policy, and rolling-update pacing (`maxUnavailable`, `maxSurge`, `partition`, rollback).
 - **Revision neutrality:** adding, editing, or removing the strategy does not change `ModelServingRevision`, `CalRoleTemplateHash`, or `BuildRevisionData`.
 - **Environment injection:** only selected engine containers change; init containers and sidecars are untouched; `MX_MODEL_REVISION`, `MX_SERVER_ADDRESS`, `MX_P2P_METADATA`, `MX_METADATA_PORT`, `MX_WORKER_GRPC_PORT`, `MX_NIXL_BACKEND`, `MX_INSTANT_TENSOR`, `MX_ARTIFACT_TRANSFER`, `MX_POOL_REG`, `MX_VMM_ARENA`, `MX_ARTIFACT_READY_URL`, `MODEL_EXPRESS_LOG_LEVEL`, `NIXL_LOG_LEVEL`, `UCX_LOG_LEVEL`, and `MX_WORKER_HOST` are injected as expected; existing user-specified variables win; changing `readyURL` keeps the pool; nothing is injected when `modelExpress` is omitted; `MODEL_EXPRESS_URL` is never injected.
