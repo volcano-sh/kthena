@@ -35,4 +35,13 @@ const (
 
 	// InPlaceUpdateStateAnnotationKey is the pod annotation that records in-place update state.
 	InPlaceUpdateStateAnnotationKey = "modelserving.volcano.sh/inplace-update-state"
+
+	// DrainTimeoutAnnotationKey is the ModelServing annotation that enables lossless drain.
+	// The value is a duration (e.g. "300s") bounding how long a terminating Pod waits for
+	// its in-flight requests to finish. Missing, "0" or invalid values keep the default
+	// immediate-delete behavior.
+	DrainTimeoutAnnotationKey = "modelserving.volcano.sh/drain-timeout"
+	// DrainKVBufferAnnotationKey is the role entryTemplate annotation that reserves extra
+	// time after in-flight drains for paired decodes to pull the last KV (PD prefill Pods).
+	DrainKVBufferAnnotationKey = "modelserving.volcano.sh/drain-kv-buffer"
 )

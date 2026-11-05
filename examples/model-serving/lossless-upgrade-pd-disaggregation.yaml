@@ -1,0 +1,51 @@
+# Lossless upgrade example: PD disaggregated ModelServing.
+#
+# The drain-timeout annotation on the ModelServing enables the lossless drain.
+# The drain-kv-buffer annotation on the prefill role's entryTemplate reserves
+# up to 30s after the prefill drains its own in-flight requests, so its paired
+# decodes can finish pulling the last KV (SGLang push / NIXL-Mooncake pull).
+# The decode role carries no buffer annotation: its metrics are reliable and it
+# exits as soon as its own in-flight requests finish.
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek-v2-lite-lossless
+  namespace: dev
+  annotations:
+    modelserving.volcano.sh/drain-timeout: "300s"
+spec:
+  schedulerName: volcano
+  replicas: 1
+  recoveryPolicy: ServingGroupRecreate
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          metadata:
+            annotations:
+              # PD prefill only: hold a KV buffer so paired decodes finish
+              # pulling before the prefill is terminated.
+              modelserving.volcano.sh/drain-kv-buffer: "30s"
+          spec:
+            containers:
+              - name: vllm
+                image: ghcr.io/volcano-sh/kthena-engine:vllm-ascend_v0.10.1rc1_mooncake_v0.3.5
+                ports:
+                  - containerPort: 8000
+                env:
+                  - name: HF_HUB_OFFLINE
+                    value: "1"
+      - name: decode
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: vllm
+                image: ghcr.io/volcano-sh/kthena-engine:vllm-ascend_v0.10.1rc1_mooncake_v0.3.5
+                ports:
+                  - containerPort: 8000
+                env:
+                  - name: HF_HUB_OFFLINE
+                    value: "1"

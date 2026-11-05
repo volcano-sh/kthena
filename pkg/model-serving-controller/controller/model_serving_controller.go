@@ -2993,6 +2993,9 @@ func (c *ModelServingController) runRoleDeletePlugins(ctx context.Context, ms *w
 
 func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupIndex int, revision string, roles []workloadv1alpha1.Role) error {
 	servingGroupName := utils.GenerateServingGroupName(ms.Name, servingGroupIndex)
+	if cfg := utils.ParseDrainConfig(ms); cfg.Invalid {
+		c.recorder.Event(ms, corev1.EventTypeWarning, "InvalidDrainTimeout", cfg.Reason)
+	}
 	for _, role := range roles {
 		roleTemplateHash := utils.CalRoleTemplateHash(role)
 		replicas := int(*role.Replicas)

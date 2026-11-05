@@ -1189,3 +1189,84 @@ func waitForObjectInCache(t *testing.T, timeout time.Duration, checkFunc func() 
 		}
 	}
 }
+
+// TestModelServerController_TerminatingPodTracked verifies that a Pod with a
+// deletionTimestamp stays in the store (tracked for the drain) but is excluded
+// from scheduling candidates, and is cleared on object deletion.
+func TestModelServerController_TerminatingPodTracked(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-modelserver-terminating",
+		},
+		Spec: aiv1alpha1.ModelServerSpec{
+			InferenceEngine: aiv1alpha1.VLLM,
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				MatchLabels: map[string]string{"app": "terminating-test"},
+			},
+		},
+	}
+	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+		context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
+	store := newStoreWithMockBackend()
+	controller, err := NewModelServerController(
+		kthenaInformerFactory, kubeInformerFactory, store, common.NewTransportRegistry())
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go controller.Run(stop)
+	kthenaInformerFactory.Start(stop)
+	kubeInformerFactory.Start(stop)
+	waitForCacheSync(t, 5*time.Second, controller.modelServerSynced, controller.podSynced)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "terminating-pod",
+			Labels:    map[string]string{"app": "terminating-test"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+	_, err = kubeClient.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	msName := types.NamespacedName{Namespace: "default", Name: ms.Name}
+	podName := types.NamespacedName{Namespace: "default", Name: pod.Name}
+	assert.True(t, waitForObjectInCache(t, 5*time.Second, func() bool {
+		pods, err := store.GetPodsByModelServer(msName)
+		return err == nil && len(pods) == 1
+	}), "ready pod should be a scheduling candidate")
+
+	// Mark the Pod terminating: it must stay tracked but leave the candidates.
+	now := metav1.Now()
+	pod.DeletionTimestamp = &now
+	_, err = kubeClient.CoreV1().Pods("default").Update(context.Background(), pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	assert.True(t, waitForObjectInCache(t, 5*time.Second, func() bool {
+		pods, err := store.GetPodsByModelServer(msName)
+		return err == nil && len(pods) == 0
+	}), "terminating pod must be excluded from scheduling candidates")
+
+	assert.True(t, waitForObjectInCache(t, 5*time.Second, func() bool {
+		info := store.GetPodInfo(podName)
+		return info != nil && info.IsDraining()
+	}), "terminating pod must stay tracked in the store for the drain")
+
+	// Object deletion clears the store entry.
+	err = kubeClient.CoreV1().Pods("default").Delete(context.Background(), pod.Name, metav1.DeleteOptions{})
+	require.NoError(t, err)
+	assert.True(t, waitForObjectInCache(t, 5*time.Second, func() bool {
+		return store.GetPodInfo(podName) == nil
+	}), "deleted pod must be removed from the store")
+}
