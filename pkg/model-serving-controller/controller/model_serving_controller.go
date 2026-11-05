@@ -2620,6 +2620,13 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			return fmt.Errorf("failed to resolve rollout partition: %v", partitionErr)
 		}
 		available, updated := 0, 0
+		desiredAvailable := 0
+		markAvailable := func(ordinal int) {
+			available++
+			if ordinal < replicas {
+				desiredAvailable++
+			}
+		}
 		progressingGroups, updatedGroups, currentGroups := []int{}, []int{}, []int{}
 		// Track revision counts to determine the most common non-updated revision (CurrentRevision)
 		revisionCount := make(map[string]int)
@@ -2653,14 +2660,14 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			}
 
 			if group.Status == datastore.ServingGroupRunning && roleCoordination(latestMS) == nil {
-				available = available + 1
+				markAvailable(ordinal)
 			} else if ok, err := c.checkServingGroupReadyWithContext(ctx, latestMS, group.Name); ok && err == nil {
 				// some scenarios, pod events may not trigger group status updates, such as role scaling down.
 				err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(latestMS), group.Name, datastore.ServingGroupRunning)
 				if err != nil {
 					return fmt.Errorf("failed to set servingGroup %s status: %v", group.Name, err)
 				}
-				available = available + 1
+				markAvailable(ordinal)
 				klog.V(2).Infof("Update servingGroup %s status to Running", group.Name)
 			} else {
 				if roleCoordination(latestMS) != nil && group.Status == datastore.ServingGroupRunning {
@@ -2714,7 +2721,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			// and temporary capacity has been fully removed.
 			if rolloutComplete {
 				currentRevision = updateRevision
-			} else if currentRevision == "" && rolloutActive {
+			} else if currentRevision == "" && (rolloutActive || (len(revisionCount) == 0 && desiredAvailable < replicas)) {
 				// Desired replicas may all be updated while temporary capacity is
 				// still draining. Keep the previous CurrentRevision until the total
 				// ServingGroup count has converged.
