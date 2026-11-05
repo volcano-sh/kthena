@@ -1,49 +1,62 @@
 import type { ReactNode } from 'react';
 import clsx from 'clsx';
 import Heading from '@theme/Heading';
+import Translate from '@docusaurus/Translate';
 import styles from './styles.module.css';
 
 type FeatureItem = {
-  title: string;
+  title: ReactNode;
   Svg: React.ComponentType<React.ComponentProps<'svg'>>;
   description: ReactNode;
 };
 
 const FeatureList: FeatureItem[] = [
   {
-    title: 'Kubernetes Native',
+    title: (
+      <Translate id="homepage.features.kubernetes.title">
+        Kubernetes Native
+      </Translate>
+    ),
     Svg: require('@site/static/img/homepage/kthena-feature-1.svg').default,
     description: (
-      <>
-        Declarative CRDs for end-to-end AI inference lifecycle management.
-        Gang scheduling, network-topology-aware placement, and Volcano
-        integration bring enterprise-grade orchestration to your existing
-        K8s infrastructure.
-      </>
+      <Translate id="homepage.features.kubernetes.description">
+        Declarative CRDs for end-to-end AI inference lifecycle management. Gang
+        scheduling, network-topology-aware placement, and Volcano integration
+        bring enterprise-grade orchestration to your existing K8s
+        infrastructure.
+      </Translate>
     ),
   },
   {
-    title: 'Intelligent Routing',
+    title: (
+      <Translate id="homepage.features.routing.title">
+        Intelligent Routing
+      </Translate>
+    ),
     Svg: require('@site/static/img/homepage/kthena-feature-2.svg').default,
     description: (
-      <>
+      <Translate id="homepage.features.routing.description">
         Request-level scheduling with pluggable scoring plugins—least latency,
         KV-cache awareness, prefix-cache matching, and LoRA affinity routing.
         Per-model fair queuing and token-based rate limiting ensure optimal
         throughput for every model.
-      </>
+      </Translate>
     ),
   },
   {
-    title: 'Hierarchical PD Disaggregation Orchestration',
+    title: (
+      <Translate id="homepage.features.pd.title">
+        Hierarchical PD Disaggregation Orchestration
+      </Translate>
+    ),
     Svg: require('@site/static/img/homepage/kthena-feature-3.svg').default,
     description: (
-      <>
+      <Translate id="homepage.features.pd.description">
         Separate prefill and decode phases into independently scalable serving
         groups. Prefill nodes maximize compute throughput while decode nodes
         optimize for low latency, enabling fine-grained GPU utilization and
         flexible scaling ratios.
-      </>
+      </Translate>
     ),
   },
 ];

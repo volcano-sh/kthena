@@ -1,0 +1,50 @@
+{
+  "homepage.tagline": {
+    "message": "Kubernetes 原生 AI 模型服务平台，支持可扩展的模型部署与推理"
+  },
+  "homepage.getStarted": {
+    "message": "开始使用 Kthena"
+  },
+  "homepage.title": {
+    "message": "{siteTitle} - Kubernetes AI 模型服务平台"
+  },
+  "homepage.description": {
+    "message": "Kubernetes 原生 AI 模型服务平台，支持可扩展的模型部署与推理。"
+  },
+  "homepage.features.kubernetes.title": {
+    "message": "Kubernetes 原生"
+  },
+  "homepage.features.kubernetes.description": {
+    "message": "通过声明式 CRD 管理 AI 推理的完整生命周期。结合 Gang 调度、网络拓扑感知的资源放置和 Volcano 集成，为现有 Kubernetes 基础设施提供企业级编排能力。"
+  },
+  "homepage.features.routing.title": {
+    "message": "智能路由"
+  },
+  "homepage.features.routing.description": {
+    "message": "请求级调度支持可插拔评分插件，包括最低延迟、KV 缓存感知、前缀缓存匹配和 LoRA 亲和性路由。通过按模型公平排队和基于 Token 的限流，优化各模型的吞吐量。"
+  },
+  "homepage.features.pd.title": {
+    "message": "分层 PD 分离编排"
+  },
+  "homepage.features.pd.description": {
+    "message": "将 Prefill 与 Decode 阶段拆分为可独立扩缩容的服务组。Prefill 节点专注于计算吞吐量，Decode 节点专注于低延迟，实现精细的 GPU 资源利用和灵活的扩缩容比例。"
+  },
+  "footer.copyright": {
+    "message": "版权所有 © {year} Volcano 社区。使用 Docusaurus 构建。"
+  },
+  "translationFallback.title": {
+    "message": "暂无中文翻译"
+  },
+  "translationFallback.message": {
+    "message": "此页面尚未翻译，以下显示英文原文。"
+  },
+  "theme.navbar.mobileDropdown.collapseButton.expandAriaLabel": {
+    "message": "展开下拉菜单"
+  },
+  "theme.navbar.mobileDropdown.collapseButton.collapseAriaLabel": {
+    "message": "收起下拉菜单"
+  },
+  "theme.IconExternalLink.ariaLabel": {
+    "message": "（在新标签页中打开）"
+  }
+}
