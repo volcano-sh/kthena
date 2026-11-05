@@ -1282,7 +1282,18 @@ func proxyRequest(
 		path = "/v1/responses"
 	}
 	parser := providers.DefaultAdapter().ResponseParser(c, path)
-	return forwardResponseWithUsageParser(c, resp, stream, parser, onUsage)
+
+	// The caller may retry another backend while nothing has been written
+	// downstream. Snapshot what earlier handlers staged so headers copied from a
+	// backend that fails before sending its body cannot leak into the retry.
+	stagedHeaders := cloneResponseHeaders(c.Writer.Header())
+	stagedStatus := c.Writer.Status()
+	forwardErr := forwardResponseWithUsageParser(c, resp, stream, parser, onUsage)
+	if forwardErr != nil && !c.Writer.Written() {
+		restoreResponseHeaders(c.Writer.Header(), stagedHeaders)
+		c.Status(stagedStatus)
+	}
+	return forwardErr
 }
 
 // originalRequestPath returns the client-facing request path used for wire
@@ -1387,6 +1398,27 @@ func copyResponseHeaders(c *gin.Context, headers http.Header, stream bool) {
 		for _, value := range values {
 			c.Writer.Header().Add(key, value)
 		}
+	}
+}
+
+// cloneResponseHeaders returns a copy of headers so the values stay unchanged
+// after c.Writer.Header() is modified.
+func cloneResponseHeaders(headers http.Header) http.Header {
+	clone := make(http.Header, len(headers))
+	for key, values := range headers {
+		clone[key] = append([]string(nil), values...)
+	}
+	return clone
+}
+
+// restoreResponseHeaders replaces the staged downstream headers with a copy of
+// headers, dropping the entries a failed upstream attempt added.
+func restoreResponseHeaders(dst http.Header, headers http.Header) {
+	for key := range dst {
+		delete(dst, key)
+	}
+	for key, values := range headers {
+		dst[key] = append([]string(nil), values...)
 	}
 }
 

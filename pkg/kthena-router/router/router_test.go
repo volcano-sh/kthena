@@ -3226,6 +3226,119 @@ func TestProxy_RetryBodyNotDrained(t *testing.T) {
 	assert.Equal(t, http.StatusOK, accessCtx.UpstreamStatusCode)
 }
 
+// TestProxy_RetryDropsFailedAttemptHeaders verifies that a backend which sends
+// response headers and then fails before sending its declared body does not leak
+// those headers into the retry. Headers staged before the attempt are restored,
+// so the healthy response carries exactly one Content-Length and only its own
+// Set-Cookie and X-Backend values.
+func TestProxy_RetryDropsFailedAttemptHeaders(t *testing.T) {
+	var attempts int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "")
+			return
+		}
+		if r.URL.Path == "/v1/models" {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"data":[]}`)
+			return
+		}
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			// Announce a 4096 byte body, then close the connection without it.
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("backend does not support hijacking")
+				return
+			}
+			conn, buf, err := hijacker.Hijack()
+			if err != nil {
+				t.Errorf("hijack failed: %v", err)
+				return
+			}
+			defer conn.Close()
+			fmt.Fprint(buf, "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nContent-Type: application/json\r\nSet-Cookie: failed-backend=1\r\nX-Backend: failed\r\n\r\n")
+			if err := buf.Flush(); err != nil {
+				t.Errorf("flush failed: %v", err)
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "16")
+		w.Header().Set("X-Backend", "healthy")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"healthy"}`)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendIP := backendURL.Hostname()
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", common.NewTransportRegistry())
+
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-header-retry", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("base-model"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-header-retry-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-header-retry-2", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-header-retry", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "header-retry-model",
+			Rules: []*aiv1alpha1.Rule{
+				{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-header-retry"}}},
+			},
+		},
+	}
+
+	store.AddOrUpdateModelServer(modelServer, sets.New(
+		types.NamespacedName{Name: "pod-header-retry-1", Namespace: "default"},
+		types.NamespacedName{Name: "pod-header-retry-2", Namespace: "default"},
+	))
+	store.AddOrUpdatePod(pod1, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdatePod(pod2, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdateModelRoute(modelRoute)
+
+	// Give pod-2 a waiting request so pod-1 scores higher and handles the first
+	// attempt, which is the one that fails after sending headers.
+	podInfo2 := store.GetPodInfo(types.NamespacedName{Name: "pod-header-retry-2", Namespace: "default"})
+	require.NotNil(t, podInfo2)
+	podInfo2.RequestWaitingNum = 1
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model": "header-retry-model", "prompt": "retry header test"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	// A header staged before forwarding stands in for router middleware.
+	c.Writer.Header().Set("X-Router-Middleware", "kept")
+	accessCtx := accesslog.NewAccessLogContext("header-retry-request", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "header-retry-model")
+	c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&attempts), "expected a failed attempt and a healthy retry")
+	assert.Equal(t, []string{"16"}, w.Header().Values("Content-Length"), "retry kept the failed attempt's Content-Length")
+	assert.Equal(t, []string{"healthy"}, w.Header().Values("X-Backend"), "retry kept the failed attempt's X-Backend")
+	assert.Empty(t, w.Header().Values("Set-Cookie"), "retry kept the failed attempt's cookies")
+	assert.Equal(t, []string{"kept"}, w.Header().Values("X-Router-Middleware"), "headers staged before forwarding were dropped")
+	assert.Equal(t, `{"id":"healthy"}`, w.Body.String())
+}
+
 func TestRouter_HandlerFunc_ListModels(t *testing.T) {
 	router, store, backend := setupTestRouter(t, nil)
 	defer backend.Close()
