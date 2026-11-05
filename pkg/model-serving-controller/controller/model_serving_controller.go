@@ -3026,8 +3026,8 @@ func (c *ModelServingController) buildPluginChain(ms *workloadv1alpha1.ModelServ
 		}
 	}
 	// The managed ModelExpress plugin runs last so it observes user plugin output.
-	if managed := bootstrap.NewModelExpressPlugin(ms, c.modelExpressServerAddress); managed != nil {
-		chain = chain.WithManagedPlugin(managed, bootstrap.PluginScope(ms))
+	if managed := plugins.NewModelExpressPlugin(ms, c.modelExpressServerAddress); managed != nil {
+		chain = chain.WithManagedPlugin(managed, plugins.ModelExpressPluginScope(ms))
 	}
 	return chain, nil
 }

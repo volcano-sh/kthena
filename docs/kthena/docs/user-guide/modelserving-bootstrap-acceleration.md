@@ -69,6 +69,7 @@ For in-scope roles the controller appends a managed `modelexpress` plugin after 
 | `MX_WORKER_HOST` | The Pod IP (downward API) |
 | `MX_P2P_METADATA` / `MX_METADATA_PORT` / `MX_WORKER_GRPC_PORT` | `1` / `5555` / `6555` |
 | `MX_NIXL_BACKEND` / `MX_INSTANT_TENSOR` / `MX_ARTIFACT_TRANSFER` | `UCX` / `0` / `1` |
+| `MX_POOL_REG` / `MX_VMM_ARENA` | `1` / `1` (pooled NIXL registration and VMM arena receive buffers) |
 | `MODEL_EXPRESS_LOG_LEVEL` / `NIXL_LOG_LEVEL` / `UCX_LOG_LEVEL` | `INFO` / `INFO` / `WARN` |
 
 Override any of them in the container `env` of the template. The plugin cannot be listed in `spec.plugins`.

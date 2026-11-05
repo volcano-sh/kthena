@@ -33,6 +33,7 @@ func bootstrapTestModelServing() *workloadv1alpha1.ModelServing {
 	return &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default"},
 		Spec: workloadv1alpha1.ModelServingSpec{
+
 			Replicas: ptr.To[int32](4),
 			BootstrapAccelerateStrategy: &workloadv1alpha1.BootstrapAccelerateStrategy{
 				Roles: []workloadv1alpha1.BootstrapRole{

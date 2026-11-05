@@ -36,6 +36,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/bootstrap"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -146,10 +147,10 @@ func TestBootstrapCreatesSeedThenRemainingGroups(t *testing.T) {
 	for _, variable := range seed.Spec.Containers[0].Env {
 		env[variable.Name] = variable.Value
 	}
-	assert.Equal(t, bootstrapTestServerAddress, env[bootstrap.EnvServerAddress])
-	assert.Equal(t, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]), env[bootstrap.EnvModelRevision])
-	assert.Equal(t, "http://127.0.0.1:8000/health", env[bootstrap.EnvArtifactReadyURL])
-	assert.Equal(t, "1", env[bootstrap.EnvP2PMetadata])
+	assert.Equal(t, bootstrapTestServerAddress, env[plugins.EnvServerAddress])
+	assert.Equal(t, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]), env[plugins.EnvModelRevision])
+	assert.Equal(t, "http://127.0.0.1:8000/health", env[plugins.EnvArtifactReadyURL])
+	assert.Equal(t, "1", env[plugins.EnvP2PMetadata])
 	events := drainEvents(recorder)
 	require.Len(t, filterEvents(events, "BootstrapBatchCreated"), 1)
 	assert.Contains(t, filterEvents(events, "BootstrapBatchCreated")[0], "Created 1 replica(s) of Role prefill")

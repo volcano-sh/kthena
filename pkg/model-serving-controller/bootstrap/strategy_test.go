@@ -35,7 +35,6 @@ func TestStrategyHelpers(t *testing.T) {
 	assert.Nil(t, ScopedRoleNames(ms))
 	_, ok := RoleConfig(ms, "prefill")
 	assert.False(t, ok)
-	assert.Nil(t, NewModelExpressPlugin(ms, ""))
 
 	ms.Spec.BootstrapAccelerateStrategy = &workloadv1alpha1.BootstrapAccelerateStrategy{}
 	assert.False(t, Enabled(ms), "roles are required")
@@ -47,11 +46,9 @@ func TestStrategyHelpers(t *testing.T) {
 	config, ok := RoleConfig(ms, "decode")
 	require.True(t, ok)
 	assert.Equal(t, "decode", config.Name)
-	assert.NotNil(t, NewModelExpressPlugin(ms, ""))
-	assert.Equal(t, &workloadv1alpha1.PluginScope{Roles: []string{"decode", "prefill"}, Target: workloadv1alpha1.PluginTargetAll}, PluginScope(ms))
 
 	ms.Spec.BootstrapAccelerateStrategy.Provider = "Other"
-	assert.Nil(t, NewModelExpressPlugin(ms, ""), "only the ModelExpress provider has a managed plugin")
+	assert.Equal(t, workloadv1alpha1.BootstrapAccelerateStrategyProvider("Other"), Provider(ms))
 }
 
 func TestConfigHash(t *testing.T) {

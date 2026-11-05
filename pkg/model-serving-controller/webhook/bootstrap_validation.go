@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/model-serving-controller/bootstrap"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 )
 
 // validateBootstrapAccelerateStrategy validates spec.bootstrapAccelerateStrategy
@@ -35,9 +35,9 @@ import (
 func validateBootstrapAccelerateStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList
 	for i, plugin := range ms.Spec.Plugins {
-		if plugin.Name == bootstrap.ModelExpressPluginName {
+		if plugin.Name == plugins.ModelExpressPluginName {
 			allErrs = append(allErrs, field.Forbidden(field.NewPath("spec", "plugins").Index(i).Child("name"),
-				fmt.Sprintf("plugin %s is managed by spec.bootstrapAccelerateStrategy and cannot be listed", bootstrap.ModelExpressPluginName)))
+				fmt.Sprintf("plugin %s is managed by spec.bootstrapAccelerateStrategy and cannot be listed", plugins.ModelExpressPluginName)))
 		}
 	}
 
