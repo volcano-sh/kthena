@@ -104,16 +104,6 @@ type BootstrapAccelerateStrategy struct {
 	// +required
 	Roles []BootstrapRole `json:"roles"`
 
-	// SourceFanOut is the number of P2P targets that one source can serve, i.e.
-	// starting role replicas (created but not yet Running) per ready replica of
-	// the same role. Once a role replica becomes ready, it acts as a new source
-	// for the other replicas of that role, so the budget grows as more replicas
-	// become ready. The effective budget is at least the role's gang minimum.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:default=1
-	// +optional
-	SourceFanOut *int32 `json:"sourceFanOut,omitempty"`
-
 	// ModelExpress configures environment injection for inference engines.
 	// If unset, users configure the engine environment themselves.
 	// +optional
@@ -145,12 +135,6 @@ type ModelExpressConfig struct {
 	// +kubebuilder:validation:items:MinLength=1
 	// +listType=set
 	EngineContainers []string `json:"engineContainers"`
-
-	// ServerAddress is the ModelExpress server's gRPC address (host:port).
-	// It is injected as MX_SERVER_ADDRESS only if that variable is not already
-	// set in the selected container. If empty, users supply the endpoint themselves.
-	// +optional
-	ServerAddress string `json:"serverAddress,omitempty"`
 
 	// ReadyURL is the engine endpoint that ModelExpress polls before a source
 	// publishes its metadata; it may differ from the Pod readiness probe.
