@@ -360,7 +360,7 @@ For the central-server deployment covered by this proposal, inject the following
 
 | Variable | Value | Why |
 |---|---|---|
-| `MX_MODEL_REVISION` | Role template hash (`modelserving.volcano.sh/role-template-hash`) when not already set in the container | Scopes the MX source identity to the role template revision unless the user supplies an explicit checkpoint revision. |
+| `MX_MODEL_REVISION` | `<role template hash>-<WORKER_INDEX>` (`modelserving.volcano.sh/role-template-hash` plus the Pod's position in its replica: `0` for the entry, `1..N` for workers) when not already set in the container | Scopes the MX source identity to one weight shard of one role template revision: a worker only reads from the same position of another replica, never from an entry or another rank, unless the user supplies an explicit checkpoint revision. |
 | `MX_SERVER_ADDRESS` | Controller's `--modelexpress-server-address`; inject only when the variable is absent and the address is nonempty | The client's gRPC endpoint; do not assume `localhost:8001` points to an external MX server. |
 | `MX_P2P_METADATA` | `'1'` | Enables P2P weight metadata registration and discovery. |
 | `MX_METADATA_PORT` | `'5555'` | Fixed base TCP port for NIXL metadata exchange (never `0` in Kubernetes). |
@@ -380,7 +380,7 @@ Example of the environment entries injected into a selected engine container:
 
 ```yaml
 - name: MX_MODEL_REVISION
-  value: 56eba4e34d3d031b8a62ac6bfb87a723
+  value: 56eba4e34d3d031b8a62ac6bfb87a723-0
 - name: MX_SERVER_ADDRESS
   value: 215.80.6.74:8001
 - name: MX_P2P_METADATA

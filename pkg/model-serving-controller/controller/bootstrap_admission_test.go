@@ -148,7 +148,7 @@ func TestBootstrapCreatesSeedThenRemainingGroups(t *testing.T) {
 		env[variable.Name] = variable.Value
 	}
 	assert.Equal(t, bootstrapTestServerAddress, env[plugins.EnvServerAddress])
-	assert.Equal(t, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]), env[plugins.EnvModelRevision])
+	assert.Equal(t, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])+"-0", env[plugins.EnvModelRevision])
 	assert.Equal(t, "http://127.0.0.1:8000/health", env[plugins.EnvArtifactReadyURL])
 	assert.Equal(t, "1", env[plugins.EnvP2PMetadata])
 	events := drainEvents(recorder)

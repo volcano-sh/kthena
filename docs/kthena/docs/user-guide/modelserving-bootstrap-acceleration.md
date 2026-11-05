@@ -63,7 +63,7 @@ For in-scope roles the controller appends a managed `modelexpress` plugin after 
 
 | Variable | Value |
 |----------|-------|
-| `MX_MODEL_REVISION` | The role template hash, so sources are shared only within one template revision |
+| `MX_MODEL_REVISION` | `<role template hash>-<WORKER_INDEX>`, so sources are shared only within one template revision and one position in the replica (entry `0`, workers `1..N`), never across weight shards |
 | `MX_SERVER_ADDRESS` | The controller's `--modelexpress-server-address` |
 | `MX_ARTIFACT_READY_URL` | `modelExpress.readyURL` |
 | `MX_WORKER_HOST` | The Pod IP (downward API) |
