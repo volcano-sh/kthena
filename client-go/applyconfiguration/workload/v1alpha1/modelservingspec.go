@@ -35,6 +35,9 @@ type ModelServingSpecApplyConfiguration struct {
 	// Plugins defines optional plugins that customize serving pods or manage
 	// auxiliary resources through controller lifecycle hooks.
 	Plugins []PluginSpecApplyConfiguration `json:"plugins,omitempty"`
+	// BootstrapAccelerateStrategy creates role replicas in source-aware batches
+	// for peer-to-peer model weight loading. If unset, creation is unchanged.
+	BootstrapAccelerateStrategy *BootstrapAccelerateStrategyApplyConfiguration `json:"bootstrapAccelerateStrategy,omitempty"`
 	// Template defines the template for ServingGroup
 	Template *ServingGroupApplyConfiguration `json:"template,omitempty"`
 	// RolloutStrategy defines the strategy that will be applied to update replicas
@@ -79,6 +82,14 @@ func (b *ModelServingSpecApplyConfiguration) WithPlugins(values ...*PluginSpecAp
 		}
 		b.Plugins = append(b.Plugins, *values[i])
 	}
+	return b
+}
+
+// WithBootstrapAccelerateStrategy sets the BootstrapAccelerateStrategy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the BootstrapAccelerateStrategy field is set to the value of the last call.
+func (b *ModelServingSpecApplyConfiguration) WithBootstrapAccelerateStrategy(value *BootstrapAccelerateStrategyApplyConfiguration) *ModelServingSpecApplyConfiguration {
+	b.BootstrapAccelerateStrategy = value
 	return b
 }
 
