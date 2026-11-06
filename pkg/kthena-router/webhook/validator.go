@@ -629,18 +629,18 @@ func ValidateSchedulerProfile(profile *networkingv1alpha1.SchedulerProfile) (boo
 		}
 	}
 
-	validatePluginNames(profile.Spec.Plugins.Filter.Enabled, specField.Child("plugins", "Filter", "enabled"))
+	validatePluginNames(profile.Spec.Plugins.Filter.Enabled, specField.Child("plugins", "filter", "enabled"))
 	for i, name := range profile.Spec.Plugins.Filter.Enabled {
 		if !plugins.IsKnownPlugin(name) {
 			continue
 		}
 		if !plugins.SupportsFilterRole(name) {
 			allErrs = append(allErrs, field.Invalid(
-				specField.Child("plugins", "Filter", "enabled").Index(i), name,
+				specField.Child("plugins", "filter", "enabled").Index(i), name,
 				fmt.Sprintf("plugin %q cannot be used as a filter", name)))
 		}
 	}
-	scoreEnabledField := specField.Child("plugins", "Score", "enabled")
+	scoreEnabledField := specField.Child("plugins", "score", "enabled")
 	seenScores := sets.New[string]()
 	for i, pw := range profile.Spec.Plugins.Score.Enabled {
 		pwField := scoreEnabledField.Index(i)
