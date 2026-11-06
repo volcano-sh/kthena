@@ -9,7 +9,8 @@ metadata:
   namespace: default
 spec:
   # Per-plugin arguments, keyed by plugin name. Each plugin has its own
-  # accepted fields; see the plugin reference for details.
+  # accepted fields; see the plugin implementations under
+  # pkg/kthena-router/scheduler/plugins/ for details.
   pluginConfig:
   - name: least-request
     args:
@@ -22,7 +23,7 @@ spec:
       - least-request
     # Score plugins rank the remaining pods; weighted scores are summed.
     # Available: gpu-usage, least-latency, least-request, prefix-cache,
-    # kvcache-aware, random. The random plugin must be the only score plugin.
+    # kvcache-aware.
     score:
       enabled:
       - name: prefix-cache
