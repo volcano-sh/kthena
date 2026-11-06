@@ -27,6 +27,7 @@ import (
 
 // Context stores information which maybe useful in Filter or Score plugins.
 type Context struct {
+	// Model is the name the client sent, which selects the ModelRoute.
 	Model  string
 	Prompt *common.ChatMessage
 
@@ -38,8 +39,10 @@ type Context struct {
 
 	// ModelServer information for efficient PDGroup scheduling
 	ModelServerName types.NamespacedName
-	UpstreamModel   string
-	PDGroup         *aiv1alpha1.PDGroup
+	// UpstreamModel is the name the engine serves. It can differ from Model when
+	// ModelServer.spec.model is set.
+	UpstreamModel string
+	PDGroup       *aiv1alpha1.PDGroup
 	// 1. In PD Disaggregated mode, both DecodePods and PrefillPods are set.
 	DecodePods  []*datastore.PodInfo
 	PrefillPods []*datastore.PodInfo
