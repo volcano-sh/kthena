@@ -39,7 +39,13 @@ func TestProtectedTargetDoesNotRetainPhantomOldDependency(t *testing.T) {
 	ms := &api.ModelServing{Spec: api.ModelServingSpec{Template: api.ServingGroup{Roles: []api.Role{role}}}}
 	hash := utils.CalRoleTemplateHash(role)
 	instances := []datastore.Role{{Name: "a-0", RoleTemplateHash: hash, Status: datastore.RoleRunning}, {Name: "a-1", RoleTemplateHash: hash, Status: datastore.RoleRunning}}
-	state := (&ModelServingController{}).resolveRoleRolloutState(context.Background(), ms, datastore.ServingGroup{Name: "model-0"}, role, 2, instances, 1, true, nil, nil)
+	ms.Name, ms.Namespace, ms.UID = "model", "default", "model-owner"
+	c := &ModelServingController{kubeClientSet: kubefake.NewSimpleClientset()}
+	recordTestRevision(t, c.kubeClientSet, ms, "target")
+	for i := range instances {
+		instances[i].Revision = "target"
+	}
+	state := c.resolveRoleRolloutState(c.withRevisionHistory(context.Background(), ms), ms, datastore.ServingGroup{Name: "model-0"}, role, 2, instances, 1, true, nil, nil)
 	require.False(t, state.hasOldVersion)
 	require.Equal(t, 2, state.versionReady)
 }
@@ -224,6 +230,7 @@ func TestCoordinatedSurgeCompletionRefillsFormalHoleAtDesiredCount(t *testing.T)
 			id := utils.GenerateRoleID(role.Name, 1)
 			pod := utils.GenerateEntryPod(*role.DeepCopy(), ms, "final-slot-0", id, revision, utils.CalRoleTemplateHash(*role))
 			pod.UID = "temporary-target"
+			pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
 			setSurgeScope(pod, surgeRole)
 			_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
 			require.NoError(t, err)

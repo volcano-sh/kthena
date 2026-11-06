@@ -21,8 +21,6 @@ import (
 	"fmt"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
-	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -34,23 +32,10 @@ func (c *ModelServingController) modelServingForRevision(ctx context.Context, ms
 	return c.resolveModelServingRevision(ctx, ms, revision, false)
 }
 
-// preserveLegacyCounts is used only where the existing partition logic already
-// selected the entire legacy Role snapshot, including its operational counts.
-func (c *ModelServingController) resolveModelServingRevision(ctx context.Context, ms *workload.ModelServing, revision string, preserveLegacyCounts bool) (*workload.ModelServing, error) {
-	if revision == "" {
-		return ms, nil
-	}
-	cr, err := c.controllerRevisionInRound(ctx, ms, revision)
-	if err != nil {
-		return nil, fmt.Errorf("get historical ControllerRevision %s: %w", revision, err)
-	}
-	if cr == nil {
-		if revision == utils.ModelServingRevision(ms) {
-			return ms, nil
-		}
-		return nil, fmt.Errorf("historical ControllerRevision %s was not found", revision)
-	}
-	return modelServingFromControllerRevision(ms, cr, preserveLegacyCounts)
+// Rendering always preserves current counts and controls. Coordination restores
+// its separate historical replica baseline in readCoordinatedRevision.
+func (c *ModelServingController) resolveModelServingRevision(ctx context.Context, ms *workload.ModelServing, revision string, _ bool) (*workload.ModelServing, error) {
+	return c.revisionHistory(ctx, ms).workload(ctx, revision)
 }
 
 func validateControllerRevisionOwner(ms *workload.ModelServing, cr *appsv1.ControllerRevision) error {
@@ -61,49 +46,6 @@ func validateControllerRevisionOwner(ms *workload.ModelServing, cr *appsv1.Contr
 	return nil
 }
 
-func modelServingFromControllerRevision(ms *workload.ModelServing, cr *appsv1.ControllerRevision, preserveLegacyCounts bool) (*workload.ModelServing, error) {
-	if err := validateControllerRevisionOwner(ms, cr); err != nil {
-		return nil, err
-	}
-	revision := cr.Name
-	switch version := cr.Annotations[utils.ControllerRevisionDataVersionAnnotation]; version {
-	case utils.ControllerRevisionDataVersionV1:
-		return utils.ApplyRevision(ms, cr)
-	case "":
-		roles, err := utils.GetRolesFromControllerRevision(cr)
-		if err != nil {
-			return nil, fmt.Errorf("read historical ControllerRevision %s: %w", revision, err)
-		}
-		if len(roles) == 0 {
-			return nil, fmt.Errorf("historical ControllerRevision %s has no Roles", revision)
-		}
-		result := ms.DeepCopy()
-		result.Spec.Template.Roles = nil
-		seen := make(map[string]bool, len(roles))
-		for _, role := range roles {
-			if role.Name == "" || seen[role.Name] {
-				return nil, fmt.Errorf("historical ControllerRevision %s has an empty or duplicate Role name %q", revision, role.Name)
-			}
-			seen[role.Name] = true
-			for _, current := range ms.Spec.Template.Roles {
-				if !preserveLegacyCounts && current.Name == role.Name {
-					// Only Pod rendering fields are historical. Preserve current
-					// scale and rollout decisions just as ApplyRevision does.
-					current.EntryTemplate = role.EntryTemplate
-					current.WorkerTemplate = role.WorkerTemplate
-					current.WorkerReplicas = role.WorkerReplicas
-					role = current
-					break
-				}
-			}
-			result.Spec.Template.Roles = append(result.Spec.Template.Roles, *role.DeepCopy())
-		}
-		return result, nil
-	default:
-		return nil, fmt.Errorf("historical ControllerRevision %s has unsupported data version %q", revision, version)
-	}
-}
-
 func historicalRole(ms *workload.ModelServing, name, revision string) (workload.Role, error) {
 	for _, role := range ms.Spec.Template.Roles {
 		if role.Name == name {
@@ -111,15 +53,4 @@ func historicalRole(ms *workload.ModelServing, name, revision string) (workload.
 		}
 	}
 	return workload.Role{}, fmt.Errorf("historical ControllerRevision %s has no Role %s", revision, name)
-}
-
-func (c *ModelServingController) existingRoleRevision(ms *workload.ModelServing, groupName string, role datastore.Role, current string) string {
-	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workload.RoleRollingUpdate {
-		if role.Revision != "" {
-			return role.Revision
-		}
-	} else if revision, ok := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), groupName); ok && revision != "" {
-		return revision
-	}
-	return current
 }

@@ -168,7 +168,7 @@ func historicalPluginRevision(t *testing.T, ms *workload.ModelServing, revision 
 		raw, err = json.Marshal(map[string]interface{}{"data": ms.Spec.Template.Roles})
 	}
 	require.NoError(t, err)
-	return &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: utils.GenerateControllerRevisionName(ms.Name, revision), Namespace: ms.Namespace, Annotations: annotations, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}}, Data: runtime.RawExtension{Raw: raw}}
+	return &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: utils.GenerateControllerRevisionName(ms.Name, revision), Namespace: ms.Namespace, Labels: map[string]string{utils.ControllerRevisionLabelKey: ms.Name, utils.ControllerRevisionRevisionLabelKey: revision}, Annotations: annotations, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}}, Data: runtime.RawExtension{Raw: raw}}
 }
 
 func TestHistoricalRoleSyncUsesAppliedLayout(t *testing.T) {
@@ -222,8 +222,8 @@ func TestHistoricalRoleSyncUsesAppliedLayout(t *testing.T) {
 
 func TestHistoricalPodCreationUsesV1PluginsAndScheduler(t *testing.T) {
 	for _, oldPlugin := range []bool{false, true} {
-		for _, sameRevision := range []bool{false, true} {
-			t.Run(fmt.Sprintf("oldPlugin=%t/sameRevision=%t", oldPlugin, sameRevision), func(t *testing.T) {
+		for _, legacyRoleIdentity := range []bool{false, true} {
+			t.Run(fmt.Sprintf("oldPlugin=%t/legacyRoleIdentity=%t", oldPlugin, legacyRoleIdentity), func(t *testing.T) {
 				c, client, ms := historicalPluginFixture(t)
 				ms.Spec.Template.Roles[0].WorkerTemplate = &workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "current-worker"}}}}
 				old := ms.DeepCopy()
@@ -237,11 +237,11 @@ func TestHistoricalPodCreationUsesV1PluginsAndScheduler(t *testing.T) {
 					old.Spec.Plugins = nil
 				}
 				revision := "old"
-				if sameRevision {
-					// The standalone revision name still hashes raw Roles. Keep
-					// the same Role input; plugin/scheduler history is separate.
+				if legacyRoleIdentity {
+					// Preserve the historical Roles-only name despite equal Role inputs;
+					// canonical desired identity now also includes scheduler/plugins.
 					ms.Spec.Template.Roles = old.Spec.Template.DeepCopy().Roles
-					revision = utils.ModelServingRevision(ms)
+					revision = utils.Revision(ms.Spec.Template.Roles)
 				}
 				_, err := client.AppsV1().ControllerRevisions(ms.Namespace).Create(context.Background(), historicalPluginRevision(t, old, revision, true), metav1.CreateOptions{})
 				require.NoError(t, err)
@@ -251,10 +251,8 @@ func TestHistoricalPodCreationUsesV1PluginsAndScheduler(t *testing.T) {
 				pods, err := client.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
 				require.NoError(t, err)
 				require.Len(t, pods.Items, 2)
-				expectedHash := utils.CalRoleTemplateHash(applied.Spec.Template.Roles[0])
-				if sameRevision {
-					expectedHash = utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
-				}
+				expectedHash, err := utils.RoleRevisionHash(applied, "infer")
+				require.NoError(t, err)
 				for _, pod := range pods.Items {
 					require.Equal(t, "historical-scheduler", pod.Spec.SchedulerName)
 					require.Equal(t, revision, utils.ObjectRevision(&pod))
@@ -273,7 +271,7 @@ func TestHistoricalPodCreationUsesV1PluginsAndScheduler(t *testing.T) {
 				} else {
 					require.Empty(t, services.Items)
 				}
-				if sameRevision {
+				if legacyRoleIdentity {
 					require.Equal(t, "old", ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image)
 					require.EqualValues(t, 1, ms.Spec.Template.Roles[0].WorkerReplicas)
 				} else {
@@ -360,7 +358,7 @@ func TestHistoricalContextPreservesCurrentCountsAndLegacyPluginInputs(t *testing
 	}
 }
 
-func TestHistoricalPartialRepairPreservesObservedTemplateHash(t *testing.T) {
+func TestHistoricalPartialRepairKeepsEntryAndCanonicalWorkerHash(t *testing.T) {
 	c, client, ms := historicalPluginFixture(t)
 	ms.Spec.RolloutStrategy = &workload.RolloutStrategy{Type: workload.RoleRollingUpdate}
 	old := ms.DeepCopy()
@@ -390,7 +388,10 @@ func TestHistoricalPartialRepairPreservesObservedTemplateHash(t *testing.T) {
 	require.Equal(t, pod, actual)
 	worker, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), "history-0-infer-0-1", metav1.GetOptions{})
 	require.NoError(t, err)
-	require.Equal(t, rawHash, worker.Labels[workload.RoleTemplateHashLabelKey])
+	canonicalHash, err := utils.RoleRevisionHash(old, "infer")
+	require.NoError(t, err)
+	require.Equal(t, canonicalHash, worker.Labels[workload.RoleTemplateHashLabelKey])
+	require.Equal(t, "old", utils.ObjectRevision(worker))
 	require.Equal(t, "old", worker.Spec.Containers[0].Image)
 	gets := 0
 	for _, a := range client.Actions() {
@@ -461,7 +462,8 @@ func TestHistoricalPartitionCreationKeepsPodAndStoreHashAligned(t *testing.T) {
 			require.NoError(t, err)
 			applied, err := utils.ApplyRevision(ms, cr)
 			require.NoError(t, err)
-			hash := utils.CalRoleTemplateHash(applied.Spec.Template.Roles[0])
+			hash, err := utils.RoleRevisionHash(applied, "infer")
+			require.NoError(t, err)
 			require.Equal(t, hash, pod.Labels[workload.RoleTemplateHashLabelKey])
 			require.Equal(t, hash, roles[0].RoleTemplateHash)
 			require.Equal(t, "old", roles[0].Revision)
@@ -509,8 +511,12 @@ func TestCurrentV1CreationKeepsPodAndStoreHashAligned(t *testing.T) {
 			require.NoError(t, err)
 			applied, err := utils.ApplyRevision(ms, cr)
 			require.NoError(t, err)
-			hash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
-			require.NotEqual(t, utils.CalRoleTemplateHash(applied.Spec.Template.Roles[0]), hash, "fixture must expose normalization-induced hash differences")
+			hash, err := utils.RoleRevisionHash(ms, "infer")
+			require.NoError(t, err)
+			appliedHash, err := utils.RoleRevisionHash(applied, "infer")
+			require.NoError(t, err)
+			require.Equal(t, hash, appliedHash, "canonical equality absorbs overwritten fields")
+			require.NotEqual(t, utils.CalRoleTemplateHash(applied.Spec.Template.Roles[0]), utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]), "fixture must expose normalization-induced raw hash differences")
 			require.Equal(t, hash, pod.Labels[workload.RoleTemplateHashLabelKey])
 			require.Equal(t, hash, roles[0].RoleTemplateHash)
 			require.Equal(t, revision, roles[0].Revision)

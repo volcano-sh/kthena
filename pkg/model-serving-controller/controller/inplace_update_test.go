@@ -95,6 +95,8 @@ func newInPlaceFixture(t *testing.T, newMutate func(*workloadv1alpha1.ModelServi
 	name := utils.GetNamespaceName(oldMS)
 	controller.store.AddServingGroup(name, 0, f.oldRev)
 	require.NoError(t, controller.store.UpdateServingGroupStatus(name, inPlaceTestGroup, datastore.ServingGroupRunning))
+	// A real ServingGroup has Role records before any member can complete.
+	f.addRunningRole(t)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -238,7 +240,7 @@ func TestUpdateServingGroupInPlaceOrRecreate(t *testing.T) {
 			f := newInPlaceFixture(t, tt.newMutate, tt.podMutate)
 			sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
 
-			require.NoError(t, f.controller.updateServingGroup(context.Background(), f.newMS, sg))
+			require.NoError(t, f.controller.updateServingGroup(context.Background(), f.newMS, sg, f.newRev))
 
 			status := f.controller.store.GetServingGroupStatus(utils.GetNamespaceName(f.newMS), inPlaceTestGroup)
 			pod, err := f.kubeClient.CoreV1().Pods("default").Get(context.Background(), "ms-0-prefill-0-0", metav1.GetOptions{})
@@ -322,7 +324,7 @@ func TestCompleteInPlaceUpdates(t *testing.T) {
 			}, nil)
 			ctx := context.Background()
 			sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
-			require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
+			require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
 
 			// Simulate a controller restart: only Pod state survives.
 			pod := f.syncPodFromAPI(t)
@@ -392,7 +394,7 @@ func TestUpdatePodDoesNotRecoverInPlaceUpdatingPod(t *testing.T) {
 	require.NoError(t, f.controller.modelServingsInformer.GetIndexer().Add(f.newMS))
 
 	sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
-	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
+	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
 	pod := f.syncPodFromAPI(t)
 	kubeletRestart("img:v2", "id-v2")(&pod.Status.ContainerStatuses[0])
 	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
@@ -470,7 +472,7 @@ func TestUpdateRoleInPlaceOrRecreate(t *testing.T) {
 			f := newInPlaceFixture(t, tt.newMutate, nil)
 			f.addRunningRole(t)
 
-			require.NoError(t, f.controller.updateRole(context.Background(), f.newMS, inPlaceTestGroup, "prefill", "prefill-0"))
+			require.NoError(t, f.controller.updateRole(context.Background(), f.newMS, inPlaceTestGroup, "prefill", "prefill-0", f.newRev))
 
 			pod, err := f.kubeClient.CoreV1().Pods("default").Get(context.Background(), "ms-0-prefill-0-0", metav1.GetOptions{})
 			require.NoError(t, err)
@@ -534,7 +536,9 @@ func TestManageRollingUpdateInPlaceEndToEnd(t *testing.T) {
 			assert.False(t, inplace.InProgress(pod))
 			assert.False(t, inplace.UnexpectedRestart(pod))
 			if tt.roleMode {
-				assert.Equal(t, utils.CalRoleTemplateHash(f.newMS.Spec.Template.Roles[0]), utils.ObjectRoleTemplateHash(pod))
+				hash, err := utils.RoleRevisionHash(f.newMS, "prefill")
+				require.NoError(t, err)
+				assert.Equal(t, hash, utils.ObjectRoleTemplateHash(pod))
 				roles, err := f.controller.store.GetRoleList(name, inPlaceTestGroup, "prefill")
 				require.NoError(t, err)
 				require.Len(t, roles, 1)
@@ -597,10 +601,10 @@ func TestInPlaceDeadlineFollowsRecoveryPolicy(t *testing.T) {
 			ctx := context.Background()
 			if tt.roleMode {
 				f.addRunningRole(t)
-				require.NoError(t, f.controller.updateRole(ctx, f.newMS, inPlaceTestGroup, "prefill", "prefill-0"))
+				require.NoError(t, f.controller.updateRole(ctx, f.newMS, inPlaceTestGroup, "prefill", "prefill-0", f.newRev))
 			} else {
 				sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
-				require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
+				require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
 			}
 			expireInPlaceDeadline(t, f)
 
@@ -622,7 +626,7 @@ func TestUpdatePodRecoversCrashDuringInPlaceUpdate(t *testing.T) {
 	f.controller.initialSync.Store(true)
 	require.NoError(t, f.controller.modelServingsInformer.GetIndexer().Add(f.newMS))
 	sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
-	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
+	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
 
 	pod := f.syncPodFromAPI(t)
 	// One restart for the update and one crash on top of it.
@@ -661,12 +665,12 @@ func TestUpdateServingGroupRevisionLookup(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "missing source revision is recreated",
+			name: "missing source revision pauses the unit",
 			prepare: func(f *inPlaceFixture) {
 				require.NoError(t, f.kubeClient.AppsV1().ControllerRevisions("default").Delete(context.Background(),
 					utils.GenerateControllerRevisionName("ms", f.oldRev), metav1.DeleteOptions{}))
 			},
-			wantRecreated: true,
+			wantErr: true,
 		},
 		{
 			name: "existing target revision with other replicas does not block the update",
@@ -685,7 +689,7 @@ func TestUpdateServingGroupRevisionLookup(t *testing.T) {
 			tt.prepare(f)
 			sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
 
-			err := f.controller.updateServingGroup(context.Background(), f.newMS, sg)
+			err := f.controller.updateServingGroup(context.Background(), f.newMS, sg, f.newRev)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -704,7 +708,7 @@ func TestCompleteInPlaceUpdatesRevertedToSourceRevisionRecreates(t *testing.T) {
 	f := newInPlaceFixture(t, nil, nil)
 	ctx := context.Background()
 	sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
-	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
+	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
 	f.syncPodFromAPI(t)
 
 	// The user reverts the spec while the Pod already runs the patched image.
@@ -717,7 +721,7 @@ func TestCompleteInPlaceUpdatesRepairsStoreAfterLostCompleteResponse(t *testing.
 	f := newInPlaceFixture(t, nil, nil)
 	ctx := context.Background()
 	sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
-	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
+	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
 
 	// The Complete patch reached the API server, but the controller never recorded it.
 	pod := f.syncPodFromAPI(t)
@@ -739,7 +743,7 @@ func TestCompleteInPlaceUpdatesStillRunsAfterSwitchToRecreate(t *testing.T) {
 	}, nil)
 	ctx := context.Background()
 	sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
-	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
+	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
 	expireInPlaceDeadline(t, f)
 
 	switched := f.newMS.DeepCopy()
@@ -751,30 +755,45 @@ func TestCompleteInPlaceUpdatesStillRunsAfterSwitchToRecreate(t *testing.T) {
 
 func TestInPlaceRoundSharesRevisionLookups(t *testing.T) {
 	tests := []struct {
-		name      string
-		ctx       func() context.Context
-		wantReads int
+		name            string
+		ctx             func() context.Context
+		wantReads       int
+		wantSourceReads int
 	}{
-		{name: "units of one reconcile share the revision reads", ctx: func() context.Context { return withInPlaceRound(context.Background()) }, wantReads: 3},
-		{name: "without a round every unit reads again", ctx: context.Background, wantReads: 5},
+		{name: "units of one reconcile share the revision reads", ctx: func() context.Context { return withInPlaceRound(context.Background()) }, wantReads: 2, wantSourceReads: 1},
+		{name: "without a round every unit reads again", ctx: context.Background, wantReads: 4, wantSourceReads: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newInPlaceFixture(t, nil, nil)
 			sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
+			// Real reconcile has already persisted canonical source and target
+			// snapshots. Measure per-round reads independently of legacy migration.
+			require.NoError(t, f.kubeClient.AppsV1().ControllerRevisions("default").Delete(context.Background(),
+				utils.GenerateControllerRevisionName("ms", f.oldRev), metav1.DeleteOptions{}))
+			for _, ms := range []*workloadv1alpha1.ModelServing{f.oldMS, f.newMS} {
+				data, err := utils.BuildRevisionData(ms)
+				require.NoError(t, err)
+				_, _, err = utils.RecordModelServingRevision(context.Background(), f.kubeClient, ms, data)
+				require.NoError(t, err)
+			}
 			f.kubeClient.ClearActions()
 			ctx := tt.ctx()
 
-			require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
-			require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
+			require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
+			require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
 
-			reads := 0
+			reads, sourceReads := 0, 0
 			for _, action := range f.kubeClient.Actions() {
 				if action.Matches("get", "controllerrevisions") {
 					reads++
+					if action.(k8stesting.GetAction).GetName() == utils.GenerateControllerRevisionName(f.oldMS.Name, f.oldRev) {
+						sourceReads++
+					}
 				}
 			}
 			assert.Equal(t, tt.wantReads, reads)
+			assert.Equal(t, tt.wantSourceReads, sourceReads)
 		})
 	}
 }
@@ -798,7 +817,7 @@ func TestRetargetedUnitStillHitsDeadline(t *testing.T) {
 			}, nil)
 			ctx := context.Background()
 			sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
-			require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
+			require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
 			if tt.finished {
 				pod := f.syncPodFromAPI(t).DeepCopy()
 				kubeletRestart("img:v2", "id-v2")(&pod.Status.ContainerStatuses[0])
@@ -818,11 +837,11 @@ func TestRetargetedUnitStillHitsDeadline(t *testing.T) {
 
 			require.NoError(t, f.controller.completeInPlaceUpdates(ctx, third, thirdRev))
 
-			pod := f.syncPodFromAPI(t)
-			assert.Equal(t, f.oldRev, utils.ObjectRevision(pod), "never completed towards the new revision")
 			if tt.wantDelete {
 				assert.Eventually(t, func() bool { return podDeleted(f) }, 5*time.Second, 20*time.Millisecond)
 			} else {
+				pod := f.syncPodFromAPI(t)
+				assert.Equal(t, f.oldRev, utils.ObjectRevision(pod), "never completed towards the new revision")
 				assert.Never(t, func() bool { return podDeleted(f) }, 300*time.Millisecond, 20*time.Millisecond)
 			}
 		})
@@ -864,11 +883,11 @@ func TestRetargetedHalfPatchedUnitHitsDeadline(t *testing.T) {
 func TestUpdateServingGroupAlreadyStartedMakesNoAPICalls(t *testing.T) {
 	f := newInPlaceFixture(t, nil, nil)
 	sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupCreating}
-	require.NoError(t, f.controller.updateServingGroup(context.Background(), f.newMS, sg))
+	require.NoError(t, f.controller.updateServingGroup(context.Background(), f.newMS, sg, f.newRev))
 	f.syncPodFromAPI(t)
 	f.kubeClient.ClearActions()
 
-	require.NoError(t, f.controller.updateServingGroup(context.Background(), f.newMS, sg))
+	require.NoError(t, f.controller.updateServingGroup(context.Background(), f.newMS, sg, f.newRev))
 
 	for _, action := range f.kubeClient.Actions() {
 		assert.False(t, action.Matches("get", "controllerrevisions") || action.Matches("patch", "pods"),
@@ -884,7 +903,7 @@ func TestRoleLevelRevertRecreatesPatchedRole(t *testing.T) {
 	})
 	ctx := context.Background()
 	f.addRunningRole(t)
-	require.NoError(t, f.controller.updateRole(ctx, f.newMS, inPlaceTestGroup, "prefill", "prefill-0"))
+	require.NoError(t, f.controller.updateRole(ctx, f.newMS, inPlaceTestGroup, "prefill", "prefill-0", f.newRev))
 	f.syncPodFromAPI(t)
 
 	// The prefill template goes back to v1 while another Role changes, so the overall
@@ -935,7 +954,7 @@ func TestImageRewrittenAfterCreationIsRecreated(t *testing.T) {
 	f := newInPlaceFixture(t, nil, func(pod *corev1.Pod) { pod.Spec.Containers[0].Image = "img:webhook" })
 	sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
 
-	require.NoError(t, f.controller.updateServingGroup(context.Background(), f.newMS, sg))
+	require.NoError(t, f.controller.updateServingGroup(context.Background(), f.newMS, sg, f.newRev))
 
 	assert.Equal(t, datastore.ServingGroupDeleting, f.controller.store.GetServingGroupStatus(utils.GetNamespaceName(f.newMS), inPlaceTestGroup))
 	assert.Nil(t, inplace.StateOf(f.syncPodFromAPI(t)))
@@ -998,7 +1017,7 @@ func TestGraceTimeKeepsOnlyPodsThatFinishedTheUpdate(t *testing.T) {
 			}, nil)
 			ctx := context.Background()
 			sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
-			require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg))
+			require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, sg, f.newRev))
 			pod := f.syncPodFromAPI(t).DeepCopy()
 			if tt.finished {
 				kubeletRestart("img:v2", "id-v2")(&pod.Status.ContainerStatuses[0])

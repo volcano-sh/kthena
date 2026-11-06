@@ -142,7 +142,7 @@ func TestCoordinatedPartialExpansionReservesOneStartAndRepairsItsWorker(t *testi
 				for _, pod := range []*corev1.Pod{entry, worker} {
 					require.True(t, utils.IsOwnedByModelServingWithUID(pod, f.ms.UID))
 					require.Equal(t, f.newRev, utils.ObjectRevision(pod))
-					require.Equal(t, utils.CalRoleTemplateHash(role), utils.ObjectRoleTemplateHash(pod))
+					require.Equal(t, canonicalRoleHashForTest(t, f.ms, role.Name), utils.ObjectRoleTemplateHash(pod))
 					require.Nil(t, pod.DeletionTimestamp)
 					require.False(t, utils.IsPodRunningAndReady(pod), "repair has no invented kubelet Ready credit")
 				}

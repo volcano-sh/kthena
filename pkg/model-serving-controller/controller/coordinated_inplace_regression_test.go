@@ -254,7 +254,7 @@ func TestCoordinatedInPlacePartialPatchReservesUnit(t *testing.T) {
 
 func TestCoordinatedInPlaceUsesCompleteRuntimeReadiness(t *testing.T) {
 	f := newCoordinatedInPlaceFixture(t)
-	require.NoError(t, f.controller.updateRole(context.Background(), f.ms, f.group, "prefill", "prefill-3"))
+	require.NoError(t, f.controller.updateRole(context.Background(), f.ms, f.group, "prefill", "prefill-3", utils.ModelServingRevision(f.ms)))
 	f.syncPodCache(t)
 	check := func() {
 		t.Helper()
@@ -284,7 +284,7 @@ func TestCoordinatedInPlaceUsesCompleteRuntimeReadiness(t *testing.T) {
 func TestCoordinatedInPlaceExpectedRestartPreservesUIDs(t *testing.T) {
 	f := newCoordinatedInPlaceFixture(t)
 	f.controller.initialSync.Store(true)
-	require.NoError(t, f.controller.updateRole(context.Background(), f.ms, f.group, "prefill", "prefill-3"))
+	require.NoError(t, f.controller.updateRole(context.Background(), f.ms, f.group, "prefill", "prefill-3", utils.ModelServingRevision(f.ms)))
 	f.syncPodCache(t)
 	pod := f.pod(t, "prefill", 3, 0)
 	kubeletRestart("img:v2", "id-v2-entry")(&pod.Status.ContainerStatuses[0])
@@ -322,7 +322,7 @@ func TestCoordinatedInPlaceFallbackAndIndependentMode(t *testing.T) {
 			if tc.nonImage {
 				f.ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "CHANGED", Value: "true"}}
 			}
-			require.NoError(t, f.controller.updateRole(context.Background(), f.ms, f.group, "prefill", "prefill-3"))
+			require.NoError(t, f.controller.updateRole(context.Background(), f.ms, f.group, "prefill", "prefill-3", utils.ModelServingRevision(f.ms)))
 			for member := 0; member < 2; member++ {
 				if !tc.inPlace {
 					_, err := f.controller.kubeClientSet.CoreV1().Pods(f.ms.Namespace).Get(context.Background(), utils.GeneratePodName(f.group, "prefill-3", member), metav1.GetOptions{})

@@ -38,6 +38,9 @@ func TestCoordinatedRoundReusesReadsAndRefreshesLiveFactsBetweenRounds(t *testin
 	key, revision, group := utils.GetNamespaceName(ms), utils.ModelServingRevision(ms), ms.Name+"-0"
 	c.store.AddServingGroup(key, 0, revision)
 	role := ms.Spec.Template.Roles[0]
+	// Measure the steady-state canonical path separately from one-time legacy pinning.
+	require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(context.Background(), utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+	recordTestRevision(t, c.kubeClientSet, ms, revision)
 	pod := addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))[0]
 	instances, err := c.store.GetRoleList(key, group, role.Name)
 	require.NoError(t, err)
@@ -53,7 +56,7 @@ func TestCoordinatedRoundReusesReadsAndRefreshesLiveFactsBetweenRounds(t *testin
 		require.True(t, ready)
 		roles, err := c.roleSpecsFromRevisionInRound(round, ms, revision)
 		require.NoError(t, err)
-		require.Equal(t, utils.CalRoleTemplateHash(role), utils.CalRoleTemplateHash(roles[role.Name]))
+		require.False(t, roleTemplateChanged(roles, role))
 	}
 	assertReads := func(podLists, revisionGets int) {
 		t.Helper()

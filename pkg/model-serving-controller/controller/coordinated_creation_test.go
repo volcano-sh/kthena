@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -140,13 +141,55 @@ func TestCoordinatedCreationReplaysOnlyTheSameAppliedIncarnation(t *testing.T) {
 			require.Len(t, pods.Items, 2)
 			for _, pod := range pods.Items {
 				require.Equal(t, revision, utils.ObjectRevision(&pod))
-				require.Equal(t, utils.CalRoleTemplateHash(role), utils.ObjectRoleTemplateHash(&pod))
+				if pod.Name == accepted.Name {
+					require.Equal(t, utils.ObjectRoleTemplateHash(accepted), utils.ObjectRoleTemplateHash(&pod))
+				} else {
+					require.Equal(t, canonicalRoleHashForTest(t, ms, role.Name), utils.ObjectRoleTemplateHash(&pod))
+				}
 				require.True(t, utils.IsOwnedByModelServingWithUID(&pod, ms.UID))
 				if pod.Name == accepted.Name {
 					require.Equal(t, accepted.UID, pod.UID)
 				}
 			}
 			require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(utils.GetNamespaceName(ms), group, role.Name, "prefill-0"))
+		})
+	}
+}
+
+// Reproduce the exact Role hash emitted by upstream/main 2eff0aee before
+// canonical JSON hashing; the current CalRoleTemplateHash is not that hash.
+func TestCoordinatedCreationReplaysPreCanonicalSpewHash(t *testing.T) {
+	for _, member := range []int{0, 1} {
+		t.Run(fmt.Sprintf("accepted-member-%d", member), func(t *testing.T) {
+			c, ms, role, group, revision := newCoordinatedCreationFixture(t)
+			role.EntryTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{Name: api.GroupSizeEnv, Value: "legacy-user-value"}}
+			role.EntryTemplate.Spec.SchedulerName = ""
+			ms.Spec.Template.Roles[0] = role
+			require.Equal(t, "volcano", ms.Spec.SchedulerName)
+			require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(context.Background(), utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+			_, err := utils.CreateControllerRevision(context.Background(), c.kubeClientSet, ms, revision, ms.Spec.Template.Roles)
+			require.NoError(t, err)
+			legacyRole := *role.DeepCopy()
+			legacyRole.Replicas = nil
+			legacyRole.RollingUpdateConfiguration = api.RollingUpdateConfiguration{}
+			legacyHash := utils.Revision(legacyRole)
+			require.NotEqual(t, utils.CalRoleTemplateHash(role), legacyHash)
+			require.NotEqual(t, canonicalRoleHashForTest(t, ms, role.Name), legacyHash)
+			accepted := hiddenCoordinatedMember(t, c, ms, role, group, revision, 0, member, func(pod *corev1.Pod) { pod.Labels[api.RoleTemplateHashLabelKey] = legacyHash })
+			ctx := c.withRevisionHistory(withCoordinatedRound(context.Background(), ms), ms)
+			require.NoError(t, c.scaleUpRoles(ctx, ms, group, role, nil, 1, 0, revision, true))
+			pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, pods.Items, 2, "legacy partial CREATE must finish the missing sibling")
+			for _, pod := range pods.Items {
+				require.Equal(t, revision, utils.ObjectRevision(&pod))
+				if pod.Name == accepted.Name {
+					require.Equal(t, accepted.UID, pod.UID)
+					require.Equal(t, legacyHash, utils.ObjectRoleTemplateHash(&pod))
+				} else {
+					require.Equal(t, canonicalRoleHashForTest(t, ms, role.Name), utils.ObjectRoleTemplateHash(&pod))
+				}
+			}
 		})
 	}
 }
