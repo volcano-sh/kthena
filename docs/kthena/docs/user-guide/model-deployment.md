@@ -595,3 +595,33 @@ mounts explicitly.
 ### Gang Scheduling
 
 `GangPolicy` is enabled by default, we may make it optional in future release.
+
+### Failure Recovery Backoff
+
+When a Pod of a ModelServing fails, the controller waits for `spec.template.restartGracePeriodSeconds` and then applies `spec.recoveryPolicy`. It recreates the ServingGroup (`ServingGroupRecreate`), the Role instance (`RoleRecreate`), or the Pod (`None`, for Pods that reach the `Failed` phase).
+
+If the same unit keeps failing, for example because of a wrong model path, the controller waits longer before each new recovery:
+
+| Consecutive failures | Wait before recovery (defaults) |
+|---|---|
+| 1 | `restartGracePeriodSeconds` |
+| 2 | at least 10s |
+| 3 | at least 20s |
+| 4 | at least 40s |
+| ... | doubles each time, up to 5m |
+
+- The first failure is recovered as before, so a one-off failure is not slowed down.
+- The count resets when the unit has stayed Running for 10 minutes, or when the failed Pod belongs to a new revision of the ModelServing.
+- Evictions and preemptions (Pods with the `DisruptionTarget` condition) do not count.
+- While the controller waits, the failed Pod stays in place, so you can still read its logs. If it becomes Ready again, it is kept.
+
+The controller never stops retrying. While a unit is waiting, the ModelServing has a `RecoveryBackOff` condition with status `True`, and the controller emits a `RecoveryBackOff` warning event:
+
+```bash
+kubectl get modelserving <name> -o jsonpath='{.status.conditions[?(@.type=="RecoveryBackOff")].message}'
+kubectl get events --field-selector reason=RecoveryBackOff
+```
+
+The failure counts are kept in memory, so they start over when the controller manager restarts.
+
+You can tune the backoff with the controller manager flags `--recovery-backoff-base`, `--recovery-backoff-max`, and `--recovery-backoff-reset`, or with the Helm values under `workload.controllerManager.recoveryBackoff`. Set the base to `0s` to turn the backoff off.

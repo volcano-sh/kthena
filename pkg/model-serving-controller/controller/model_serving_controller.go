@@ -48,6 +48,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	volcano "volcano.sh/apis/pkg/client/clientset/versioned"
 
@@ -117,6 +118,9 @@ type ModelServingController struct {
 	recorder        record.EventRecorder
 	podDeletions    sync.Map // key: auxiliaryCleanupKey; value: *podDeletionTargets
 	roleCleanups    sync.Map // key: auxiliaryCleanupKey; value: *plugins.RoleCleanup
+	recovery        *recoveryBackoff
+	// failedPodDeletions holds the Pods deleted because they failed.
+	failedPodDeletions sync.Map // key: pod UID; value: recoveryUnitKey
 }
 
 func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
@@ -186,6 +190,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		store:           store,
 		pluginsRegistry: plugins.DefaultRegistry,
 		recorder:        recorder,
+		recovery:        newRecoveryBackoff(DefaultRecoveryBackoffConfig(), clock.RealClock{}),
 	}
 
 	registerPodGroupHandler := func(pgInformer cache.SharedIndexInformer) {
@@ -333,6 +338,9 @@ func (c *ModelServingController) deleteModelServing(obj interface{}) {
 		}
 		return true
 	})
+	c.recovery.forget(func(key recoveryUnitKey) bool {
+		return key.modelServingUID == ms.UID
+	})
 	c.store.DeleteModelServing(types.NamespacedName{
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
@@ -447,6 +455,7 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		}
 	}
 
+	failedUnit, deletedForFailure := c.failedPodDeletions.LoadAndDelete(pod.UID)
 	ms, servingGroupName, roleName, roleID := c.getModelServingAndResourceDetails(pod)
 	// ms is nil means the modelserving is deleted
 	// delete the pod
@@ -467,6 +476,10 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		return
 	}
 
+	// The unit is recovered once per failure, because later Pod deletions of the same unit see the deletion in progress.
+	if deletedForFailure {
+		c.recovery.recordFailure(failedUnit.(recoveryUnitKey))
+	}
 	err := c.handleDeletedPod(ms, servingGroupName, pod)
 	if err != nil {
 		klog.Errorf("handle deleted pod %s/%s failed in ServingGroup %s of ModelServing %s/%s: %v", pod.Namespace, pod.Name, servingGroupName, ms.Namespace, ms.Name, err)
@@ -1144,6 +1157,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 		if err := c.DeleteRole(ctx, ms, groupName, targetRole.Name, target.Name); err != nil {
 			return err
 		}
+		c.forgetRecoveryUnits(ms, groupName, targetRole.Name, target.Name)
 	}
 
 	// After all non-protected roles are deleted, proceed to delete protected roles if needed
@@ -1159,6 +1173,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 			if err := c.DeleteRole(ctx, ms, groupName, targetRole.Name, target.Name); err != nil {
 				return err
 			}
+			c.forgetRecoveryUnits(ms, groupName, targetRole.Name, target.Name)
 		}
 	}
 	return nil
@@ -2123,6 +2138,7 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	if err != nil {
 		return errors.Join(revisionErr, fmt.Errorf("failed to check ServingGroup status: %w", err))
 	}
+	c.markRecoveryUnitRunning(ms, servingGroupName, newPod, roleReady, ready)
 	if ready {
 		// All pods in the ServingGroup are running, so the ServingGroup status also needs to be set to running
 		err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupRunning)
@@ -2166,8 +2182,8 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 		c.graceMap.Delete(key)
 		return err
 	}
-	// Wait for the grace period before processing
-	go c.handlePodAfterGraceTime(ms, errPod)
+	// Wait for the grace period, extended by the backoff when the unit keeps failing.
+	go c.handlePodAfterGraceTime(ms, servingGroupName, errPod, c.recoveryWait(ms, servingGroupName, errPod))
 	// ServingGroup status may change, needs reconcile
 	c.enqueueModelServing(ms)
 	return nil
@@ -2206,12 +2222,20 @@ func (c *ModelServingController) markPodUnavailable(ms *workloadv1alpha1.ModelSe
 	return nil
 }
 
-func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.ModelServing, errPod *corev1.Pod) {
-	if ms.Spec.Template.RestartGracePeriodSeconds != nil && *ms.Spec.Template.RestartGracePeriodSeconds > 0 {
+// handlePodAfterGraceTime deletes the failed Pod after the wait, unless it has recovered or been replaced.
+// The deletion then triggers the recovery policy in deletePod.
+func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.ModelServing, servingGroupName string, errPod *corev1.Pod, wait time.Duration) {
+	defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
+	unit := recoveryUnitKeyFor(ms, servingGroupName, errPod)
+	podToDelete := errPod
+	if wait > 0 {
 		// Wait for the grace period before making a decision
-		time.Sleep(time.Duration(*ms.Spec.Template.RestartGracePeriodSeconds) * time.Second)
+		c.sleepForRecovery(wait)
 		klog.V(4).Infof("%s after grace time", errPod.Name)
-		defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
+		if c.recovery.finish(unit) {
+			// The RecoveryBackOff condition no longer lists this unit.
+			c.enqueueModelServing(ms)
+		}
 
 		newPod, err := c.podsLister.Pods(ms.Namespace).Get(errPod.Name)
 		if err != nil {
@@ -2226,28 +2250,25 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 			klog.V(4).Infof("pod %s has been replaced after grace time", errPod.Name)
 			return
 		}
-
-		if !utils.IsPodRunningAndReady(newPod) || inplace.Updating(newPod) {
-			// pod has not recovered after the grace period (an unfinished in-place update counts as not recovered), needs to be rebuilt
-			// After this pod has been deleted, we will rebuild the ServingGroup in deletePod function
-			err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), newPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
-			if err != nil {
-				klog.Errorf("cannot delete pod %s after grace time, err: %v", newPod.Name, err)
-				return
-			}
-			klog.V(2).Infof("%s been deleted after grace time", errPod.Name)
-		}
-	} else {
-		// grace period is not set or the grace period is 0, the deletion will be executed immediately.
-		defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
-
-		err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), errPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
-		if err != nil {
-			klog.Errorf("cannot delete pod %s when it error, err: %v", errPod.Name, err)
+		if utils.IsPodRunningAndReady(newPod) && !inplace.Updating(newPod) {
+			// The pod recovered by itself (an unfinished in-place update counts as not recovered).
 			return
 		}
-		klog.V(2).Infof("%s been deleted without grace time", errPod.Name)
+		podToDelete = newPod
 	}
+
+	// Only failures caused by the workload count toward the backoff.
+	if !isDisrupted(podToDelete) {
+		c.failedPodDeletions.Store(errPod.UID, unit)
+	}
+	// After this pod has been deleted, we will rebuild it according to the RecoveryPolicy in deletePod function
+	err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), errPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
+	if err != nil {
+		c.failedPodDeletions.Delete(errPod.UID)
+		klog.Errorf("cannot delete failed pod %s after waiting %s, err: %v", errPod.Name, wait, err)
+		return
+	}
+	klog.V(2).Infof("%s been deleted after waiting %s", errPod.Name, wait)
 }
 
 func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) error {
@@ -2691,6 +2712,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 		}
 		coordinationConditionChanged, coordinationCondition := rolloutPolicy.setCondition(copy)
 		shouldUpdate = shouldUpdate || coordinationConditionChanged
+		shouldUpdate = c.setRecoveryBackOffCondition(copy) || shouldUpdate
 
 		// Update revision fields following StatefulSet's logic:
 		// 1. UpdateRevision is always the new revision being applied
@@ -2980,6 +3002,7 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 		if e := c.deleteServingGroup(ctx, ms, targetGroup.Name); e != nil {
 			err = append(err, e)
 		}
+		c.forgetRecoveryUnits(ms, targetGroup.Name, "", "")
 	}
 
 	// After all non-protected groups are deleted, proceed to delete protected groups if needed
@@ -2996,6 +3019,7 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 			if e := c.deleteServingGroup(ctx, ms, targetGroup.Name); e != nil {
 				err = append(err, e)
 			}
+			c.forgetRecoveryUnits(ms, targetGroup.Name, "", "")
 		}
 	}
 

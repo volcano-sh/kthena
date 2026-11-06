@@ -46,6 +46,14 @@ controllerManager:
   # Smaller values react faster to traffic spikes but increase API server load.
   # If 0 or not specified, uses the binary default (15).
   autoscalingSyncPeriodSeconds: 0
+  # recoveryBackoff configures the delay between consecutive recoveries of a failing
+  # ModelServing ServingGroup, Role, or Pod. Values are duration strings such as 30s.
+  # Empty values use the binary defaults (base 10s, max 5m, reset 10m).
+  # Set base to "0s" to disable the backoff.
+  recoveryBackoff:
+    base: ""
+    max: ""
+    reset: ""
   # downloaderImage is the container image used for downloading models.
   downloaderImage:
     repository: ghcr.io/volcano-sh/downloader

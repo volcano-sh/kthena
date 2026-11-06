@@ -16,6 +16,16 @@ workload:
     # -- Reconcile interval in seconds for the autoscaler. Smaller values react
     # faster to traffic spikes but increase API server load. 0 uses the binary default (15).
     autoscalingSyncPeriodSeconds: 0
+    recoveryBackoff:
+      # -- Delay before the second consecutive recovery of a failing ModelServing ServingGroup, Role, or Pod,
+      # as a duration string such as `30s`. The delay doubles after each further failure.
+      # Set `"0s"` to disable the backoff. Empty uses the binary default (10s).
+      base: ""
+      # -- Maximum delay between consecutive recoveries, as a duration string. Empty uses the binary default (5m).
+      max: ""
+      # -- How long a recovered unit must stay Running before its failure count resets, as a duration string.
+      # Empty uses the binary default (10m).
+      reset: ""
     downloaderImage:
       # -- Image repository for the Downloader.
       repository: ghcr.io/volcano-sh/downloader
