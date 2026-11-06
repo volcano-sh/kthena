@@ -185,11 +185,25 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		scores := s.RunScorePlugins(decodePods, ctx)
 		topNDecodePods := TopNPodInfos(scores, topN)
 
+		// Decodes sharing a PD group share the same prefill set: filter/score it
+		// once per group and reuse the winner for the remaining candidates.
+		bestPrefillByGroup := make(map[string]*datastore.PodInfo)
+
 		for _, decodePod := range topNDecodePods {
 			decodePodName := decodePod.GetPodNamespacedName()
 			if decodePodName.Name == "" {
 				continue
 			}
+			var groupKey string
+			if pod := decodePod.GetPod(); pod != nil && ctx.PDGroup != nil {
+				groupKey = pod.Labels[ctx.PDGroup.GroupKey]
+			}
+			if best, cached := bestPrefillByGroup[groupKey]; cached {
+				decodeCandidates = append(decodeCandidates, decodePod)
+				prefillCandidates = append(prefillCandidates, best)
+				continue
+			}
+
 			// Get prefill pods for the same PD group as the decode pod (O(1) lookup)
 			selectedPods, err := s.store.GetPrefillPodsForDecodeGroup(ctx.ModelServerName, decodePodName)
 			if err != nil || len(selectedPods) == 0 {
@@ -211,6 +225,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 					"decode instance", decodePodName)
 				continue
 			}
+			bestPrefillByGroup[groupKey] = bestPrefillPod[0]
 			decodeCandidates = append(decodeCandidates, decodePod)
 			prefillCandidates = append(prefillCandidates, bestPrefillPod[0])
 		}
