@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -99,8 +100,7 @@ class TestDownloadModel(unittest.TestCase):
     def test_s3_download_implementation(self, mock_popen, mock_build_cmd):
         process_mock = MagicMock()
         process_mock.stdout.readline.side_effect = ["output1", "output2", ""]
-        process_mock.poll.return_value = 0
-        process_mock.stderr.readlines.return_value = []
+        process_mock.wait.return_value = 0
         mock_popen.return_value = process_mock
         mock_build_cmd.return_value = [
             "aws",
@@ -122,6 +122,21 @@ class TestDownloadModel(unittest.TestCase):
             "s3://fake_bucket/fake_path", self.output_dir
         )
         mock_popen.assert_called_once()
+        # stderr must be merged, not a second pipe and not discarded
+        self.assertIs(mock_popen.call_args.kwargs["stderr"], subprocess.STDOUT)
+
+    @patch("subprocess.Popen")
+    def test_execute_command_failure_includes_output_tail(self, mock_popen):
+        process_mock = MagicMock()
+        process_mock.stdout.readline.side_effect = ["fatal error: Access Denied", ""]
+        process_mock.wait.return_value = 1
+        mock_popen.return_value = process_mock
+
+        with self.assertRaises(Exception) as context:
+            S3Downloader._execute_command(["aws", "s3", "sync"], None)
+
+        self.assertIn("exit code: 1", str(context.exception))
+        self.assertIn("fatal error: Access Denied", str(context.exception))
 
     def test_s3_download_rejects_partial_static_credentials(self):
         for access_key, secret_key in [(None, "fake_sk"), ("fake_ak", None)]:
