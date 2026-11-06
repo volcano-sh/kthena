@@ -35,3 +35,6 @@ bin
 # Python cache
 **/__pycache__/
 *.py[cod]
+
+# release output
+_output
