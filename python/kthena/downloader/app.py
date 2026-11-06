@@ -23,15 +23,20 @@ from kthena.downloader.logger import setup_logger
 logger = setup_logger()
 
 
-def load_config(config_str: str = None) -> dict:
+def load_config(raw_config: str | dict | None = None) -> dict:
+    """Build the downloader config from a JSON string (CLI) or a dict (runtime API)."""
     config = {}
-    if config_str:
+    if isinstance(raw_config, dict):
+        config = dict(raw_config)
+    elif raw_config:
         try:
-            config = json.loads(config_str)
+            config = json.loads(raw_config)
             logger.info("Loaded configuration from JSON string.")
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, TypeError) as e:
             logger.error(f"Error parsing configuration JSON: {e}")
             raise ValueError("Invalid configuration JSON format.") from e
+        if not isinstance(config, dict):
+            raise ValueError("Configuration must be a JSON object.")
 
     env_config = {
         "hf_token": os.getenv("HF_AUTH_TOKEN"),
