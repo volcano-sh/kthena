@@ -227,6 +227,37 @@ curl http://$ROUTER_IP/v1/completions \
 {"choices":[{"finish_reason":"length","index":0,"logprobs":null,"text":"This is simulated message from deepseek-ai/DeepSeek-R1-Distill-Qwen-7B!"}],"created":1756367891,"id":"cmpl-uqkvlQyYK7bGYrRHQ0eXlWi7","model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-7B","object":"text_completion","system_fingerprint":"fp_44709d6fcb","usage":{"completion_tokens":71,"prompt_tokens":1,"time":0.0,"total_tokens":72}}
 ```
 
+#### Matching on the Host Header
+
+The special header key `Host` in `modelMatch.headers` matches the request authority (the `Host` header / `req.Host` in Go's net/http, falling back to `X-Forwarded-Host` when the request reaches the router behind a proxy). This lets several deployments share one model name while being discriminated by the access entry, e.g. a port-forward port or an ingress domain:
+
+```yaml
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: deepseek-by-host
+  namespace: default
+spec:
+  modelName: "deepseek-shared"
+  rules:
+  - name: "by-ingress-domain"
+    modelMatch:
+      headers:
+        Host:
+          exact: api.example.com
+    targetModels:
+    - modelServerName: "deepseek-r1-7b"
+  - name: "default"
+    targetModels:
+    - modelServerName: "deepseek-r1-1-5b"
+```
+
+**Matching semantics for the `Host` key**:
+
+- **Case-insensitive**: hostnames are case-insensitive (RFC 3986 3.2.2), so `API.Example.COM` and `api.example.com` are equivalent. This mirrors the HTTPRoute hostname matching of the router, so the same request matches an HTTPRoute hostname and a `modelMatch.headers.Host` rule consistently.
+- **Port is stripped**: the optional port of the authority is removed before matching, so `api.example.com:443` and `api.example.com:8443` both match `exact: api.example.com`. If you need to discriminate by port, use a `regex` pattern — regex patterns are matched verbatim against the normalized (port-less, lowercased) host, so include the port explicitly in the pattern.
+- `exact` and `prefix` values are normalized the same way (port stripped, lowercased) before comparison; `regex` patterns are used as written.
+
 ### 5. PD-Disaggregated Routing
 
 **Scenario**: Route inference requests to Prefill/Decode disaggregated backends, where prefill instances handle prefill and decode instances handle decode stages independently.

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"reflect"
@@ -1634,6 +1635,25 @@ func (s *store) selectRule(modelName string, req *http.Request, rules []*aiv1alp
 		headersMatched := true
 		for key, sm := range rule.ModelMatch.Headers {
 			reqValue := req.Header.Get(key)
+			// Go's net/http moves the Host header out of req.Header and exposes it as req.Host,
+			// so req.Header.Get("Host") is always empty and Host based modelMatch would never match.
+			// Fall back to req.Host (and then X-Forwarded-Host) to support Host/authority based routing.
+			// The host component is case-insensitive (RFC 3986 3.2.2) and may carry a port, so
+			// both the configured pattern and the request value are normalized (port stripped,
+			// lowercased) before matching, mirroring normalizeHTTPRouteHost used by the
+			// HTTPRoute hostname matching path of the router.
+			if strings.EqualFold(key, "Host") {
+				if reqValue == "" {
+					reqValue = req.Host
+					if reqValue == "" {
+						reqValue = req.Header.Get("X-Forwarded-Host")
+					}
+				}
+				reqValue = normalizeHostHeader(reqValue)
+				if sm != nil {
+					sm = normalizeStringMatchHost(sm)
+				}
+			}
 			if !s.matchString(sm, reqValue) {
 				headersMatched = false
 				break
@@ -1737,6 +1757,48 @@ func (s *store) matchString(sm *aiv1alpha1.StringMatch, value string) bool {
 	default:
 		return true
 	}
+}
+
+// normalizeHostHeader strips the optional port, brackets, and trailing dot from
+// a Host/authority value and lowercases it, mirroring the router's HTTPRoute
+// hostname normalization so a modelMatch.headers.Host rule behaves the same as
+// an HTTPRoute hostname match for the same request (RFC 3986 3.2.2).
+func normalizeHostHeader(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	if hostOnly, _, err := net.SplitHostPort(host); err == nil {
+		host = hostOnly
+	} else if index := strings.LastIndex(host, ":"); index > -1 && !strings.Contains(host[:index], ":") {
+		host = host[:index]
+	}
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	host = strings.TrimSuffix(host, ".")
+	return strings.ToLower(host)
+}
+
+// normalizeStringMatchHost applies normalizeHostHeader to the Exact and Prefix
+// patterns of a Host match so case and port differences between the configured
+// pattern and the incoming authority do not break the match. Regex patterns are
+// left untouched: an explicit regex is used verbatim, so the author is expected
+// to account for case and ports themselves.
+func normalizeStringMatchHost(sm *aiv1alpha1.StringMatch) *aiv1alpha1.StringMatch {
+	if sm == nil {
+		return nil
+	}
+	normalized := &aiv1alpha1.StringMatch{}
+	if sm.Exact != nil {
+		v := normalizeHostHeader(*sm.Exact)
+		normalized.Exact = &v
+	}
+	if sm.Prefix != nil {
+		v := normalizeHostHeader(*sm.Prefix)
+		normalized.Prefix = &v
+	}
+	normalized.Regex = sm.Regex
+	return normalized
 }
 
 func (s *store) selectDestination(targets []*aiv1alpha1.TargetModel) (*aiv1alpha1.TargetModel, error) {

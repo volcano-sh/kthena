@@ -3742,6 +3742,62 @@ func TestDoRequestTimeoutDoesNotTruncateSlowStream(t *testing.T) {
 	assert.Contains(t, string(body), "chunk-5", "the whole stream should arrive")
 }
 
+// TestDoRequest4xxPassThroughAndRetrySemantics verifies the per-status-code
+// forwarding semantics of doRequest:
+//   - the explicit allowlist of request-side 4xx (400/401/403/413/422) is
+//     returned to the caller as a normal response so the original status code
+//     and error body reach the client instead of being swallowed into a
+//     synthetic 503;
+//   - every other non-2xx status, including unknown 4xx codes such as
+//     404/409/421/425/429, still surfaces as a forwarding error: which status
+//     code an engine uses for pod-local conditions (e.g. an adapter not loaded
+//     on that pod) is engine-specific, so the proxy retry loop must keep
+//     trying the remaining pods.
+func TestDoRequest4xxPassThroughAndRetrySemantics(t *testing.T) {
+	tests := []struct {
+		name            string
+		statusCode      int
+		wantPassThrough bool
+	}{
+		{name: "BadRequestPassesThrough", statusCode: http.StatusBadRequest, wantPassThrough: true},
+		{name: "UnauthorizedPassesThrough", statusCode: http.StatusUnauthorized, wantPassThrough: true},
+		{name: "ForbiddenPassesThrough", statusCode: http.StatusForbidden, wantPassThrough: true},
+		{name: "PayloadTooLargePassesThrough", statusCode: http.StatusRequestEntityTooLarge, wantPassThrough: true},
+		{name: "UnprocessableEntityPassesThrough", statusCode: http.StatusUnprocessableEntity, wantPassThrough: true},
+		{name: "NotFoundRetriesNextPod", statusCode: http.StatusNotFound, wantPassThrough: false},
+		{name: "TooManyRequestsRetriesNextPod", statusCode: http.StatusTooManyRequests, wantPassThrough: false},
+		{name: "ConflictRetriesNextPod", statusCode: http.StatusConflict, wantPassThrough: false},
+		{name: "RequestTimeoutRetriesNextPod", statusCode: http.StatusRequestTimeout, wantPassThrough: false},
+		{name: "MisdirectedRequestRetriesNextPod", statusCode: http.StatusMisdirectedRequest, wantPassThrough: false},
+		{name: "TooEarlyRetriesNextPod", statusCode: http.StatusTooEarly, wantPassThrough: false},
+		{name: "ServiceUnavailableRetriesNextPod", statusCode: http.StatusServiceUnavailable, wantPassThrough: false},
+		{name: "OKIsNormalResponse", statusCode: http.StatusOK, wantPassThrough: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+				fmt.Fprint(w, "mock upstream response")
+			}))
+			defer backend.Close()
+
+			host, port := splitHostPort(t, backend.URL)
+			req, err := http.NewRequest(http.MethodPost, backend.URL+"/v1/chat/completions", strings.NewReader("{}"))
+			assert.NoError(t, err)
+
+			resp, err := doRequest(req, host, port, time.Second, proxyTransport)
+			assert.NotNil(t, resp, "doRequest must always return the upstream response")
+			defer resp.Body.Close()
+			assert.Equal(t, tt.statusCode, resp.StatusCode)
+			if tt.wantPassThrough {
+				assert.NoError(t, err, "status %d must be treated as a normal response", tt.statusCode)
+			} else {
+				assert.Error(t, err, "status %d must be treated as a forwarding failure so the proxy retries the next pod", tt.statusCode)
+			}
+		})
+	}
+}
+
 // TestRouter_HandlerFunc_UnknownModel_RejectsBeforeQueueing is an
 // integration-style check that a request for a model with no registered
 // ModelRoute is rejected by the shared validation in HandlerFunc, before the

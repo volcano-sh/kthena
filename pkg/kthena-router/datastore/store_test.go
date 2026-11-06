@@ -336,21 +336,21 @@ func TestStoreUpdatePodMetrics(t *testing.T) {
 		podRuntimeInspector: &fakePodRuntimeInspector{
 			metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 				return map[string]float64{
-						utils.KVCacheUsage:      0.8,
-						utils.RequestWaitingNum: 15,
-						utils.RequestRunningNum: 10,
-						utils.TPOT:              120,
-						utils.TTFT:              210,
-					}, map[string]*dto.Histogram{
-						utils.TPOT: {
-							SampleSum:   &sum2,
-							SampleCount: &count2,
-						},
-						utils.TTFT: {
-							SampleSum:   &sum2,
-							SampleCount: &count2,
-						},
-					}
+					utils.KVCacheUsage:      0.8,
+					utils.RequestWaitingNum: 15,
+					utils.RequestRunningNum: 10,
+					utils.TPOT:              120,
+					utils.TTFT:              210,
+				}, map[string]*dto.Histogram{
+					utils.TPOT: {
+						SampleSum:   &sum2,
+						SampleCount: &count2,
+					},
+					utils.TTFT: {
+						SampleSum:   &sum2,
+						SampleCount: &count2,
+					},
+				}
 			},
 		},
 	}
@@ -3062,6 +3062,156 @@ func BenchmarkSelectRuleRegex(b *testing.B) {
 		if _, err := s.selectRule("m", req, rules); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// hostMatchRules returns two rules: the first requires an exact Host match on
+// api.example.com, the second is an unrestricted fallback. selectRule must
+// prefer the Host rule when the request authority matches and fall back to the
+// default rule otherwise.
+func hostMatchRules() []*aiv1alpha1.Rule {
+	return []*aiv1alpha1.Rule{
+		{
+			Name: "by-host",
+			ModelMatch: &aiv1alpha1.ModelMatch{
+				Headers: map[string]*aiv1alpha1.StringMatch{
+					"Host": {Exact: ptr("api.example.com")},
+				},
+			},
+		},
+		{
+			Name: "default",
+		},
+	}
+}
+
+func newHostMatchRequest(t *testing.T, host, forwardedHost string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://x/v1/chat/completions", nil)
+	assert.NoError(t, err)
+	if forwardedHost != "" {
+		req.Header.Set("X-Forwarded-Host", forwardedHost)
+	}
+	req.Host = host
+	return req
+}
+
+// TestSelectRuleHostMatch verifies modelMatch.headers.Host semantics:
+// the request authority (req.Host, falling back to X-Forwarded-Host) is
+// normalized (port stripped, lowercased) before exact/prefix comparison,
+// mirroring the router's HTTPRoute hostname matching.
+func TestSelectRuleHostMatch(t *testing.T) {
+	tests := []struct {
+		name          string
+		rules         []*aiv1alpha1.Rule
+		host          string
+		forwardedHost string
+		wantRuleName  string
+	}{
+		{
+			name:         "ExactHostMatches",
+			rules:        hostMatchRules(),
+			host:         "api.example.com",
+			wantRuleName: "by-host",
+		},
+		{
+			name:         "UpperCaseHostMatchesCaseInsensitively",
+			rules:        hostMatchRules(),
+			host:         "API.Example.COM",
+			wantRuleName: "by-host",
+		},
+		{
+			name:         "HostWithPortMatchesPortlessPattern",
+			rules:        hostMatchRules(),
+			host:         "api.example.com:443",
+			wantRuleName: "by-host",
+		},
+		{
+			name:         "UpperCaseHostWithPortMatches",
+			rules:        hostMatchRules(),
+			host:         "API.Example.COM:8443",
+			wantRuleName: "by-host",
+		},
+		{
+			name:         "PatternWithPortMatchesPortlessHost",
+			rules:        hostMatchRules(),
+			host:         "api.example.com",
+			wantRuleName: "by-host",
+		},
+		{
+			name:         "DifferentHostFallsBackToDefault",
+			rules:        hostMatchRules(),
+			host:         "other.example.com",
+			wantRuleName: "default",
+		},
+		{
+			name:          "FallbackToForwardedHostWhenHostEmpty",
+			rules:         hostMatchRules(),
+			host:          "",
+			forwardedHost: "api.example.com",
+			wantRuleName:  "by-host",
+		},
+		{
+			name:          "EmptyHostAndForwardedHostFallsBack",
+			rules:         hostMatchRules(),
+			host:          "",
+			forwardedHost: "other.example.com",
+			wantRuleName:  "default",
+		},
+		{
+			name: "PrefixHostMatch",
+			rules: []*aiv1alpha1.Rule{
+				{
+					Name: "by-prefix",
+					ModelMatch: &aiv1alpha1.ModelMatch{
+						Headers: map[string]*aiv1alpha1.StringMatch{
+							"Host": {Prefix: ptr("api.")},
+						},
+					},
+				},
+				{Name: "default"},
+			},
+			host:         "api.dev.example.com:8080",
+			wantRuleName: "by-prefix",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &store{}
+			req := newHostMatchRequest(t, tt.host, tt.forwardedHost)
+			rule, err := s.selectRule("m", req, tt.rules)
+			assert.NoError(t, err)
+			assert.NotNil(t, rule)
+			if rule != nil {
+				assert.Equal(t, tt.wantRuleName, rule.Name)
+			}
+		})
+	}
+}
+
+// TestSelectRuleHostMatchPatternWithPort verifies that a pattern configured
+// with an explicit port is normalized the same way, so a portless request
+// authority still matches.
+func TestSelectRuleHostMatchPatternWithPort(t *testing.T) {
+	s := &store{}
+	rules := []*aiv1alpha1.Rule{
+		{
+			Name: "by-host-with-port",
+			ModelMatch: &aiv1alpha1.ModelMatch{
+				Headers: map[string]*aiv1alpha1.StringMatch{
+					"Host": {Exact: ptr("api.example.com:443")},
+				},
+			},
+		},
+		{Name: "default"},
+	}
+
+	req := newHostMatchRequest(t, "api.example.com", "")
+	rule, err := s.selectRule("m", req, rules)
+	assert.NoError(t, err)
+	assert.NotNil(t, rule)
+	if rule != nil {
+		assert.Equal(t, "by-host-with-port", rule.Name)
 	}
 }
 
