@@ -25,8 +25,8 @@ TEST_CATEGORY=${TEST_CATEGORY:-all}
 echo "Creating Kind cluster: ${CLUSTER_NAME}"
 kind create cluster --name "${CLUSTER_NAME}"
 
-kind get kubeconfig --name "${CLUSTER_NAME}" > /tmp/kubeconfig-e2e
-export KUBECONFIG=/tmp/kubeconfig-e2e
+kind get kubeconfig --name "${CLUSTER_NAME}" > "${KUBECONFIG_E2E:-/tmp/kubeconfig-e2e}"
+export KUBECONFIG="${KUBECONFIG_E2E:-/tmp/kubeconfig-e2e}"
 
 echo "Kind cluster '${CLUSTER_NAME}' created successfully"
 
@@ -34,13 +34,26 @@ echo "Waiting for cluster to be ready..."
 kubectl wait --for=condition=Ready nodes --all --timeout=300s
 
 echo "Start to build Docker images"
-make docker-build-all HUB=${HUB} TAG=${TAG}
-
-echo "Loading Docker images into Kind cluster"
-kind load docker-image ${HUB}/kthena-router:${TAG} --name "${CLUSTER_NAME}"
-kind load docker-image ${HUB}/kthena-controller-manager:${TAG} --name "${CLUSTER_NAME}"
-kind load docker-image ${HUB}/downloader:${TAG} --name "${CLUSTER_NAME}"
-kind load docker-image ${HUB}/runtime:${TAG} --name "${CLUSTER_NAME}"
+case "${TEST_CATEGORY}" in
+  tokenizer)
+    # The downloader and runtime images are stored only in a ConfigMap by the chart;
+    # no pods pull them during tokenizer E2E (no workload resources are created).
+    # Build and load only the images that tokenizer tests actually need.
+    make docker-build-router HUB=${HUB} TAG=${TAG}
+    make docker-build-controller HUB=${HUB} TAG=${TAG}
+    echo "Loading Docker images into Kind cluster"
+    kind load docker-image ${HUB}/kthena-router:${TAG} --name "${CLUSTER_NAME}"
+    kind load docker-image ${HUB}/kthena-controller-manager:${TAG} --name "${CLUSTER_NAME}"
+    ;;
+  *)
+    make docker-build-all HUB=${HUB} TAG=${TAG}
+    echo "Loading Docker images into Kind cluster"
+    kind load docker-image ${HUB}/kthena-router:${TAG} --name "${CLUSTER_NAME}"
+    kind load docker-image ${HUB}/kthena-controller-manager:${TAG} --name "${CLUSTER_NAME}"
+    kind load docker-image ${HUB}/downloader:${TAG} --name "${CLUSTER_NAME}"
+    kind load docker-image ${HUB}/runtime:${TAG} --name "${CLUSTER_NAME}"
+    ;;
+esac
 
 case "${TEST_CATEGORY}" in
   router|all)
@@ -50,17 +63,16 @@ case "${TEST_CATEGORY}" in
     echo "Loading external provider mock image into Kind cluster"
     kind load docker-image "${EXTERNAL_PROVIDER_MOCK_IMAGE}" --name "${CLUSTER_NAME}"
     ;;
-  tokenizer)
+esac
+
+case "${TEST_CATEGORY}" in
+  tokenizer|all)
     echo "Building tokenizer image"
-    TOKENIZER_TARGET="${TOKENIZER_DOCKERFILE:-}"
-    if [ "${TOKENIZER_TARGET}" = "e2e" ]; then
-      make docker-build-tokenizer-e2e IMG_TOKENIZER="${HUB}/kthena-tokenizer:${TAG}"
-    else
-      make docker-build-tokenizer IMG_TOKENIZER="${HUB}/kthena-tokenizer:${TAG}"
-    fi
+    TOKENIZER_IMAGE="${IMG_TOKENIZER:-${HUB}/kthena-tokenizer:${TAG}}"
+    make docker-build-tokenizer-e2e IMG_TOKENIZER="${TOKENIZER_IMAGE}"
     echo "Loading tokenizer image into Kind cluster"
-    kind load docker-image "${HUB}/kthena-tokenizer:${TAG}" --name "${CLUSTER_NAME}"
-    TOKENIZER_ENGINE_MOCK_IMAGE="${TOKENIZER_ENGINE_MOCK_IMAGE:-${HUB}/kthena-tokenizer-engine-mock:${TAG}}"
+    kind load docker-image "${TOKENIZER_IMAGE}" --name "${CLUSTER_NAME}"
+    TOKENIZER_ENGINE_MOCK_IMAGE="${IMG_TOKENIZER_ENGINE_MOCK:-${HUB}/kthena-tokenizer-engine-mock:${TAG}}"
     echo "Building tokenizer engine mock image"
     make docker-build-tokenizer-engine-mock IMG_TOKENIZER_ENGINE_MOCK="${TOKENIZER_ENGINE_MOCK_IMAGE}"
     echo "Loading tokenizer engine mock image into Kind cluster"
@@ -92,8 +104,8 @@ case "${TEST_CATEGORY}" in
     echo "Start to install LeaderWorkerSet CRDs"
     kubectl create -f https://raw.githubusercontent.com/kubernetes-sigs/lws/refs/tags/v0.8.0/charts/lws/crds/leaderworkerset.x-k8s.io_leaderworkersets.yaml
     ;;
-  router)
-    echo "Router tests: no additional CRDs needed"
+  router|tokenizer)
+    echo "No additional CRDs needed for ${TEST_CATEGORY} tests"
     ;;
   all|*)
     echo "Start to install Gateway API CRDs"
@@ -107,4 +119,4 @@ esac
 
 echo "E2E setup completed for category: ${TEST_CATEGORY}"
 echo "Cluster: ${CLUSTER_NAME}"
-echo "KUBECONFIG: /tmp/kubeconfig-e2e"
+echo "KUBECONFIG: ${KUBECONFIG_E2E:-/tmp/kubeconfig-e2e}"

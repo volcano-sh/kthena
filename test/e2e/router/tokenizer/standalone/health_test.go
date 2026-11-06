@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package tokenizer
+package standalone
 
 import (
 	"encoding/json"
@@ -35,7 +35,7 @@ func TestTokenizerHealthEndpoints(t *testing.T) {
 	utils.WaitForTokenizerHealthy(t, testCtx.TokenizerBaseURL, 2*time.Minute)
 
 	t.Run("healthz", func(t *testing.T) {
-		resp, err := http.Get(testCtx.TokenizerBaseURL + "/healthz") //nolint:gosec
+		resp, err := fallbackHTTPClient.Get(testCtx.TokenizerBaseURL + "/healthz") //nolint:gosec
 		require.NoError(t, err)
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -47,12 +47,10 @@ func TestTokenizerHealthEndpoints(t *testing.T) {
 	})
 
 	t.Run("readyz_ready", func(t *testing.T) {
-		// Wait for the stub renderer for tokenizer-test-model to register as ready.
-		pod := utils.GetTokenizerPod(t, testCtx.KubeClient, kthenaNamespace)
-		utils.WaitForTokenizerModelReady(t, testCtx.KubeClient, kthenaNamespace, pod.Name,
+		utils.WaitForTokenizerModelReady(t, testCtx.TokenizerBaseURL,
 			tokenizercontext.ModelServerName, tokenizercontext.TokenizerReadyTimeout)
 
-		resp, err := http.Get(testCtx.TokenizerBaseURL + "/readyz") //nolint:gosec
+		resp, err := fallbackHTTPClient.Get(testCtx.TokenizerBaseURL + "/readyz") //nolint:gosec
 		require.NoError(t, err)
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -67,8 +65,7 @@ func TestTokenizerHealthEndpoints(t *testing.T) {
 // TestTokenizerModelsEndpoint verifies that /models lists the configured model.
 func TestTokenizerModelsEndpoint(t *testing.T) {
 	utils.WaitForTokenizerHealthy(t, testCtx.TokenizerBaseURL, 2*time.Minute)
-	pod := utils.GetTokenizerPod(t, testCtx.KubeClient, kthenaNamespace)
-	utils.WaitForTokenizerModelReady(t, testCtx.KubeClient, kthenaNamespace, pod.Name,
+	utils.WaitForTokenizerModelReady(t, testCtx.TokenizerBaseURL,
 		tokenizercontext.ModelServerName, tokenizercontext.TokenizerReadyTimeout)
 
 	models, err := utils.QueryTokenizerModels(t, testCtx.TokenizerBaseURL)

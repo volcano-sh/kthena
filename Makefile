@@ -1,6 +1,7 @@
 # Image URL to use all building/pushing image targets
 HUB ?= ghcr.io/volcano-sh
 TAG ?= latest
+KUBECONFIG_E2E ?= /tmp/kubeconfig-e2e
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 
 
@@ -97,45 +98,45 @@ test-e2e: ## Run all e2e tests sequentially (legacy).
 		exit 1; \
 	}
 	@echo "Setting up Kind cluster for E2E tests..."
-	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} ./test/e2e/setup.sh
+	@KUBECONFIG_E2E=$(KUBECONFIG_E2E) E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} ./test/e2e/setup.sh
 	@echo "Running E2E tests sequentially..."
-	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=15m
+	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=$(KUBECONFIG_E2E) go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=15m
 	@echo "E2E tests completed"
 
 .PHONY: test-e2e-controller-manager
 test-e2e-controller-manager: ## Run controller-manager e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
-	@TEST_CATEGORY=controller-manager ./test/e2e/setup.sh
-	@KUBECONFIG=/tmp/kubeconfig-e2e bash ./test/e2e/controller-manager/run-tests.sh
+	@KUBECONFIG_E2E=$(KUBECONFIG_E2E) TEST_CATEGORY=controller-manager ./test/e2e/setup.sh
+	@KUBECONFIG=$(KUBECONFIG_E2E) go test -v -timeout=20m ./test/e2e/controller-manager/...
 
 .PHONY: test-e2e-router
 test-e2e-router: ## Run router e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
-	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} TEST_CATEGORY=router ./test/e2e/setup.sh
+	@KUBECONFIG_E2E=$(KUBECONFIG_E2E) E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} TEST_CATEGORY=router ./test/e2e/setup.sh
 	@go test -v ./test/e2e/external-provider-mock
-	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=18m ./test/e2e/router
+	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=$(KUBECONFIG_E2E) go test -v -timeout=18m ./test/e2e/router
 
 .PHONY: test-e2e-gateway-api
 test-e2e-gateway-api: ## Run gateway-api e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
-	@TEST_CATEGORY=gateway-api ./test/e2e/setup.sh
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/router/gateway-api/...
+	@KUBECONFIG_E2E=$(KUBECONFIG_E2E) TEST_CATEGORY=gateway-api ./test/e2e/setup.sh
+	@KUBECONFIG=$(KUBECONFIG_E2E) go test -v -timeout=10m ./test/e2e/router/gateway-api/...
 
 .PHONY: test-e2e-tokenizer
 test-e2e-tokenizer: ## Run tokenizer service e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
-	@IMG_TOKENIZER=${IMG_TOKENIZER} IMG_TOKENIZER_ENGINE_MOCK=${IMG_TOKENIZER_ENGINE_MOCK} TOKENIZER_DOCKERFILE=e2e TEST_CATEGORY=tokenizer ./test/e2e/setup.sh
-	@IMG_TOKENIZER=${IMG_TOKENIZER} IMG_TOKENIZER_ENGINE_MOCK=${IMG_TOKENIZER_ENGINE_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=20m ./test/e2e/router/tokenizer/...
+	@KUBECONFIG_E2E=$(KUBECONFIG_E2E) IMG_TOKENIZER=${IMG_TOKENIZER} IMG_TOKENIZER_ENGINE_MOCK=${IMG_TOKENIZER_ENGINE_MOCK} TEST_CATEGORY=tokenizer ./test/e2e/setup.sh
+	@IMG_TOKENIZER=${IMG_TOKENIZER} IMG_TOKENIZER_ENGINE_MOCK=${IMG_TOKENIZER_ENGINE_MOCK} KUBECONFIG=$(KUBECONFIG_E2E) go test -p 1 -v -timeout=20m ./test/e2e/router/tokenizer/...
 
 .PHONY: test-e2e-gateway-inference-extension
 test-e2e-gateway-inference-extension: ## Run gateway-inference-extension e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
-	@TEST_CATEGORY=gateway-inference-extension ./test/e2e/setup.sh
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=10m ./test/e2e/router/gateway-inference-extension/...
+	@KUBECONFIG_E2E=$(KUBECONFIG_E2E) TEST_CATEGORY=gateway-inference-extension ./test/e2e/setup.sh
+	@KUBECONFIG=$(KUBECONFIG_E2E) go test -v -timeout=10m ./test/e2e/router/gateway-inference-extension/...
 
 .PHONY: test-e2e-cleanup
 test-e2e-cleanup: ## Clean up the Kind cluster used for E2E tests.
-	@./test/e2e/cleanup.sh
+	@KUBECONFIG_E2E=$(KUBECONFIG_E2E) ./test/e2e/cleanup.sh
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -200,7 +201,7 @@ docker-build-e2e-external-provider-mock:
 
 .PHONY: docker-build-tokenizer-engine-mock
 docker-build-tokenizer-engine-mock:
-	$(CONTAINER_TOOL) build -t ${IMG_TOKENIZER_ENGINE_MOCK} -f docker/Dockerfile.kthena-tokenizer-engine-mock .
+	$(CONTAINER_TOOL) build -t ${IMG_TOKENIZER_ENGINE_MOCK} -f test/e2e/tokenizer-engine-mock/Dockerfile .
 
 .PHONY: docker-build-tokenizer-e2e
 docker-build-tokenizer-e2e: ## Build tokenizer image for E2E tests (uses distroless, no vLLM base required).

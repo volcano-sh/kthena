@@ -14,9 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package tokenizer contains E2E tests for the kthena-tokenizer service in both
-// standalone and sidecar deployment modes.
-package tokenizer
+// Package standalone contains E2E tests for the kthena-tokenizer service in standalone mode.
+//
+// This package and the sibling sidecar package share the same Kind cluster, namespace ("dev"),
+// and Helm release name ("kthena"). They must not run concurrently. Always invoke via:
+//
+//	go test -p 1 -v -timeout=20m ./test/e2e/router/tokenizer/...
+//
+// The canonical workflow is: make test-e2e-tokenizer
+package standalone
 
 import (
 	"fmt"
@@ -44,10 +50,7 @@ func TestMain(m *testing.M) {
 
 	config.TokenizerEnabled = true
 	config.TokenizerMode = "standalone"
-	// Override VLLM_RENDER_COMMAND to the in-image stub so the tokenizer service can
-	// launch renderers without a real vllm installation.
 	config.TokenizerRenderCommand = "/usr/local/bin/kthena-tokenizer-stub"
-	// Map the test model to a dummy source; the stub ignores the source argument.
 	config.TokenizerModels = map[string]string{
 		"tokenizer-test-model": "stub-source",
 	}
@@ -61,14 +64,18 @@ func TestMain(m *testing.M) {
 	testCtx, err = tokenizercontext.NewTokenizerTestContextWithPortForward(testNamespace, kthenaNamespace)
 	if err != nil {
 		fmt.Printf("Failed to create tokenizer test context: %v\n", err)
-		_ = framework.UninstallKthena(config.Namespace)
+		if uerr := framework.UninstallKthena(config.Namespace); uerr != nil {
+			fmt.Printf("Failed to uninstall kthena: %v\n", uerr)
+		}
 		os.Exit(1)
 	}
 
 	if err := testCtx.CreateTestNamespace(); err != nil {
 		fmt.Printf("Failed to create test namespace: %v\n", err)
 		testCtx.ClosePortForward()
-		_ = framework.UninstallKthena(config.Namespace)
+		if uerr := framework.UninstallKthena(config.Namespace); uerr != nil {
+			fmt.Printf("Failed to uninstall kthena: %v\n", uerr)
+		}
 		os.Exit(1)
 	}
 
@@ -76,7 +83,9 @@ func TestMain(m *testing.M) {
 		fmt.Printf("Failed to setup common components: %v\n", err)
 		_ = testCtx.DeleteTestNamespace()
 		testCtx.ClosePortForward()
-		_ = framework.UninstallKthena(config.Namespace)
+		if uerr := framework.UninstallKthena(config.Namespace); uerr != nil {
+			fmt.Printf("Failed to uninstall kthena: %v\n", uerr)
+		}
 		os.Exit(1)
 	}
 

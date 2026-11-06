@@ -20,6 +20,10 @@ limitations under the License.
 //	kthena-tokenizer-stub <source> --served-model-name <model> --host <h> --port <p>
 //
 // and serves a tiny HTTP API so tests can assert tokenizer lifecycle and traffic.
+//
+// This binary is intentionally kept under test/e2e/ and is only compiled into
+// the E2E test image (Dockerfile.kthena-tokenizer-e2e). It must not be included
+// in the production image.
 package main
 
 import (
@@ -30,6 +34,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -52,10 +57,27 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"status":"ok"}`)
 	})
-	mux.HandleFunc("/tokenize", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/tokenize", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&requestCount, 1)
+		var req struct {
+			Prompt string `json:"prompt"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		words := strings.Fields(req.Prompt)
+		n := len(words)
+		if n == 0 {
+			n = 1
+		}
+		tokens := make([]int, n)
+		for i := range tokens {
+			tokens[i] = i + 1
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"count":3,"max_model_len":4096,"tokens":[1,2,3]}`)
+		_ = json.NewEncoder(w).Encode(struct {
+			Count       int   `json:"count"`
+			MaxModelLen int   `json:"max_model_len"`
+			Tokens      []int `json:"tokens"`
+		}{Count: n, MaxModelLen: 4096, Tokens: tokens})
 	})
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

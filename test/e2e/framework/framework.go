@@ -225,11 +225,14 @@ func UninstallKthena(namespace string) error {
 		metricsPFForwarder = nil
 	}
 
-	cmd := exec.Command("helm", "uninstall", "kthena", "--namespace", namespace)
+	// --ignore-not-found makes helm exit 0 when the release does not exist,
+	// so any remaining error is a genuine failure (cluster unreachable, etc.).
+	cmd := exec.Command("helm", "uninstall", "kthena", "--namespace", namespace, "--ignore-not-found")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	// Ignore error if already uninstalled
-	_ = cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to uninstall kthena from namespace %s: %w", namespace, err)
+	}
 
 	// Kill any leftover port-forward processes as a fallback
 	_ = exec.Command("pkill", "-f", "kubectl port-forward.*svc/kthena-router").Run()

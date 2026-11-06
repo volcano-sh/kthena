@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package tokenizer
+package standalone
 
 import (
 	"context"
@@ -32,10 +32,9 @@ import (
 )
 
 // TestTokenizerModelLoadLog verifies that after TestMain's SetupCommonComponents creates
-// the ModelServer, the tokenizer logs "Tokenizer for model tokenizer-test-model ready at".
+// the ModelServer, the tokenizer's /models endpoint reports the model as ready.
 func TestTokenizerModelLoadLog(t *testing.T) {
-	pod := utils.GetTokenizerPod(t, testCtx.KubeClient, kthenaNamespace)
-	utils.WaitForTokenizerModelReady(t, testCtx.KubeClient, kthenaNamespace, pod.Name,
+	utils.WaitForTokenizerModelReady(t, testCtx.TokenizerBaseURL,
 		tokenizercontext.ModelServerName, tokenizercontext.TokenizerReadyTimeout)
 }
 
@@ -44,8 +43,7 @@ func TestTokenizerModelLoadLog(t *testing.T) {
 func TestTokenizerModelUnloadLog(t *testing.T) {
 	pod := utils.GetTokenizerPod(t, testCtx.KubeClient, kthenaNamespace)
 
-	// Ensure the renderer is ready before we delete the ModelServer.
-	utils.WaitForTokenizerModelReady(t, testCtx.KubeClient, kthenaNamespace, pod.Name,
+	utils.WaitForTokenizerModelReady(t, testCtx.TokenizerBaseURL,
 		tokenizercontext.ModelServerName, tokenizercontext.TokenizerReadyTimeout)
 
 	ctx := context.Background()
@@ -54,12 +52,13 @@ func TestTokenizerModelUnloadLog(t *testing.T) {
 	require.NoError(t, err, "delete common ModelServer")
 
 	t.Cleanup(func() {
-		// Recreate the ModelServer so health/tokenize tests that run after this work.
 		ms := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](
 			filepath.Join(tokenizercontext.TestDataDir, "ModelServer-tokenizer-test.yaml"))
 		ms.Namespace = testCtx.Namespace
-		_, _ = testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testCtx.Namespace).Create(
-			context.Background(), ms, metav1.CreateOptions{})
+		if _, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testCtx.Namespace).Create(
+			context.Background(), ms, metav1.CreateOptions{}); err != nil {
+			t.Errorf("cleanup: recreate ModelServer %s: %v", tokenizercontext.ModelServerName, err)
+		}
 	})
 
 	utils.WaitForPodLogsContain(t, testCtx.KubeClient, kthenaNamespace, pod.Name,
@@ -74,7 +73,6 @@ func TestTokenizerModelUnloadLog(t *testing.T) {
 // never set to a non-nil value. Deleting the ModelServer while the renderer is in that
 // state must NOT panic — the nil guard at manager.go:131 protects r.cancel.
 func TestTokenizerFailedStartupNoPanic(t *testing.T) {
-	// Patch VLLM_RENDER_COMMAND to a deliberately missing binary so cmd.Start() fails.
 	const badCmd = "/nonexistent-binary-e2e-test"
 	require.NoError(t, patchTokenizerRenderCommand(t, kthenaNamespace, badCmd))
 
@@ -83,16 +81,18 @@ func TestTokenizerFailedStartupNoPanic(t *testing.T) {
 		ms := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer](
 			filepath.Join(tokenizercontext.TestDataDir, "ModelServer-tokenizer-test.yaml"))
 		ms.Namespace = testCtx.Namespace
-		_, _ = testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testCtx.Namespace).Create(
-			context.Background(), ms, metav1.CreateOptions{})
+		if _, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testCtx.Namespace).Create(
+			context.Background(), ms, metav1.CreateOptions{}); err != nil {
+			t.Errorf("cleanup: recreate ModelServer %s: %v", tokenizercontext.ModelServerName, err)
+		}
 	})
 	t.Cleanup(func() {
-		_ = patchTokenizerRenderCommand(t, kthenaNamespace, "/usr/local/bin/kthena-tokenizer-stub")
+		if err := patchTokenizerRenderCommand(t, kthenaNamespace, "/usr/local/bin/kthena-tokenizer-stub"); err != nil {
+			t.Errorf("cleanup: restore tokenizer render command: %v", err)
+		}
 	})
 
 	// Poll until a ready pod with the patched env var appears.
-	// GetTokenizerPod may transiently return a pod from the previous generation
-	// if the API server hasn't yet GC'd it — retry until we see the new one.
 	var pod *corev1.Pod
 	require.Eventually(t, func() bool {
 		ctx2 := context.Background()
@@ -122,16 +122,12 @@ func TestTokenizerFailedStartupNoPanic(t *testing.T) {
 	}, 2*time.Minute, 2*time.Second,
 		"a ready pod with VLLM_RENDER_COMMAND=%q must appear after rollout", badCmd)
 
-	// The watcher syncs the common ModelServer ("tokenizer-test-model") to the new pod.
-	// The manager attempts to launch the renderer with the bad binary — cmd.Start() fails
-	// immediately, leaving r.cancel == nil.
 	utils.WaitForPodLogsContain(t, testCtx.KubeClient, kthenaNamespace, pod.Name,
 		2*time.Minute,
 		[]string{fmt.Sprintf("Renderer for model %s failed:", tokenizercontext.ModelServerName)},
 		2*time.Minute, 2*time.Second,
 	)
 
-	// Record the container restart count now; a panic would have incremented it.
 	var restartsBefore int32
 	if p, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).Get(
 		context.Background(), pod.Name, metav1.GetOptions{}); err == nil {
@@ -144,28 +140,36 @@ func TestTokenizerFailedStartupNoPanic(t *testing.T) {
 	}
 
 	// Delete the common ModelServer while the renderer is in StatusFailed (r.cancel == nil).
-	// Without the nil guard at manager.go:131, calling r.cancel() would panic.
 	require.NoError(t, testCtx.KthenaClient.NetworkingV1alpha1().ModelServers(testCtx.Namespace).Delete(
 		context.Background(), tokenizercontext.ModelServerName, metav1.DeleteOptions{}))
 
-	// Confirm the manager handled the deletion cleanly — unload log must appear.
 	utils.WaitForPodLogsContain(t, testCtx.KubeClient, kthenaNamespace, pod.Name,
 		2*time.Minute,
 		[]string{fmt.Sprintf("Unloading tokenizer for model %s", tokenizercontext.ModelServerName)},
 		2*time.Minute, 2*time.Second,
 	)
 
-	// Pod must still be running and container restart count must be unchanged;
-	// a panic would have crashed the container and incremented the restart count.
-	require.Eventually(t, func() bool {
+	// Verify the container stays Running with no new restarts for the full 30 s window.
+	// require.Never fails as soon as the bad-state condition is met once, which is more
+	// reliable than require.Eventually (which stops at the first healthy observation).
+	require.Never(t, func() bool {
 		p, err := testCtx.KubeClient.CoreV1().Pods(kthenaNamespace).Get(
 			context.Background(), pod.Name, metav1.GetOptions{})
 		if err != nil {
+			t.Logf("pod get error (transient): %v", err)
 			return false
 		}
 		for _, cs := range p.Status.ContainerStatuses {
 			if cs.Name == "tokenizer" || cs.Name == "kthena-tokenizer" {
-				return cs.RestartCount == restartsBefore && cs.State.Running != nil
+				if cs.RestartCount > restartsBefore {
+					t.Logf("unexpected restart: count %d > %d", cs.RestartCount, restartsBefore)
+					return true
+				}
+				if cs.State.Running == nil {
+					t.Logf("unexpected non-running state: %+v", cs.State)
+					return true
+				}
+				return false
 			}
 		}
 		return false

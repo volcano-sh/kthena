@@ -60,14 +60,38 @@ func GetTokenizerPod(t *testing.T, kubeClient kubernetes.Interface, namespace st
 	return nil
 }
 
-// WaitForTokenizerModelReady polls the tokenizer pod logs until it logs that the model is ready.
-func WaitForTokenizerModelReady(t *testing.T, kubeClient kubernetes.Interface, namespace, podName, model string, timeout time.Duration) {
+// WaitForTokenizerModelReady polls GET /models on the tokenizer service until the given
+// model appears with status "ready". This is more reliable than log polling because the
+// "ready" log is emitted only once at startup and can fall outside a log window.
+func WaitForTokenizerModelReady(t *testing.T, baseURL, model string, timeout time.Duration) {
 	t.Helper()
-	WaitForPodLogsContain(t, kubeClient, namespace, podName,
-		timeout, // use the full timeout as the "since" window
-		[]string{fmt.Sprintf("Tokenizer for model %s ready at", model)},
-		timeout, defaultPollingInterval,
-	)
+	require.Eventually(t, func() bool {
+		resp, err := tokenizerHTTPClient.Get(baseURL + "/models") //nolint:gosec
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+		var out struct {
+			Models []struct {
+				Model  string `json:"model"`
+				Status string `json:"status"`
+			} `json:"models"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return false
+		}
+		for _, m := range out.Models {
+			if m.Model == model && m.Status == "ready" {
+				t.Logf("Tokenizer for model %s ready at %s", model, baseURL)
+				return true
+			}
+		}
+		return false
+	}, timeout, defaultPollingInterval,
+		"tokenizer model %q did not become ready at %s within %s", model, baseURL, timeout)
 }
 
 // TokenizeRequest is the body sent to the tokenizer service's /tokenize endpoint.

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package tokenizer
+package standalone
 
 import (
 	"context"
@@ -25,7 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	backendmetrics "github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 	tokenizercontext "github.com/volcano-sh/kthena/test/e2e/router/tokenizer/context"
@@ -35,6 +34,10 @@ import (
 )
 
 const kvCacheTokenizeErrorMetric = "kthena_router_kvcache_aware_errors_total"
+
+// fallbackHTTPClient is used for direct HTTP calls to renderer subprocesses and engine
+// mocks. The 10-second timeout prevents a stalled port-forward from blocking indefinitely.
+var fallbackHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 // schedulerWithTokenizer returns a kvcache-aware scheduler YAML configured to call the
 // standalone kthena-tokenizer service. fallbackToEngine controls whether the router falls
@@ -117,11 +120,9 @@ const schedulerWithBrokenTokenizerWithFallback = `scheduler:
 
 // rendererPortForModel queries the tokenizer service's /models endpoint and returns
 // the renderer subprocess's port for modelName, or 0 if the model is not yet ready.
-// The renderer base port defaults to 8200 (RENDERER_BASE_PORT env var); the port is
-// allocated dynamically and published in RendererInfo.Port.
 func rendererPortForModel(t *testing.T, serviceBaseURL, modelName string) int {
 	t.Helper()
-	resp, err := http.Get(serviceBaseURL + "/models") //nolint:gosec
+	resp, err := fallbackHTTPClient.Get(serviceBaseURL + "/models") //nolint:gosec
 	if err != nil {
 		return 0
 	}
@@ -146,15 +147,7 @@ func rendererPortForModel(t *testing.T, serviceBaseURL, modelName string) int {
 
 // rendererStubStats discovers the renderer subprocess port via the tokenizer service's
 // /models endpoint, opens a pod-level port-forward to that port, and returns the /stats
-// request counter.
-//
-// Why this works: the renderer subprocess (kthena-tokenizer-stub) is started with
-// --host 127.0.0.1 by the RendererManager but binds to 0.0.0.0 because its srv.Addr is
-// ":port". Kubernetes port-forward operates within the pod's network namespace, so it
-// reaches any port the process is listening on regardless of bind address. The renderer
-// port is dynamic (RendererBasePort=8200 by default) and is exposed via /models.
-//
-// Returns -1 on any error so callers can distinguish "unavailable" from zero requests.
+// request counter. Returns -1 on any error.
 func rendererStubStats(t *testing.T, podNamespace, podName, serviceBaseURL, modelName string) int64 {
 	t.Helper()
 	port := rendererPortForModel(t, serviceBaseURL, modelName)
@@ -170,7 +163,7 @@ func rendererStubStats(t *testing.T, podNamespace, podName, serviceBaseURL, mode
 	}
 	defer pf.Close()
 
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/stats", localPort)) //nolint:gosec
+	resp, err := fallbackHTTPClient.Get(fmt.Sprintf("http://127.0.0.1:%s/stats", localPort)) //nolint:gosec
 	if err != nil {
 		t.Logf("rendererStubStats: GET /stats: %v", err)
 		return -1
@@ -187,10 +180,7 @@ func rendererStubStats(t *testing.T, podNamespace, podName, serviceBaseURL, mode
 }
 
 // engineMockStats port-forwards to a ready engine mock pod (app=tokenizer-test-engine,
-// port 8000) and returns the /tokenize-stats request counter. The engine mock increments
-// this counter for every /tokenize call it receives, which happens when the router falls
-// back from the tokenizer service to engine-side tokenization.
-// Returns -1 on any error.
+// port 8000) and returns the /tokenize-stats request counter. Returns -1 on any error.
 func engineMockStats(t *testing.T) int64 {
 	t.Helper()
 	ctx := context.Background()
@@ -220,7 +210,7 @@ func engineMockStats(t *testing.T) int64 {
 	}
 	defer pf.Close()
 
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/tokenize-stats", localPort)) //nolint:gosec
+	resp, err := fallbackHTTPClient.Get(fmt.Sprintf("http://127.0.0.1:%s/tokenize-stats", localPort)) //nolint:gosec
 	if err != nil {
 		t.Logf("engineMockStats: GET /tokenize-stats: %v", err)
 		return -1
@@ -271,29 +261,24 @@ func tokenizeErrorCountURL(t *testing.T, metricsURL string) float64 {
 func TestRouterKVCacheAwareWithTokenizerService(t *testing.T) {
 	utils.WaitForTokenizerHealthy(t, testCtx.TokenizerBaseURL, 2*time.Minute)
 	tokenizerPod := utils.GetTokenizerPod(t, testCtx.KubeClient, kthenaNamespace)
-	utils.WaitForTokenizerModelReady(t, testCtx.KubeClient, kthenaNamespace, tokenizerPod.Name,
+	utils.WaitForTokenizerModelReady(t, testCtx.TokenizerBaseURL,
 		tokenizercontext.ModelServerName, tokenizercontext.TokenizerReadyTimeout)
 
 	t.Run("tokenizer_service_invoked_success", func(t *testing.T) {
-		// Renderer stats BEFORE any router config is applied (baseline may be > 0 from prior tests).
 		rendBefore := rendererStubStats(t, kthenaNamespace, tokenizerPod.Name,
 			testCtx.TokenizerBaseURL, tokenizercontext.ModelServerName)
 		require.GreaterOrEqual(t, rendBefore, int64(0),
 			"renderer must be reachable and report stats before configuring the router")
 
-		// fallbackToEngine=false: if the service call fails, an error metric appears.
-		// Seeing the renderer stats grow AND zero error metric together proves success.
 		chatURL, metricsURL, restore := utils.ApplySchedulerConfig(t,
 			testCtx.KubeClient, testCtx.KthenaClient,
 			kthenaNamespace, testCtx.Namespace,
 			schedulerWithTokenizer(kthenaNamespace, false),
 			tokenizercontext.ModelServerName, "tokenizer-test-model")
 		t.Cleanup(restore)
-		// Router just restarted: counters are 0 in the new process.
 
 		utils.SendRouterChatRequests(t, chatURL, "tokenizer-test-model", "hello tokenizer", 3)
 
-		// Renderer /stats grew: the router called the tokenizer service, which proxied to the stub.
 		require.Eventually(t, func() bool {
 			after := rendererStubStats(t, kthenaNamespace, tokenizerPod.Name,
 				testCtx.TokenizerBaseURL, tokenizercontext.ModelServerName)
@@ -301,7 +286,6 @@ func TestRouterKVCacheAwareWithTokenizerService(t *testing.T) {
 		}, 30*time.Second, 2*time.Second,
 			"renderer stub /stats should grow: router → tokenizer service → renderer subprocess")
 
-		// Error metric must still be 0 (fresh router, successful tokenize path).
 		require.Equal(t, float64(0), tokenizeErrorCountURL(t, metricsURL),
 			"no kvcache tokenize error should occur when the tokenizer service succeeds")
 	})
@@ -316,18 +300,14 @@ func TestRouterKVCacheAwareWithTokenizerService(t *testing.T) {
 			schedulerWithBrokenTokenizerWithFallback,
 			tokenizercontext.ModelServerName, "tokenizer-test-model")
 		t.Cleanup(restore)
-		// Router just restarted: counters are 0.
 
-		// Chat succeeds: fallback calls engine pod's /tokenize.
 		utils.SendRouterChatRequests(t, chatURL, "tokenizer-test-model", "hello engine fallback", 3)
 
-		// Engine mock received /tokenize calls as the fallback.
 		require.Eventually(t, func() bool {
 			return engineMockStats(t) > engineBefore
 		}, 30*time.Second, 2*time.Second,
 			"engine mock /tokenize-stats must grow when router falls back to engine tokenization")
 
-		// No error metric: TokenizePrompt returned tokens via engine fallback; Score did not record an error.
 		require.Equal(t, float64(0), tokenizeErrorCountURL(t, metricsURL),
 			"kvcache error metric must be 0 when fallback to engine succeeds")
 	})
@@ -339,20 +319,17 @@ func TestRouterKVCacheAwareWithTokenizerService(t *testing.T) {
 			schedulerWithBrokenTokenizerNoFallback,
 			tokenizercontext.ModelServerName, "tokenizer-test-model")
 		t.Cleanup(restore)
-		// Router just restarted: counters are 0.
 
 		engineBefore := engineMockStats(t)
+		require.GreaterOrEqual(t, engineBefore, int64(0), "engine mock must be reachable before asserting it was not used")
 
-		// Chat routes despite tokenize failure: Score() returns nil, routing proceeds.
 		utils.SendRouterChatRequests(t, chatURL, "tokenizer-test-model", "hello no fallback", 3)
 
-		// Error metric increments: tokenize failed and fallback was disabled.
 		require.Eventually(t, func() bool {
 			return tokenizeErrorCountURL(t, metricsURL) > 0
 		}, 30*time.Second, 2*time.Second,
 			"kthena_router_kvcache_aware_errors_total{stage=tokenize} must increment when tokenizer unreachable and fallbackToEngine=false")
 
-		// Engine was NOT used for tokenization (fallbackToEngine=false returns error before engine path).
 		require.Equal(t, engineBefore, engineMockStats(t),
 			"engine mock /tokenize-stats must NOT increase when fallbackToEngine=false")
 	})
@@ -367,16 +344,4 @@ func TestRouterKVCacheAwareWithTokenizerService(t *testing.T) {
 
 		utils.SendRouterChatRequests(t, chatURL, "tokenizer-test-model", "hello no tokenizer", 3)
 	})
-}
-
-// TestTokenizerServiceDirectUnknownModel verifies that the tokenizer service returns 503
-// for a model without a registered renderer. This is a direct-service test that does not
-// exercise the router path.
-func TestTokenizerServiceDirectUnknownModel(t *testing.T) {
-	utils.WaitForTokenizerHealthy(t, testCtx.TokenizerBaseURL, 2*time.Minute)
-
-	status, _, err := utils.SendTokenizeRequest(t, testCtx.TokenizerBaseURL, "unknown-model-xyz", "test prompt")
-	assert.Error(t, err, "expected non-200 response for unknown model")
-	assert.Equal(t, http.StatusServiceUnavailable, status,
-		"tokenizer must return 503 for a model without a registered renderer")
 }

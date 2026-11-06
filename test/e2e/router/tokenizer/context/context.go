@@ -52,9 +52,30 @@ type TokenizerTestContext struct {
 	// TokenizerBaseURL is the port-forwarded URL to the standalone tokenizer service.
 	TokenizerBaseURL string
 	tokenizerPF      utils.PortForwarder
-	// tokenizerLocalPort is the local port used for the tokenizer port-forward.
-	// Stored so RefreshPortForward can reuse the same port after a kthena reinstall.
-	tokenizerLocalPort string
+}
+
+// NewSidecarTestContext creates a test context for sidecar-mode tests.
+// Unlike NewTokenizerTestContextWithPortForward, it does not set up a port-forward
+// to a standalone tokenizer service (there is none in sidecar mode).
+func NewSidecarTestContext(namespace, kthenaNamespace string) (*TokenizerTestContext, error) {
+	config, err := utils.GetKubeConfig()
+	if err != nil {
+		return nil, fmt.Errorf("get kubeconfig: %w", err)
+	}
+	kubeClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("create kube client: %w", err)
+	}
+	kthenaClient, err := clientset.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("create kthena client: %w", err)
+	}
+	return &TokenizerTestContext{
+		KubeClient:      kubeClient,
+		KthenaClient:    kthenaClient,
+		Namespace:       namespace,
+		KthenaNamespace: kthenaNamespace,
+	}, nil
 }
 
 // NewTokenizerTestContextWithPortForward creates the context and allocates a local port for
@@ -85,13 +106,12 @@ func NewTokenizerTestContextWithPortForward(namespace, kthenaNamespace string) (
 	}
 
 	return &TokenizerTestContext{
-		KubeClient:         kubeClient,
-		KthenaClient:       kthenaClient,
-		Namespace:          namespace,
-		KthenaNamespace:    kthenaNamespace,
-		TokenizerBaseURL:   fmt.Sprintf("http://127.0.0.1:%s", localPort),
-		tokenizerPF:        pf,
-		tokenizerLocalPort: localPort,
+		KubeClient:       kubeClient,
+		KthenaClient:     kthenaClient,
+		Namespace:        namespace,
+		KthenaNamespace:  kthenaNamespace,
+		TokenizerBaseURL: fmt.Sprintf("http://127.0.0.1:%s", localPort),
+		tokenizerPF:      pf,
 	}, nil
 }
 
@@ -101,19 +121,6 @@ func (c *TokenizerTestContext) ClosePortForward() {
 		c.tokenizerPF.Close()
 		c.tokenizerPF = nil
 	}
-}
-
-// RefreshPortForward closes the existing tokenizer port-forward and opens a new one
-// on the same local port. Call this after any kthena reinstall that replaces the
-// tokenizer pod, which breaks the tunnel the TestMain port-forward was established on.
-func (c *TokenizerTestContext) RefreshPortForward() error {
-	c.ClosePortForward()
-	pf, err := utils.SetupPortForward(c.KthenaNamespace, utils.TokenizerServiceName, c.tokenizerLocalPort, utils.TokenizerPort)
-	if err != nil {
-		return fmt.Errorf("refresh tokenizer port-forward on :%s: %w", c.tokenizerLocalPort, err)
-	}
-	c.tokenizerPF = pf
-	return nil
 }
 
 // CreateTestNamespace creates the test namespace.
