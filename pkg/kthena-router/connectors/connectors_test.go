@@ -66,6 +66,14 @@ func TestFactory(t *testing.T) {
 		t.Errorf("Expected NIXL connector name 'nixl', got '%s'", nixlConnector.Name())
 	}
 
+	trtConnector := factory.GetConnector(ConnectorTypeTensorRTLLM)
+	if trtConnector == nil {
+		t.Error("Expected TensorRT-LLM connector to be registered")
+	}
+	if trtConnector != nil && trtConnector.Name() != "tensorrtllm" {
+		t.Errorf("Expected TensorRT-LLM connector name 'tensorrtllm', got '%s'", trtConnector.Name())
+	}
+
 	// Test LMCache connector (currently uses HTTP implementation)
 	lmcacheConnector := factory.GetConnector(v1alpha1.ConnectorTypeLMCache)
 	if lmcacheConnector == nil {
@@ -173,9 +181,9 @@ func TestHTTPConnectorProxy(t *testing.T) {
 			if err != nil {
 				t.Errorf("Failed to parse decode request body: %v", err)
 			} else {
-				// Decode request should have include_usage set for non-streaming requests
-				if includeUsage, ok := decodeBody["include_usage"]; !ok || includeUsage != true {
-					t.Errorf("Expected decode request include_usage to be true, got %v", includeUsage)
+				// Non-streaming must not inject top-level include_usage.
+				if _, ok := decodeBody["include_usage"]; ok {
+					t.Errorf("Expected decode request to omit include_usage, got %v", decodeBody["include_usage"])
 				}
 				// Should preserve original max_tokens
 				if maxTokens, ok := decodeBody["max_tokens"]; !ok {
@@ -419,9 +427,9 @@ func TestHTTPConnectorProxy(t *testing.T) {
 				} else if maxCompletionTokensFloat, ok := maxCompletionTokens.(float64); !ok || maxCompletionTokensFloat != 50.0 {
 					t.Errorf("Expected decode request max_completion_tokens to be 50, got %v", maxCompletionTokens)
 				}
-				// Decode request should have include_usage for non-streaming
-				if includeUsage, ok := decodeBody["include_usage"]; !ok || includeUsage != true {
-					t.Errorf("Expected decode request include_usage to be true, got %v", includeUsage)
+				// Non-streaming must not inject top-level include_usage.
+				if _, ok := decodeBody["include_usage"]; ok {
+					t.Errorf("Expected decode request to omit include_usage, got %v", decodeBody["include_usage"])
 				}
 			}
 		}

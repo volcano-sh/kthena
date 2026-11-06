@@ -340,12 +340,11 @@ func AddTokenUsage(c *gin.Context, reqBody map[string]interface{}) map[string]in
 			// add stream token usage to context
 			c.Set(common.TokenUsageKey, true)
 		}
-	} else {
-		// For non-streaming requests, ensure we request usage information
-		// Most OpenAI-compatible APIs return usage by default for non-streaming,
-		// but we can be explicit about it
-		reqBody["include_usage"] = true
 	}
+	// Non-streaming chat/completions already return usage by default on
+	// OpenAI-compatible servers. Do not inject a top-level include_usage
+	// field: it is not part of the Chat Completions schema and strict
+	// backends (e.g. TensorRT-LLM trtllm-serve) reject it as an unknown field.
 	return reqBody
 }
 

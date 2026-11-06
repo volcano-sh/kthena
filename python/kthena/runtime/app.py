@@ -47,6 +47,7 @@ from kthena.runtime.redis_client import get_redis_client
 from kthena.runtime.standard import MetricStandard, EngineType
 from kthena.runtime.zmq_subscriber import get_vllm_zmq_subscriber
 from kthena.runtime.sglang_zmq_subscriber import get_sglang_zmq_subscriber
+from kthena.runtime.tensorrtllm_kv_events import get_tensorrtllm_kv_event_poller
 
 # KV event sync backend: "redis" writes standardized block hashes to Redis;
 # "memory" streams them directly to registered router instances.
@@ -70,7 +71,9 @@ class AppState:
         self.event_publisher = None
         self.vllm_zmq_subscriber = None
         self.sglang_zmq_subscriber = None
+        self.tensorrtllm_kv_poller = None
         self.metric_standard: Optional[MetricStandard] = None
+        self.engine_base_url: Optional[str] = None
         self.engine_metrics_url: Optional[str] = None
         self.pod_identifier: Optional[str] = None
         self.model_name: Optional[str] = None
@@ -143,7 +146,9 @@ async def lifespan(app: FastAPI):
 
         engine = state.metric_standard.engine if state.metric_standard else None
 
-        if pod_identifier and model_name and engine == EngineType.VLLM:
+        if pod_identifier and model_name and engine in (
+                EngineType.VLLM, EngineType.TENSORRTLLM):
+            # TensorRT-LLM buffered events are normalized to vLLM event types.
             vllm_kv_cache_handler = get_vllm_kv_cache_handler(state.memory_kv_manager)
             for event_type in (
                 EventType.VLLM_BLOCK_STORED,
@@ -151,7 +156,10 @@ async def lifespan(app: FastAPI):
                 EventType.VLLM_ALL_BLOCKS_CLEARED,
             ):
                 event_publisher.subscribe(event_type, vllm_kv_cache_handler)
-            logger.info("vLLM KV-cache event handler registered")
+            if engine == EngineType.VLLM:
+                logger.info("vLLM KV-cache event handler registered")
+            else:
+                logger.info("TensorRT-LLM KV-cache event handler registered (vLLM-compatible)")
         elif pod_identifier and model_name and engine == EngineType.SGLANG:
             sglang_kv_cache_handler = get_sglang_kv_cache_handler(state.memory_kv_manager)
             for event_type in (
@@ -173,6 +181,7 @@ async def lifespan(app: FastAPI):
 
     state.vllm_zmq_subscriber = None
     state.sglang_zmq_subscriber = None
+    state.tensorrtllm_kv_poller = None
 
     if (state.metric_standard and
             state.metric_standard.engine == EngineType.VLLM and
@@ -205,6 +214,25 @@ async def lifespan(app: FastAPI):
             logger.info("SGLang ZMQ subscriber initialized successfully")
         except Exception as e:
             logger.warning("Failed to initialize SGLang ZMQ subscriber: %s", e)
+    elif (state.metric_standard and
+          state.metric_standard.engine == EngineType.TENSORRTLLM and
+          state.pod_identifier and
+          state.model_name and
+          state.engine_base_url):
+        try:
+            poller = get_tensorrtllm_kv_event_poller(
+                state.engine_base_url,
+                state.pod_identifier,
+                state.model_name,
+                client=state.client,
+            )
+            poller_task = asyncio.create_task(poller.start())
+            poller_task.add_done_callback(
+                _log_subscriber_task_exception("TensorRT-LLM KV event poller"))
+            state.tensorrtllm_kv_poller = poller
+            logger.info("TensorRT-LLM KV event poller initialized successfully")
+        except Exception as e:
+            logger.warning("Failed to initialize TensorRT-LLM KV event poller: %s", e)
 
     yield
 
@@ -215,6 +243,9 @@ async def lifespan(app: FastAPI):
 
     if state.sglang_zmq_subscriber:
         cleanup_tasks.append(('SGLang ZMQ subscriber', state.sglang_zmq_subscriber.stop()))
+
+    if state.tensorrtllm_kv_poller:
+        cleanup_tasks.append(('TensorRT-LLM KV event poller', state.tensorrtllm_kv_poller.stop()))
 
     if state.event_publisher:
         cleanup_tasks.append(('Event system', state.event_publisher.stop()))

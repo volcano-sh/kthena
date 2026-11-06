@@ -187,6 +187,8 @@ func normalizeEngine(engine string) (string, error) {
 		return EngineSGLang, nil
 	case EngineVLLM:
 		return EngineVLLM, nil
+	case EngineTensorRTLLM:
+		return EngineTensorRTLLM, nil
 	case "":
 		return "", ErrInvalidConfig{Message: "empty engine string"}
 	default:

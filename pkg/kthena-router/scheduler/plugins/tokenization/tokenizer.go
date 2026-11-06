@@ -43,6 +43,8 @@ func newRemoteTokenizer(config RemoteTokenizerConfig, client *httpClient, ownsCl
 		adapter = newSGLangAdapter(config.Model)
 	case EngineVLLM:
 		adapter = newVLLMAdapter(config.Model)
+	case EngineTensorRTLLM:
+		adapter = newTensorRTLLMAdapter(config.Model)
 	}
 
 	if client == nil {
@@ -81,7 +83,7 @@ func (t *remoteTokenizerImpl) TokenizeWithOptions(ctx context.Context, input Tok
 		}
 	}
 
-	path := t.adapter.GetTokenizePath()
+	path := t.adapter.GetTokenizePath(input.Type)
 	respData, err := t.client.Post(ctx, path, request)
 	if err != nil {
 		return nil, ErrTokenizationFailed{

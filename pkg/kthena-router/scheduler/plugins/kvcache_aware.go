@@ -70,7 +70,11 @@ const (
 
 	// defaultSGLangTokenizerPort is the upstream-default port for sglang
 	defaultSGLangTokenizerPort = 30000
-	maxTokenizerPort           = 65535
+
+	// defaultTensorRTLLMTokenizerPort is the upstream-default port for
+	// trtllm-serve OpenAI server (render endpoints share the same port).
+	defaultTensorRTLLMTokenizerPort = 8000
+	maxTokenizerPort                = 65535
 
 	// kvCacheFieldFreshDuration matches the runtime mapping key expiry
 	kvCacheFieldFreshDuration = 24 * time.Hour
@@ -92,6 +96,9 @@ type KVCacheAwareArgs struct {
 	VLLMTokenizerPort int `yaml:"vllmTokenizerPort,omitempty"`
 	// SGLangTokenizerPort overrides the default SGLang tokenizer port (30000).
 	SGLangTokenizerPort int `yaml:"sglangTokenizerPort,omitempty"`
+	// TensorRTLLMTokenizerPort overrides the default TensorRT-LLM tokenizer
+	// port (8000, trtllm-serve render endpoints).
+	TensorRTLLMTokenizerPort int `yaml:"tensorrtllmTokenizerPort,omitempty"`
 	// IndexMode selects the coordination backend: "redis" (default) or "memory".
 	IndexMode string `yaml:"indexMode,omitempty"`
 	// RuntimePort is the port of the runtime sidecar the router streams KV
@@ -180,14 +187,16 @@ func NewKVCacheAware(store datastore.Store, pluginArg runtime.RawExtension) *KVC
 
 	vllmPort := normalizeTokenizerPort(tokenization.EngineVLLM, args.VLLMTokenizerPort, defaultVLLMTokenizerPort)
 	sglangPort := normalizeTokenizerPort(tokenization.EngineSGLang, args.SGLangTokenizerPort, defaultSGLangTokenizerPort)
+	trtllmPort := normalizeTokenizerPort(tokenization.EngineTensorRTLLM, args.TensorRTLLMTokenizerPort, defaultTensorRTLLMTokenizerPort)
 
-	klog.Infof("KVCacheAware: config indexMode=%s, blockSizeToHash=%d, maxBlocksToMatch=%d, vllmTokenizerPort=%d, sglangTokenizerPort=%d",
-		indexMode, blockSizeToHash, maxBlocksToMatch, vllmPort, sglangPort)
+	klog.Infof("KVCacheAware: config indexMode=%s, blockSizeToHash=%d, maxBlocksToMatch=%d, vllmTokenizerPort=%d, sglangTokenizerPort=%d, tensorrtllmTokenizerPort=%d",
+		indexMode, blockSizeToHash, maxBlocksToMatch, vllmPort, sglangPort, trtllmPort)
 
 	managerConfig := tokenization.TokenizerManagerConfig{
 		EndpointPorts: map[string]int{
-			tokenization.EngineVLLM:   vllmPort,
-			tokenization.EngineSGLang: sglangPort,
+			tokenization.EngineVLLM:        vllmPort,
+			tokenization.EngineSGLang:      sglangPort,
+			tokenization.EngineTensorRTLLM: trtllmPort,
 		},
 		Service: normalizeTokenizerServiceArgs(args.TokenizerService),
 	}

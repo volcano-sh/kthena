@@ -1,0 +1,23 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: trtllm-tinyllama-pd
+  namespace: default
+spec:
+  # Pair with examples/model-serving/gpu-pd-tensorrtllm.yaml (NIXL transceiver).
+  # inferenceEngine TensorRTLLM auto-selects the native PD connector.
+  workloadSelector:
+    matchLabels:
+      modelserving.volcano.sh/name: trtllm-tinyllama-pd
+    pdGroup:
+      groupKey: "modelserving.volcano.sh/group-name"
+      prefillLabels:
+        modelserving.volcano.sh/role: prefill
+      decodeLabels:
+        modelserving.volcano.sh/role: decode
+  workloadPort:
+    port: 8000
+  model: "TinyLlama-1.1B-Chat-v1.0"
+  inferenceEngine: "TensorRTLLM"
+  trafficPolicy:
+    timeout: 120s
