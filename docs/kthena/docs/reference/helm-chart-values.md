@@ -78,6 +78,9 @@ A Helm chart for deploying Kthena
 | workload.controllerManager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the Controller Manager. |
 | workload.controllerManager.image.repository | string | `"ghcr.io/volcano-sh/kthena-controller-manager"` | Image repository for the Controller Manager. |
 | workload.controllerManager.image.tag | string | `"latest"` | Image tag for the Controller Manager. |
+| workload.controllerManager.recoveryBackoff.base | string | `""` | Delay before the second consecutive recovery of a failing ModelServing ServingGroup, Role, or Pod, as a duration string such as `30s`. The delay doubles after each further failure. Set `"0s"` to disable the backoff. Empty uses the binary default (10s). |
+| workload.controllerManager.recoveryBackoff.max | string | `""` | Maximum delay between consecutive recoveries, as a duration string. Empty uses the binary default (5m). |
+| workload.controllerManager.recoveryBackoff.reset | string | `""` | How long a recovered unit must stay Running before its failure count resets, as a duration string. Empty uses the binary default (10m). |
 | workload.controllerManager.replicas | int | `1` | Number of Controller Manager instances to run. |
 | workload.controllerManager.runtimeImage.repository | string | `"ghcr.io/volcano-sh/runtime"` | Image repository for the Runtime. |
 | workload.controllerManager.runtimeImage.tag | string | `"latest"` | Image tag for the Runtime. |

@@ -47,6 +47,17 @@ spec:
             {{- if .Values.controllerManager.autoscalingSyncPeriodSeconds }}
             - --autoscaling-sync-period-seconds={{ .Values.controllerManager.autoscalingSyncPeriodSeconds }}
             {{- end }}
+            {{- with .Values.controllerManager.recoveryBackoff }}
+            {{- if .base }}
+            - --recovery-backoff-base={{ .base }}
+            {{- end }}
+            {{- if .max }}
+            - --recovery-backoff-max={{ .max }}
+            {{- end }}
+            {{- if .reset }}
+            - --recovery-backoff-reset={{ .reset }}
+            {{- end }}
+            {{- end }}
           imagePullPolicy: {{ .Values.controllerManager.image.pullPolicy }}
           resources:
             {{- toYaml .Values.controllerManager.resource | nindent 12 }}

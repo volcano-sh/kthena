@@ -341,6 +341,10 @@ const (
 	// Role rolling update is waiting for a dependency, proportional progress,
 	// old-version retention, or admitted target-version readiness.
 	ModelServingCoordinatedRoleRolloutBlocked ModelServingConditionType = "CoordinatedRoleRolloutBlocked"
+
+	// ModelServingRecoveryBackOff indicates that the recovery of at least one failed
+	// ServingGroup, Role, or Pod is delayed because it failed repeatedly.
+	ModelServingRecoveryBackOff ModelServingConditionType = "RecoveryBackOff"
 )
 
 // ModelServingStatus defines the observed state of ModelServing

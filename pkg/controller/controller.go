@@ -89,6 +89,9 @@ func SetupController(ctx context.Context, cc Config) {
 				if err != nil {
 					klog.Fatalf("failed to create ModelServing controller: %v", err)
 				}
+				if err = msc.SetRecoveryBackoff(cc.RecoveryBackoff); err != nil {
+					klog.Fatalf("invalid ModelServing recovery backoff: %v", err)
+				}
 				lwsc, err = modelserving.InitializeLWSController(config, kubeClient, client)
 				if err != nil {
 					klog.Errorf("Failed to initialize LWS controller: %v", err)
