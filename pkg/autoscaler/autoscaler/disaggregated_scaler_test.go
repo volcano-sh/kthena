@@ -18,9 +18,11 @@ package autoscaler
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/autoscaler/algorithm"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -152,5 +154,56 @@ func TestMetricSourcesForRole_AddsRoleSelectorWithoutMutatingInput(t *testing.T)
 	}
 	if _, mutated := sources["load"].Pod.LabelSelector.MatchLabels[workload.RoleLabelKey]; mutated {
 		t.Fatalf("input metric source was mutated: %#v", sources["load"].Pod.LabelSelector.MatchLabels)
+	}
+}
+
+func TestRoleReplicaCounts(t *testing.T) {
+	onePod := []algorithm.Metrics{{}}
+	testcases := []struct {
+		name    string
+		groups  servingGroupCount
+		ready   []algorithm.Metrics
+		unready int32
+		want    algorithm.ReplicaCount
+	}{
+		{
+			name:   "4 ready pods in 2 groups are 2 role replicas",
+			groups: servingGroupCount{ready: 2, all: 2},
+			ready:  slices.Repeat(onePod, 4),
+			want:   algorithm.ReplicaCount{Ready: 2, All: 2},
+		},
+		{
+			name:    "unready pods count only in All",
+			groups:  servingGroupCount{ready: 1, all: 2},
+			ready:   slices.Repeat(onePod, 2),
+			unready: 2,
+			want:    algorithm.ReplicaCount{Ready: 2, All: 2},
+		},
+		{
+			name:   "a partly created role replica gives a fraction",
+			groups: servingGroupCount{ready: 2, all: 2},
+			ready:  slices.Repeat(onePod, 3),
+			want:   algorithm.ReplicaCount{Ready: 1.5, All: 1.5},
+		},
+		{
+			name:    "no ready groups leaves Ready at zero",
+			groups:  servingGroupCount{ready: 0, all: 2},
+			unready: 4,
+			want:    algorithm.ReplicaCount{Ready: 0, All: 2},
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			counts := roleReplicaCounts(
+				map[string]servingGroupCount{"load": tc.groups},
+				map[string][]algorithm.Metrics{"load": tc.ready},
+				map[string]int32{"load": tc.unready},
+			)
+
+			if counts["load"] != tc.want {
+				t.Fatalf("got %+v, want %+v", counts["load"], tc.want)
+			}
+		})
 	}
 }

@@ -22,7 +22,14 @@ The [`AutoscalingPolicy`](../reference/crd/workload.serving.volcano.sh.md#autosc
 #### Metrics Configuration
 - **name**: Name of the metric to monitor (e.g., `kthena:num_requests_waiting`). The values under `metricSources` are keyed by this name.
 - **targetValue**: Target value for the specified metric, serving as the scaling threshold
-  - *Example*: Setting `targetValue: 10.0` for `kthena:num_requests_waiting` means the autoscaler aims to maintain no more than 10 waiting requests per instance
+  - *Pod sources*: The target applies per entry pod. For example, `targetValue: 10.0` for `kthena:num_requests_waiting` means the autoscaler aims to keep an average of no more than 10 waiting requests per entry pod. It divides the average across the selected entry pods by the target to get a load ratio, then multiplies that ratio by the number of replicas those pods belong to:
+    - `homogeneousTarget`: the number of ServingGroups that have selected pods.
+    - `heterogeneousTarget`: the number of ServingGroups that have selected pods, across all backends.
+    - `disaggregatedTarget`: the selected pods divided by their ServingGroups, which is the replicas of the role per ServingGroup.
+    - Unready pods count as zero load when scaling up and are left out when scaling down, so a ServingGroup that has only unready pods counts only when scaling up.
+  - *Example with several entry pods*: A ModelServing has 2 ServingGroups with 2 entry pods each. The average is 15 and `targetValue` is 10, so the load ratio is 15 / 10 = 1.5. The autoscaler sets `spec.replicas` to ceil(1.5 × 2 ServingGroups) = 3. The total load of 60 is then shared by 6 entry pods, so each one carries about 10.
+  - *Prometheus sources*: The query returns one value, and the autoscaler divides it by `targetValue` to get the replica count, however many entry pods each replica has. For example, a value of 60 with `targetValue: 10` gives 6 replicas. For `disaggregatedTarget`, that result is the replicas of the role per ServingGroup, so 2 ServingGroups would run 12 replicas of the role in total.
+  - *Pod source `labelSelector`*: For `homogeneousTarget` and `heterogeneousTarget`, select pods from every ServingGroup, for example by role. Don't select only some ServingGroups, such as by `modelserving.volcano.sh/group-name`, or by `modelserving.volcano.sh/revision` during a rollout. The autoscaler counts only the ServingGroups of the selected pods, so the result would be too low.
 
 #### Tolerance Configuration
 - **tolerancePercent**: Defines the tolerance range around the target value before scaling actions are triggered

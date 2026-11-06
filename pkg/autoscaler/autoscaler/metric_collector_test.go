@@ -415,7 +415,7 @@ func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) 
 		algorithm.Metrics{"queue_depth": 10, "queue_depth_alt": 10},
 	)
 
-	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+	unreadyCount, readyMetrics, _, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
 		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
 		// This creates a second metric group selecting the same pods.
 		"queue_depth_alt": {Pod: &workload.PodMetricSource{Name: "queue_depth_alt", Uri: "/metrics-alt", Port: int32(port)}},
@@ -468,7 +468,7 @@ func TestUpdateMetricsReturnsOneEntryPerReadyPod(t *testing.T) {
 		algorithm.Metrics{"queue_depth": 10},
 	)
 
-	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+	unreadyCount, readyMetrics, _, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
 		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
 	})
 	require.NoError(t, err)
@@ -523,7 +523,7 @@ func TestUpdateMetricsKeepsReadyPodWithFailedScrapeAsMissing(t *testing.T) {
 		algorithm.Metrics{"queue_depth": 10},
 	)
 
-	unreadyCount, readyMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+	unreadyCount, readyMetrics, _, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
 		"queue_depth": {Pod: &workload.PodMetricSource{Name: "queue_depth", Port: int32(port)}},
 	})
 	require.NoError(t, err)
@@ -572,7 +572,7 @@ func TestUpdateMetricsWithDisjointSelectorsScalesToMinAtZeroLoad(t *testing.T) {
 		targets,
 	)
 
-	unreadyCount, readyMetrics, externalMetrics, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
+	unreadyCount, readyMetrics, externalMetrics, _, err := collector.UpdateMetrics(context.Background(), podLister, map[string]workload.MetricSource{
 		"waiting": {Pod: &workload.PodMetricSource{Name: "waiting", Port: int32(port),
 			LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "prefill"}}}},
 		"kv": {Pod: &workload.PodMetricSource{Name: "kv", Port: int32(port),

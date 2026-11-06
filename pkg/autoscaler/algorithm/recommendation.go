@@ -35,6 +35,20 @@ type RecommendedInstancesAlgorithm struct {
 	UnreadyInstancesCountByMetric map[string]int32
 	ReadyInstancesMetrics         map[string][]Metrics
 	ExternalMetrics               Metrics
+	// ReplicasByMetric is keyed by metric name and holds how many replicas the pods
+	// selected for that metric belong to. A metric with no entry counts each pod as one
+	// replica. External metrics don't use it.
+	ReplicasByMetric map[string]ReplicaCount
+}
+
+// ReplicaCount holds how many replicas the pods selected for one metric belong to. The
+// load ratio is measured per pod, and multiplying it by this count gives the desired
+// replicas. This is what keeps the result in replicas when a replica owns several pods.
+type ReplicaCount struct {
+	// Ready counts the replicas behind the ready pods.
+	Ready float64
+	// All counts the replicas behind the ready and unready pods.
+	All float64
 }
 
 func (alg *RecommendedInstancesAlgorithm) GetRecommendedInstances() (recommendedInstances int32, skip bool) {
@@ -65,6 +79,7 @@ func (alg *RecommendedInstancesAlgorithm) GetRecommendedInstances() (recommended
 				target,
 				alg.UnreadyInstancesCountByMetric[name],
 				alg.ReadyInstancesMetrics[name],
+				alg.ReplicasByMetric[name],
 			); ok {
 				updateRecommendation(&recommendedInstances, &skip, desired)
 			}
@@ -106,6 +121,7 @@ func getDesiredInstancesForSingleInstanceMetric(
 	target float64,
 	unreadyCount int32,
 	readyMetrics []Metrics,
+	replicas ReplicaCount,
 ) (desired int32, ok bool) {
 	currentMetricSum := 0.0
 	missingCount := int32(0)
@@ -125,12 +141,13 @@ func getDesiredInstancesForSingleInstanceMetric(
 	ratio := currentMetricSum / float64(metricsCount) / target
 	shouldAddUnready := unreadyCount > 0 && getDirection(ratio) > 0
 	klog.InfoS("recommendation", "metricsCount", metricsCount, "currentMetricSum", currentMetricSum, "ratio", ratio,
-		"unreadyCount", unreadyCount, "shouldAddUnready", shouldAddUnready, "missingCount", missingCount, "tolerance", tolerance)
+		"unreadyCount", unreadyCount, "shouldAddUnready", shouldAddUnready, "missingCount", missingCount, "tolerance", tolerance,
+		"readyReplicas", replicas.Ready, "allReplicas", replicas.All)
 	if !shouldAddUnready && missingCount == 0 {
 		if math.Abs(ratio-1.0) <= tolerance {
 			return currentCount, true
 		}
-		return getCeilDesiredInstances(ratio * float64(metricsCount)), true
+		return getCeilDesiredInstances(ratio * replicasOrPods(replicas.Ready, metricsCount)), true
 	}
 	metricsCount += missingCount
 	if getDirection(ratio) < 0 {
@@ -143,12 +160,25 @@ func getDesiredInstancesForSingleInstanceMetric(
 	if math.Abs(newRatio-1.0) <= tolerance || getDirection(ratio) != getDirection(newRatio) {
 		return currentCount, true
 	}
-	desired = getCeilDesiredInstances(newRatio * float64(metricsCount))
+	replicaCount := replicas.Ready
+	if shouldAddUnready {
+		replicaCount = replicas.All
+	}
+	desired = getCeilDesiredInstances(newRatio * replicasOrPods(replicaCount, metricsCount))
 	if (getDirection(newRatio) < 0 && desired > currentCount) ||
 		(getDirection(newRatio) > 0 && desired < currentCount) {
 		return currentCount, true
 	}
 	return desired, true
+}
+
+// replicasOrPods returns the count to multiply the load ratio by. When the replica count
+// is unknown, each pod counts as one replica.
+func replicasOrPods(replicas float64, podCount int32) float64 {
+	if replicas > 0 {
+		return replicas
+	}
+	return float64(podCount)
 }
 
 func getDirection(ratio float64) int32 {

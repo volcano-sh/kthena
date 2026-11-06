@@ -108,12 +108,13 @@ func (collector *MetricCollector) UpdateMetrics(
 	ctx context.Context,
 	podLister listerv1.PodLister,
 	targetMetricSources map[string]v1alpha1.MetricSource,
-) (unreadyInstancesCountByMetric map[string]int32, readyInstancesMetrics map[string][]algorithm.Metrics, externalMetrics algorithm.Metrics, err error) {
+) (unreadyInstancesCountByMetric map[string]int32, readyInstancesMetrics map[string][]algorithm.Metrics, externalMetrics algorithm.Metrics, servingGroups map[string]servingGroupCount, err error) {
 	// Results are keyed by metric. Each metric only sees the pods its own source
 	// selects, so a pod that was never asked for a metric is not counted as
 	// missing it, and an unready pod only counts for the metrics that select it.
 	unreadyInstancesCountByMetric = make(map[string]int32)
 	readyInstancesMetrics = make(map[string][]algorithm.Metrics)
+	servingGroups = make(map[string]servingGroupCount)
 
 	pastHistograms, ok := collector.PastHistograms.GetLastUnfreshSnapshot()
 	if !ok {
@@ -128,7 +129,7 @@ func (collector *MetricCollector) UpdateMetrics(
 	podGroups, externalMetrics := collector.planMetricSources(ctx, targetMetricSources)
 
 	for _, g := range podGroups {
-		values, groupUnreadyPods, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
+		values, groupUnreadyPods, groupCount, failed, collectErr := collector.collectPodMetricsGroup(ctx, podLister, g.podSource, g.specs, pastHistograms, currentHistograms)
 		if collectErr != nil {
 			klog.Warningf("collect pod metrics for target %s failed: %v", collector.Target.TargetRef.Name, collectErr)
 			continue
@@ -144,6 +145,7 @@ func (collector *MetricCollector) UpdateMetrics(
 		for _, spec := range g.specs {
 			readyInstancesMetrics[spec.policyKey] = groupMetrics
 			unreadyInstancesCountByMetric[spec.policyKey] = int32(len(groupUnreadyPods))
+			servingGroups[spec.policyKey] = groupCount
 		}
 	}
 
@@ -244,19 +246,20 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 	specs []podMetricSpec,
 	pastHistograms map[string]HistogramInfo,
 	currentHistograms map[string]HistogramInfo,
-) (values map[string]algorithm.Metrics, unreadyPods sets.Set[string], failed bool, err error) {
+) (values map[string]algorithm.Metrics, unreadyPods sets.Set[string], groupCount servingGroupCount, failed bool, err error) {
 	pods, err := util.GetMetricPods(podLister, collector.Scope.Namespace, collector.Target, podSource)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, servingGroupCount{}, false, err
 	}
 	if len(pods) == 0 {
-		return nil, nil, false, fmt.Errorf("pod list is empty")
+		return nil, nil, servingGroupCount{}, false, fmt.Errorf("pod list is empty")
 	}
 
 	unreadyPods, failed = evaluatePodsReadiness(pods)
 	if failed {
 		return
 	}
+	groupCount = countServingGroups(pods)
 
 	// Multiple policy keys may target the same scrape metric name.
 	wanted := groupPolicyKeysByScrapeName(specs)
@@ -276,6 +279,33 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 		values[metricPodKey(pod)] = podValues
 	}
 	return
+}
+
+// servingGroupCount holds how many ServingGroups the pods selected for a metric belong to.
+type servingGroupCount struct {
+	// ready counts the groups with at least one ready pod.
+	ready int32
+	// all counts the groups with at least one selected pod, ready or not.
+	all int32
+}
+
+// countServingGroups counts the distinct ServingGroups of the given pods. A group counts
+// once however many of its pods are selected, so a group that is still being created
+// counts as a whole group. A pod without the group label counts as its own group.
+func countServingGroups(pods []*corev1.Pod) servingGroupCount {
+	ready := sets.New[string]()
+	all := sets.New[string]()
+	for _, pod := range pods {
+		group := pod.Labels[v1alpha1.GroupNameLabelKey]
+		if group == "" {
+			group = pod.Name
+		}
+		all.Insert(group)
+		if inferControllerUtils.IsPodRunningAndReady(pod) {
+			ready.Insert(group)
+		}
+	}
+	return servingGroupCount{ready: int32(ready.Len()), all: int32(all.Len())}
 }
 
 // evaluatePodsReadiness counts pods that are not ready and reports whether any
