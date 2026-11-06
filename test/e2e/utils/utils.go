@@ -75,8 +75,10 @@ func WaitForModelServingSpecReplicas(t *testing.T, ctx context.Context, kthenaCl
 }
 
 // IsPodReady checks if a pod is in Running phase and has PodReady condition set to True.
+// A terminating Pod keeps both for a while after its deletion starts, so it is excluded
+// here rather than at each call site.
 func IsPodReady(pod corev1.Pod) bool {
-	if pod.Status.Phase != corev1.PodRunning {
+	if pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil {
 		return false
 	}
 

@@ -132,7 +132,7 @@ func newCoordinatedE2E(t *testing.T, name string, prefill, decode, prefillUnavai
 			return false
 		}
 		for _, pod := range pods {
-			if pod.DeletionTimestamp != nil || !utils.IsPodReady(pod) || !controllerutils.IsOwnedByModelServingWithUID(&pod, ms.UID) {
+			if !utils.IsPodReady(pod) || !controllerutils.IsOwnedByModelServingWithUID(&pod, ms.UID) {
 				return false
 			}
 			r.original[pod.Name] = pod.UID

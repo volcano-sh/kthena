@@ -2202,7 +2202,7 @@ func TestSessionStickyShared(t *testing.T, testCtx *routercontext.RouterTestCont
 				if pod.Name == stickyPod {
 					return false
 				}
-				if pod.DeletionTimestamp == nil && utils.IsPodReady(pod) {
+				if utils.IsPodReady(pod) {
 					ready++
 				}
 			}
