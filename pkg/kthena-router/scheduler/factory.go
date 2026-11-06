@@ -85,6 +85,13 @@ func registerDefaultPlugins(registry *PluginRegistry) {
 	registry.registerScorePlugin(plugins.KVCacheAwarePluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
 		return plugins.NewKVCacheAware(store, args)
 	})
+
+	// agent-affinity: program-level semantic affinity scoring (Issue #1828 §2).
+	// Opt-in: absent agent_hints.program_id → Score() returns nil, no scheduling
+	// influence.
+	registry.registerScorePlugin(plugins.AgentAffinityPluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
+		return plugins.NewAgentAffinity(store, args)
+	})
 	// filterPlugin
 	registry.registerFilterPlugin(plugins.LeastRequestPluginName, func(args runtime.RawExtension) framework.FilterPlugin {
 		return plugins.NewLeastRequest(args)
