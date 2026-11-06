@@ -21,6 +21,7 @@ import "github.com/volcano-sh/kthena/pkg/kthena-router/common"
 const (
 	EngineVLLM   = "vllm"
 	EngineSGLang = "sglang"
+	EngineTriton = "triton"
 )
 
 type TokenizeInputType string

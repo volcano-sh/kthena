@@ -23,6 +23,7 @@ class EngineType(Enum):
     VLLM = "vllm"
     SGLANG = "sglang"
     VLLM_DISAGGREGATED = "vllmdisaggregated"
+    TRITON = "triton"
 
 
 class StandardMetricNames:
@@ -74,6 +75,33 @@ STANDARD_RULES: Dict[str, List[MetricOperator]] = {
             StandardMetricNames.E2E_REQUEST_LATENCY_SECONDS,
         ),
     ],
+    # Triton OpenAI frontend; prefer vllm:* series when the vLLM backend exposes them.
+    EngineType.TRITON.value: [
+        RenameMetric(
+            "nv_inference_pending_request_count",
+            StandardMetricNames.NUM_REQUESTS_WAITING,
+        ),
+        RenameMetric(
+            "vllm:num_requests_waiting",
+            StandardMetricNames.NUM_REQUESTS_WAITING,
+        ),
+        RenameMetric(
+            "vllm:time_to_first_token_seconds",
+            StandardMetricNames.TIME_TO_FIRST_TOKEN_SECONDS,
+        ),
+        RenameMetric(
+            "vllm:time_per_output_token_seconds",
+            StandardMetricNames.TIME_PER_OUTPUT_TOKEN_SECONDS,
+        ),
+        RenameMetric(
+            "vllm:e2e_request_latency_seconds",
+            StandardMetricNames.E2E_REQUEST_LATENCY_SECONDS,
+        ),
+        RenameMetric(
+            "vllm:generation_tokens",
+            StandardMetricNames.GENERATION_TOKENS,
+        ),
+    ],
 }
 
 
@@ -95,6 +123,8 @@ class MetricStandard:
             return EngineType.VLLM
         if engine.lower() == EngineType.SGLANG.value:
             return EngineType.SGLANG
+        if engine.lower() == EngineType.TRITON.value:
+            return EngineType.TRITON
         supported_engines = list(STANDARD_RULES.keys())
         raise UnsupportedEngineError(
             f"Unsupported engine: {engine}. "

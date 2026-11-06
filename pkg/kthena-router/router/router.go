@@ -1495,8 +1495,7 @@ func (r *Router) getKVConnector(modelServerName types.NamespacedName) (connector
 		return nil, fmt.Errorf("model server %s not found", modelServerName)
 	}
 
-	// Determine connector type from ModelServer CRD.
-	// If kvConnector is explicitly set, use it; otherwise infer from inferenceEngine.
+	// Prefer explicit kvConnector; otherwise HTTP for vLLM/Triton, SGLang for SGLang.
 	connectorType := v1alpha1.ConnectorTypeHTTP
 	if modelServer.Spec.KVConnector != nil && modelServer.Spec.KVConnector.Type != "" {
 		connectorType = modelServer.Spec.KVConnector.Type

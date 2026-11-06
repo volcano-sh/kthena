@@ -1,0 +1,86 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: triton-tinyllama
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  recoveryPolicy: ServingGroupRecreate
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: server
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: server
+                image: nvcr.io/nvidia/tritonserver:25.08-vllm-python-py3
+                imagePullPolicy: IfNotPresent
+                command: ["python3"]
+                args:
+                  - /opt/tritonserver/python/openai/openai_frontend/main.py
+                  - --model-repository
+                  - /models/triton-repo
+                  - --tokenizer
+                  - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+                  - --backend
+                  - vllm
+                  - --host
+                  - 0.0.0.0
+                  - --openai-port
+                  - "9000"
+                env:
+                  - name: HF_HOME
+                    value: /models/hf-cache
+                  - name: HUGGING_FACE_HUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: hf-token
+                        key: token
+                        optional: true
+                ports:
+                  - name: openai
+                    containerPort: 9000
+                volumeMounts:
+                  - name: model-repository
+                    mountPath: /models/triton-repo
+                    readOnly: true
+                  - name: hf-cache
+                    mountPath: /models/hf-cache
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+                  requests:
+                    nvidia.com/gpu: "1"
+                readinessProbe:
+                  httpGet:
+                    path: /v1/models
+                    port: 9000
+                  initialDelaySeconds: 60
+                  periodSeconds: 10
+                  timeoutSeconds: 10
+                  failureThreshold: 60
+                livenessProbe:
+                  httpGet:
+                    path: /v1/models
+                    port: 9000
+                  initialDelaySeconds: 300
+                  periodSeconds: 20
+                  timeoutSeconds: 10
+                  failureThreshold: 10
+            volumes:
+              - name: model-repository
+                persistentVolumeClaim:
+                  claimName: triton-model-repository
+              - name: hf-cache
+                emptyDir:
+                  sizeLimit: 50Gi
+              - name: shared-mem
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 8Gi
+        workerReplicas: 0
