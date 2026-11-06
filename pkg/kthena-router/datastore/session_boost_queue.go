@@ -161,11 +161,15 @@ func (pq *RequestPriorityQueue) admitSessionBoost(req *Request) bool {
 		releaseOnce := sync.Once{}
 		req.Release = func() {
 			releaseOnce.Do(func() {
+				// Free the slot and signal under releaseMu, so
+				// dequeueOrHoldPendingRelease sees both or neither.
+				pq.releaseMu.Lock()
 				pq.inflightCount.Add(-1)
 				select {
 				case pq.releaseCh <- struct{}{}:
 				default:
 				}
+				pq.releaseMu.Unlock()
 				pq.metricDecInflight(req.ModelName)
 			})
 		}
@@ -244,12 +248,24 @@ func (pq *RequestPriorityQueue) runSessionBoostMode(ctx context.Context) {
 // an arrival or a backend metrics refresh. With grace enabled, if a release is
 // also pending, it routes through the grace path so the freed slot is held for a
 // same-session follow-up; otherwise it re-checks admission directly.
+//
+// The release check and the inflight count are read together under releaseMu.
+// A slot freed after that read is left out of this pass, so it is still held for
+// a follow-up through the grace path.
 func (pq *RequestPriorityQueue) dequeueOrHoldPendingRelease(ctx context.Context, grace bool) {
-	if grace && pq.drainPendingRelease() {
+	if !grace {
+		pq.tryBackpressureDequeue(ctx)
+		return
+	}
+	pq.releaseMu.Lock()
+	released := pq.drainPendingRelease()
+	inflight := pq.inflightCount.Load()
+	pq.releaseMu.Unlock()
+	if released {
 		pq.waitGraceAndDequeue(ctx)
 		return
 	}
-	pq.tryBackpressureDequeue(ctx)
+	pq.tryBackpressureDequeueAbove(ctx, inflight)
 }
 
 // RecheckBackpressure asks the session-boost dequeue loop to re-evaluate held
@@ -350,6 +366,13 @@ func (pq *RequestPriorityQueue) drainCancelledLocked() int {
 // the queue is empty. This avoids the one-request-per-tick bottleneck during
 // initial ramp-up and whenever spare capacity exists.
 func (pq *RequestPriorityQueue) tryBackpressureDequeue(ctx context.Context) {
+	pq.tryBackpressureDequeueAbove(ctx, 0)
+}
+
+// tryBackpressureDequeueAbove is tryBackpressureDequeue with a lower bound for the
+// inflight count: the count the caller read, plus the requests admitted in this
+// pass. Slots freed after the caller's read are not used here.
+func (pq *RequestPriorityQueue) tryBackpressureDequeueAbove(ctx context.Context, minInflight int64) {
 	// In session-boost mode, the total inflight limit is InflightPerPod scaled by
 	// the number of backend pods serving the model.
 	perPod := pq.config.InflightPerPod
@@ -366,7 +389,7 @@ func (pq *RequestPriorityQueue) tryBackpressureDequeue(ctx context.Context) {
 	}
 
 	for {
-		currentInflight := pq.inflightCount.Load()
+		currentInflight := max(pq.inflightCount.Load(), minInflight)
 
 		if currentInflight >= maxInflight {
 			pq.mu.Lock()
@@ -405,6 +428,7 @@ func (pq *RequestPriorityQueue) tryBackpressureDequeue(ctx context.Context) {
 			// continue admitting the next queued request.
 			continue
 		}
+		minInflight++
 
 		klog.V(4).Infof("[SessionBoost] backpressure dequeue: user=%s model=%s sessionBoost=%v inflight=%d/%d",
 			req.UserID, req.ModelName, req.SessionBoost, pq.inflightCount.Load(), maxInflight)

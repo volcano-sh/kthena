@@ -574,22 +574,25 @@ func TestSessionBoostQueue_GracePeriod_BoostedArrives(t *testing.T) {
 }
 
 // TestSessionBoostQueue_DequeueOrHoldPendingRelease covers the handling of an
-// arrival or a recheck. When a release is pending at the same time, select may
-// pick either signal first, so this handling must not hand the freed slot to the
-// head of the queue without the grace wait. The context is cancelled up front:
-// a grace wait then returns without dispatching, while a direct dequeue still
-// admits, so whether the held request is admitted shows which path was taken.
+// arrival or a recheck. When a release is pending at the same time (select may
+// pick either signal first), or lands while the handling runs, this handling must
+// not hand the freed slot to the head of the queue without the grace wait. The
+// context is cancelled up front: a grace wait then returns without dispatching,
+// while a direct dequeue still admits, so whether the held request is admitted
+// shows which path was taken.
 func TestSessionBoostQueue_DequeueOrHoldPendingRelease(t *testing.T) {
 	tests := []struct {
-		name               string
-		gracePeriod        time.Duration
-		releasePending     bool
-		wantAdmitted       bool
-		wantReleasePending bool
+		name                  string
+		gracePeriod           time.Duration
+		releasePending        bool
+		releaseDuringHandling bool
+		wantAdmitted          bool
+		wantReleasePending    bool
 	}{
 		{name: "pending release holds the freed slot for grace", gracePeriod: time.Hour, releasePending: true, wantAdmitted: false, wantReleasePending: false},
 		{name: "no pending release admits directly", gracePeriod: time.Hour, releasePending: false, wantAdmitted: true, wantReleasePending: false},
 		{name: "grace disabled admits directly", gracePeriod: 0, releasePending: true, wantAdmitted: true, wantReleasePending: true},
+		{name: "release during handling holds the freed slot for grace", gracePeriod: time.Hour, releaseDuringHandling: true, wantAdmitted: false, wantReleasePending: true},
 	}
 
 	for _, tt := range tests {
@@ -619,11 +622,20 @@ func TestSessionBoostQueue_DequeueOrHoldPendingRelease(t *testing.T) {
 			}
 			<-q.notifyCh
 
-			// Free the slot. Without a pending release, its signal has already
-			// been handled.
-			req1.Release()
-			if !tt.releasePending {
-				<-q.releaseCh
+			if tt.releaseDuringHandling {
+				// podCounter runs inside the handling, after the release check,
+				// so freeing the slot from it lands the release in between.
+				q.podCounter = func() int {
+					req1.Release()
+					return 1
+				}
+			} else {
+				// Free the slot. Without a pending release, its signal has
+				// already been handled.
+				req1.Release()
+				if !tt.releasePending {
+					<-q.releaseCh
+				}
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
