@@ -1056,6 +1056,9 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		modelRoute.Namespace = testNamespace
 		modelRoute.Name = modelRoute.Name + "-test4"
 		modelRoute.Spec.ModelName = modelRoute.Spec.ModelName + "-test4"
+		outputLimit := uint32(outputTokenLimit)
+		modelRoute.Spec.RateLimit.InputTokensPerUnit = nil
+		modelRoute.Spec.RateLimit.OutputTokensPerUnit = &outputLimit
 		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 
 		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
@@ -1073,19 +1076,10 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			return err == nil && mr != nil
 		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
-		// Update ModelRoute to disable input token limit
-		createdModelRoute.Spec.RateLimit.InputTokensPerUnit = nil
-		outputLimit := uint32(outputTokenLimit)
-		createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = &outputLimit
-
-		updatedModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
-		require.NoError(t, err, "Failed to update ModelRoute")
-
-		// Wait for update to propagate
-		time.Sleep(2 * time.Second)
-
 		longerPrompt := []utils.ChatMessage{
-			utils.NewChatMessage("user", "Write a detailed explanation of rate limiting"),
+			utils.NewChatMessage("user", "Write a detailed explanation of rate limiting, covering token buckets, "+
+				"sliding windows, fixed windows, burst handling, refill rates, distributed coordination, "+
+				"and how an inference router should charge input and output tokens per model."),
 		}
 
 		// Send requests until we hit the output token limit
@@ -1094,7 +1088,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		var rateLimited bool
 
 		for attempt := 0; attempt < 20; attempt++ {
-			resp := utils.SendChatRequest(t, updatedModelRoute.Spec.ModelName, longerPrompt)
+			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, longerPrompt)
 			responseBody, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 
@@ -1107,12 +1101,11 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 					attempt+1, len(responseBody), totalResponseSize)
 			} else if resp.StatusCode == http.StatusTooManyRequests {
 				t.Logf("Output rate limited after %d requests", successfulRequests)
-				assert.Contains(t, strings.ToLower(string(responseBody)), "rate limit",
-					"Output rate limit error should mention rate limit")
+				assert.Contains(t, strings.ToLower(string(responseBody)), "output token rate limit",
+					"Rate limit error should come from the output token limit")
 				rateLimited = true
 				break
 			} else if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusServiceUnavailable {
-				// Transient: Envoy is still syncing the updated route to the data plane.
 				t.Logf("Data plane not ready (status %d), retrying attempt %d...", resp.StatusCode, attempt+1)
 				time.Sleep(1 * time.Second)
 			} else {

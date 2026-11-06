@@ -176,6 +176,45 @@ func (g *GlobalRateLimiter) AllowN(now time.Time, n int) bool {
 	return allowed == 1
 }
 
+// ConsumeN implements Limiter interface.
+// It deducts n tokens unconditionally, so the bucket may go negative and block later requests until refilled.
+// n is capped at the bucket capacity to match LocalLimiter.
+func (g *GlobalRateLimiter) ConsumeN(now time.Time, n int) {
+	key := fmt.Sprintf("%s:%s:%s", g.keyPrefix, g.modelName, g.tokenType)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	luaScript := `
+		local key = KEYS[1]
+		local requested_tokens = tonumber(ARGV[1])
+		local capacity = tonumber(ARGV[2])
+		local refill_rate = tonumber(ARGV[3])
+		local expire_seconds = tonumber(ARGV[4])
+
+		local time_result = redis.call('time')
+		local current_time = tonumber(time_result[1]) + tonumber(time_result[2]) / 1000000
+
+		local current_tokens = tonumber(redis.call('hget', key, 'tokens')) or capacity
+		local last_update = tonumber(redis.call('hget', key, 'last_update')) or current_time
+
+		local time_passed = math.max(0, current_time - last_update)
+		current_tokens = math.min(capacity, current_tokens + time_passed * refill_rate)
+
+		-- Deduct without checking availability; a negative balance is paid back by refill
+		current_tokens = current_tokens - requested_tokens
+
+		redis.call('hset', key, 'tokens', current_tokens, 'last_update', current_time)
+		redis.call('expire', key, expire_seconds)
+		return 1
+	`
+
+	result := g.client.Eval(ctx, luaScript, []string{key}, min(n, g.burst), g.burst, g.getRefillRate(), g.getExpireSeconds())
+	if result.Err() != nil {
+		klog.Errorf("failed to execute token consume lua script: %v", result.Err())
+	}
+}
+
 // getRefillRate calculates the token refill rate per second
 func (g *GlobalRateLimiter) getRefillRate() float64 {
 	duration := getTimeUnitDuration(g.unit)
