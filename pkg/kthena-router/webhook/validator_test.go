@@ -1514,7 +1514,7 @@ func TestValidateSchedulerProfile(t *testing.T) {
 				return p
 			}(),
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.plugins.Filter.enabled[0]: Invalid value: \"no-such-plugin\": unknown plugin name",
+			expectedReason: "validation failed:   - spec.plugins.filter.enabled[0]: Invalid value: \"no-such-plugin\": unknown plugin name",
 		},
 		{
 			name: "score plugin used as filter",
@@ -1524,7 +1524,7 @@ func TestValidateSchedulerProfile(t *testing.T) {
 				return p
 			}(),
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.plugins.Filter.enabled[0]: Invalid value: \"prefix-cache\": plugin \"prefix-cache\" cannot be used as a filter",
+			expectedReason: "validation failed:   - spec.plugins.filter.enabled[0]: Invalid value: \"prefix-cache\": plugin \"prefix-cache\" cannot be used as a filter",
 		},
 		{
 			name: "unknown score plugin",
@@ -1534,7 +1534,7 @@ func TestValidateSchedulerProfile(t *testing.T) {
 				return p
 			}(),
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.plugins.Score.enabled[0].name: Invalid value: \"no-such-plugin\": unknown plugin name",
+			expectedReason: "validation failed:   - spec.plugins.score.enabled[0].name: Invalid value: \"no-such-plugin\": unknown plugin name",
 		},
 		{
 			name: "duplicate score plugin",
@@ -1547,7 +1547,7 @@ func TestValidateSchedulerProfile(t *testing.T) {
 				return p
 			}(),
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.plugins.Score.enabled[1].name: Duplicate value: \"prefix-cache\"",
+			expectedReason: "validation failed:   - spec.plugins.score.enabled[1].name: Duplicate value: \"prefix-cache\"",
 		},
 		{
 			name: "non-positive score weight",
@@ -1557,7 +1557,7 @@ func TestValidateSchedulerProfile(t *testing.T) {
 				return p
 			}(),
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.plugins.Score.enabled[0].weight: Invalid value: 0: must be greater than 0",
+			expectedReason: "validation failed:   - spec.plugins.score.enabled[0].weight: Invalid value: 0: must be greater than 0",
 		},
 		{
 			name: "random mixed with other score plugins",
@@ -1570,7 +1570,7 @@ func TestValidateSchedulerProfile(t *testing.T) {
 				return p
 			}(),
 			expectValid:    false,
-			expectedReason: "validation failed:   - spec.plugins.Score.enabled: Invalid value: [\"random\",\"prefix-cache\"]: the random plugin must be the only score plugin",
+			expectedReason: "validation failed:   - spec.plugins.score.enabled: Invalid value: [\"random\",\"prefix-cache\"]: the random plugin must be the only score plugin",
 		},
 	}
 
