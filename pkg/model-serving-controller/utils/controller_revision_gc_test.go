@@ -33,8 +33,50 @@ import (
 	kt "k8s.io/client-go/testing"
 )
 
+func TestRevisionGCRetainsLegacyCompanionsForLiveAndInPlaceReferences(t *testing.T) {
+	ctx := context.Background()
+	ms := revisionTestModelServing(revisionTestRole("decode", "image"))
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "latest", "latest"
+	client := kubefake.NewSimpleClientset()
+	names := map[string][]string{}
+	for _, revision := range []string{"old", "patch-target", "unused"} {
+		cr, err := CreateControllerRevision(ctx, client, ms, revision, ms.Spec.Template.Roles)
+		require.NoError(t, err)
+		companion, err := EnsureRevisionBaseline(ctx, client, ms, cr)
+		require.NoError(t, err)
+		names[revision] = []string{cr.Name, companion.Name}
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "member", Namespace: ms.Namespace,
+		Labels:          map[string]string{workload.RevisionLabelKey: "old"},
+		Annotations:     map[string]string{workload.InPlaceUpdateStateAnnotationKey: `{"version":1,"phase":"Updating","targetRevision":"patch-target"}`},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)},
+	}}
+	_, err := client.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, CleanupOldControllerRevisions(ctx, client, ms))
+	for revision, pair := range names {
+		for _, name := range pair {
+			_, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
+			if revision == "unused" {
+				require.True(t, apierrors.IsNotFound(err), name)
+			} else {
+				require.NoError(t, err, name)
+			}
+		}
+	}
+	require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
+	require.NoError(t, CleanupOldControllerRevisions(ctx, client, ms))
+	for _, pair := range names {
+		for _, name := range pair {
+			_, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
+			require.True(t, apierrors.IsNotFound(err), name)
+		}
+	}
+}
+
 func TestRevisionGCRetainsLiveOwnedPodReferences(t *testing.T) {
-	for _, state := range []string{"running", "terminating", "in-place", "missing-name-label", "wrong-uid", "wrong-kind", "wrong-api", "wrong-name", "not-controller"} {
+	for _, state := range []string{"running", "terminating", "in-place", "missing-name-label", "missing-revision-label", "wrong-uid", "wrong-kind", "wrong-api", "wrong-name", "not-controller"} {
 		t.Run(state, func(t *testing.T) {
 			ctx := context.Background()
 			ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "ms-uid"}, Status: workload.ModelServingStatus{CurrentRevision: "target", UpdateRevision: "target"}}
@@ -51,6 +93,10 @@ func TestRevisionGCRetainsLiveOwnedPodReferences(t *testing.T) {
 				pod.Annotations = map[string]string{workload.InPlaceUpdateStateAnnotationKey: `{"revision":"target","patched":{"main":{"image":"next"}}}`}
 			case "missing-name-label":
 				delete(pod.Labels, workload.ModelServingNameLabelKey)
+			case "missing-revision-label":
+				delete(cr.Labels, ControllerRevisionRevisionLabelKey)
+				_, err = client.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, cr, metav1.UpdateOptions{})
+				require.NoError(t, err)
 			case "wrong-uid":
 				pod.OwnerReferences[0].UID = "other"
 				preserve = false

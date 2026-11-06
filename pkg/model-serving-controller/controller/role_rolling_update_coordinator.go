@@ -225,7 +225,7 @@ const (
 	coordinatedRoleMaxSkewLimitReached         = "MaxSkewLimitReached"
 	coordinatedRoleOldVersionDependencyPresent = "OldVersionDependencyPresent"
 	coordinatedRoleIncompatiblePartitions      = "IncompatiblePartitions"
-	coordinatedRoleReplicaBaselineAnnotation   = "modelserving.volcano.sh/coordinated-role-replica-baseline"
+	coordinatedRoleReplicaBaselineAnnotation   = utils.CoordinatedRoleReplicaBaselineAnnotation
 )
 
 func (p *roleRolloutPolicy) group(name string) *roleRolloutGroupPolicy {
@@ -322,14 +322,20 @@ func (c *ModelServingController) persistCoordinatedRoleRevision(
 	if roleCoordination(ms) == nil {
 		return nil
 	}
-	controllerRevision, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revision)
+	controllerRevision, err := c.controllerRevisionInRound(ctx, ms, revision)
 	if err != nil {
 		return err
 	}
 	if controllerRevision == nil {
-		controllerRevision, err = utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, revision, ms.Spec.Template.Roles)
+		if err := c.ensureTargetRevision(ctx, ms, revision); err != nil {
+			return err
+		}
+		controllerRevision, err = utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revision)
 		if err != nil {
 			return err
+		}
+		if controllerRevision == nil {
+			return fmt.Errorf("ControllerRevision %s disappeared before recording replica baseline", revision)
 		}
 	}
 
@@ -352,7 +358,12 @@ func (c *ModelServingController) persistCoordinatedRoleRevision(
 		copy.Annotations = make(map[string]string)
 	}
 	copy.Annotations[coordinatedRoleReplicaBaselineAnnotation] = string(baseline)
-	_, err = c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, copy, metav1.UpdateOptions{})
+	updated, err := c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, copy, metav1.UpdateOptions{})
+	if err == nil {
+		if round := coordinatedRoundOf(ctx, ms); round != nil {
+			round.snapshots[revision] = controllerRevisionObservation{revision: updated}
+		}
+	}
 	return err
 }
 
@@ -391,7 +402,14 @@ func isCoordinatedRole(ms *workloadv1alpha1.ModelServing, roleName string) bool 
 
 func roleTemplateChanged(oldRoles map[string]workloadv1alpha1.Role, role workloadv1alpha1.Role) bool {
 	oldRole, existed := oldRoles[role.Name]
-	return existed && !utils.EqualRoleTemplateForRevision(oldRole, role)
+	if !existed {
+		return false
+	}
+	left := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{oldRole}}}}
+	right := left.DeepCopy()
+	right.Spec.Template.Roles[0] = role
+	equal, err := utils.EqualRoleRevisions("", "", left, right, role.Name)
+	return err != nil || !equal
 }
 
 func (c *ModelServingController) roleSpecsFromRevisionInRound(ctx context.Context,
@@ -423,20 +441,40 @@ func (c *ModelServingController) readCoordinatedRevision(ctx context.Context, ms
 	if controllerRevision == nil {
 		return nil, fmt.Errorf("controller revision %s is missing or not controlled by the current ModelServing UID", revision)
 	}
-	historical, err := modelServingFromControllerRevision(ms, controllerRevision, true)
+	historical, err := c.revisionHistory(ctx, ms).workload(ctx, revision)
 	if err != nil {
 		return nil, err
 	}
 	oldRoles := historical.Spec.Template.Roles
+	// Replica baselines are coordination observations, never rendering inputs.
+	// Legacy snapshots carried these counts in Data before the annotation existed.
+	if controllerRevision.Annotations[utils.ControllerRevisionDataVersionAnnotation] == "" {
+		legacy, err := utils.GetRolesFromControllerRevision(controllerRevision)
+		if err != nil {
+			return nil, err
+		}
+		for i := range oldRoles {
+			for _, old := range legacy {
+				if old.Name == oldRoles[i].Name {
+					oldRoles[i].Replicas = old.Replicas
+				}
+			}
+		}
+	}
+	if controllerRevision.Annotations[utils.ControllerRevisionDataVersionAnnotation] != "" && controllerRevision.Annotations[coordinatedRoleReplicaBaselineAnnotation] == "" && roleCoordination(ms) != nil {
+		return nil, fmt.Errorf("ControllerRevision %s has no coordinated Role replica baseline", revision)
+	}
 	if baseline := controllerRevision.Annotations[coordinatedRoleReplicaBaselineAnnotation]; baseline != "" {
 		var replicasByRole map[string]int32
 		if err := json.Unmarshal([]byte(baseline), &replicasByRole); err != nil {
 			return nil, fmt.Errorf("failed to parse Role replica baseline from ControllerRevision %s: %w", revision, err)
 		}
 		for i := range oldRoles {
-			if replicas, exists := replicasByRole[oldRoles[i].Name]; exists {
-				oldRoles[i].Replicas = &replicas
+			replicas, exists := replicasByRole[oldRoles[i].Name]
+			if !exists || replicas < 0 {
+				return nil, fmt.Errorf("ControllerRevision %s has no valid replica baseline for Role %s", revision, oldRoles[i].Name)
 			}
+			oldRoles[i].Replicas = &replicas
 		}
 	}
 	oldRoleByName := make(map[string]workloadv1alpha1.Role, len(oldRoles))
@@ -778,11 +816,15 @@ func (c *ModelServingController) resolveRoleRolloutPolicy(
 			}
 			oldRolesByRevision[baselineRevision] = oldRoleByName
 		}
-		oldRoles := make([]workloadv1alpha1.Role, 0, len(oldRoleByName))
-		for _, role := range oldRoleByName {
-			oldRoles = append(oldRoles, role)
+		historical, err := c.revisionHistory(ctx, ms).workload(ctx, baselineRevision)
+		if err != nil {
+			return nil, err
 		}
-		if utils.EqualRoleTemplatesForRevision(oldRoles, ms.Spec.Template.Roles) {
+		equal, err := utils.EqualModelServingRevisions(baselineRevision, newRevision, historical, ms)
+		if err != nil {
+			return nil, err
+		}
+		if equal {
 			continue
 		}
 		terminatingByRole := c.terminatingRoleReplicas(ctx, ms, servingGroup)
@@ -807,6 +849,14 @@ func (c *ModelServingController) resolveRoleRolloutPolicy(
 			if err != nil {
 				return nil, err
 			}
+			_, existed := oldRoleByName[roleSpec.Name]
+			roleEqual := true
+			if existed {
+				roleEqual, err = utils.EqualRoleRevisions("", "", historical, ms, roleSpec.Name)
+				if err != nil {
+					return nil, err
+				}
+			}
 			states = append(states, c.resolveRoleRolloutState(ctx,
 				ms,
 				servingGroup,
@@ -814,7 +864,7 @@ func (c *ModelServingController) resolveRoleRolloutPolicy(
 				previousDesired,
 				roleList,
 				partition,
-				roleTemplateChanged(oldRoleByName, roleSpec),
+				existed && !roleEqual,
 				terminatingByRole[roleSpec.Name],
 				stablePopulation,
 			))

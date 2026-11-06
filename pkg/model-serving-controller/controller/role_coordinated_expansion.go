@@ -123,7 +123,7 @@ func (c *ModelServingController) stageCoordinatedExpansionGang(
 	if len(deferred) == 0 {
 		return nil
 	}
-	revision := utils.ModelServingRevision(ms)
+	revision := c.revisionTarget(ctx, ms)
 	policy, err := c.resolveRoleRolloutPolicy(ctx, ms, revision)
 	if err != nil {
 		return fmt.Errorf("resolve coordinated expansion for PodGroup %s: %w", groupName, err)
