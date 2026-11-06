@@ -16,6 +16,10 @@ limitations under the License.
 
 package controller
 
+import (
+	modelserving "github.com/volcano-sh/kthena/pkg/model-serving-controller/controller"
+)
+
 type Config struct {
 	EnableLeaderElection         bool
 	Workers                      int
@@ -26,4 +30,6 @@ type Config struct {
 	KubeAPIBurst                 int
 	DebugPort                    int
 	AutoscalingSyncPeriodSeconds int
+	// RecoveryBackoff configures the delay between consecutive recoveries of a failing ModelServing unit.
+	RecoveryBackoff modelserving.RecoveryBackoffConfig
 }
