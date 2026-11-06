@@ -43,7 +43,11 @@ serving the last good one.
 ## Configuring serving instances
 
 Serving instances cannot be discovered as pods without an API server, so a
-ModelServer lists them in `spec.endpoints`:
+ModelServer normally lists them in `spec.endpoints`. A custom binary can instead
+use an [endpoint discovery provider](./endpoint-discovery-provider.md) for dynamic
+membership, while still loading ModelServer/ModelRoute resources from files.
+
+Static configuration:
 
 ```yaml
 apiVersion: networking.serving.volcano.sh/v1alpha1

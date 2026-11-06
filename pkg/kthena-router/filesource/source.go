@@ -47,6 +47,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/controller"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/discovery"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/webhook"
 )
@@ -87,7 +88,8 @@ type Source struct {
 	store  datastore.Store
 	// transports holds the per-ModelServer upstream transports, kept in sync
 	// with the trafficPolicy.connectionPool of the loaded ModelServers.
-	transports *common.TransportRegistry
+	transports        *common.TransportRegistry
+	endpointDiscovery *discovery.Controller
 
 	synced atomic.Bool
 	// digest of the last successfully applied snapshot, used to skip re-parsing
@@ -97,9 +99,17 @@ type Source struct {
 	applied *resources
 }
 
+type Option func(*Source)
+
+// WithEndpointDiscovery delegates ModelServer membership to the same discovery
+// controller used with Kubernetes resources. Resource parsing remains unchanged.
+func WithEndpointDiscovery(d *discovery.Controller) Option {
+	return func(s *Source) { s.endpointDiscovery = d }
+}
+
 // NewSource creates a Source reading manifests from dir. A non-positive period
 // falls back to the default sync period.
-func NewSource(dir string, period time.Duration, store datastore.Store, transports *common.TransportRegistry) (*Source, error) {
+func NewSource(dir string, period time.Duration, store datastore.Store, transports *common.TransportRegistry, options ...Option) (*Source, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read resource directory %s: %w", dir, err)
@@ -110,13 +120,17 @@ func NewSource(dir string, period time.Duration, store datastore.Store, transpor
 	if period <= 0 {
 		period = defaultSyncPeriod
 	}
-	return &Source{
+	source := &Source{
 		dir:        dir,
 		period:     period,
 		store:      store,
 		transports: transports,
 		applied:    newResources(),
-	}, nil
+	}
+	for _, option := range options {
+		option(source)
+	}
+	return source, nil
 }
 
 // HasSynced reports whether the initial load completed.
@@ -374,11 +388,17 @@ func (s *Source) apply(next *resources) {
 	}
 
 	for name, ms := range next.modelServers {
-		if len(ms.Spec.Endpoints) == 0 {
+		if s.endpointDiscovery == nil && len(ms.Spec.Endpoints) == 0 {
 			klog.Warningf("model server %s declares no endpoints; serving instances cannot be "+
 				"discovered without the Kubernetes API server", name)
 		}
-		if err := controller.SyncStaticEndpoints(s.store, ms); err != nil {
+		var err error
+		if s.endpointDiscovery != nil {
+			err = s.endpointDiscovery.UpdateModelServer(ms)
+		} else {
+			err = controller.SyncStaticEndpoints(s.store, ms)
+		}
+		if err != nil {
 			klog.Errorf("failed to store model server %s: %v", name, err)
 		}
 		if s.transports != nil {
@@ -395,7 +415,13 @@ func (s *Source) apply(next *resources) {
 		if _, ok := next.modelServers[name]; ok {
 			continue
 		}
-		if err := s.store.DeleteModelServer(name); err != nil {
+		var err error
+		if s.endpointDiscovery != nil {
+			err = s.endpointDiscovery.DeleteModelServer(name)
+		} else {
+			err = s.store.DeleteModelServer(name)
+		}
+		if err != nil {
 			klog.Errorf("failed to delete model server %s: %v", name, err)
 		}
 		if s.transports != nil {

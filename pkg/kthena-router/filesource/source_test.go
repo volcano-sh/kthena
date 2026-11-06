@@ -17,6 +17,7 @@ limitations under the License.
 package filesource
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,6 +31,7 @@ import (
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/discovery"
 )
 
 type fakePodRuntimeInspector struct{}
@@ -81,6 +83,41 @@ func newTestSource(t *testing.T, dir string) (*Source, datastore.Store) {
 func writeManifest(t *testing.T, dir, name, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600))
+}
+
+type discoveredSource struct{}
+
+func (discoveredSource) Snapshot(context.Context) ([]aiv1alpha1.Endpoint, error) {
+	return []aiv1alpha1.Endpoint{{Name: "external", Address: "10.0.0.9"}}, nil
+}
+func (discoveredSource) Close() {}
+
+func TestFileSourceDelegatesEndpointOwnership(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "model.yaml", modelServerManifest)
+	store := datastore.New(datastore.WithPodRuntimeInspector(fakePodRuntimeInspector{}))
+	d, err := discovery.NewController(discovery.Config{
+		Provider: "test", RefreshInterval: "1h", Mappings: []discovery.Mapping{{ModelServer: "default/demo-server"}},
+	}, store, discovery.Registry{"test": func(types.NamespacedName, map[string]interface{}, func()) (discovery.Source, error) {
+		return discoveredSource{}, nil
+	}})
+	require.NoError(t, err)
+	defer d.Close()
+	s, err := NewSource(dir, time.Second, store, nil, WithEndpointDiscovery(d))
+	require.NoError(t, err)
+	require.NoError(t, s.sync())
+	name := types.NamespacedName{Namespace: "default", Name: "demo-server:external"}
+	require.Eventually(t, func() bool { return store.GetPodInfo(name) != nil }, 5*time.Second, time.Millisecond)
+	require.Nil(t, store.GetPodInfo(types.NamespacedName{Namespace: "default", Name: "demo-server:vllm-0"}))
+	// Changing another resource reloads the directory, but must not overwrite
+	// discovered membership with ModelServer.spec.endpoints.
+	writeManifest(t, dir, "route.yaml", modelRouteManifest)
+	require.NoError(t, s.sync())
+	require.NotNil(t, store.GetPodInfo(name))
+	require.NoError(t, os.Remove(filepath.Join(dir, "model.yaml")))
+	require.NoError(t, s.sync())
+	require.Nil(t, store.GetPodInfo(name))
+	require.Nil(t, store.GetModelServer(types.NamespacedName{Namespace: "default", Name: "demo-server"}))
 }
 
 func TestSourceLoadsResources(t *testing.T) {

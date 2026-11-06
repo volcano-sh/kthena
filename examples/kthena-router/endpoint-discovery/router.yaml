@@ -1,0 +1,14 @@
+endpointDiscovery:
+  provider: http-json
+  refreshInterval: 2s
+  snapshotTimeout: 1s
+  mappings:
+    - modelServer: default/demo
+      parameters:
+        url: http://127.0.0.1:18081/endpoints
+scheduler:
+  plugins:
+    Score:
+      enabled:
+        - name: random
+          weight: 1

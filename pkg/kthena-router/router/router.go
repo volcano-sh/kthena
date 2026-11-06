@@ -131,6 +131,15 @@ func (r *Router) ActiveRequestCount() int64 {
 }
 
 func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry *common.TransportRegistry) *Router {
+	routerConfig, err := conf.ParseRouterConfig(routerConfigPath)
+	if err != nil {
+		klog.Fatalf("failed to parse router config: %v", err)
+	}
+	return NewRouterWithConfig(store, routerConfig, transportRegistry)
+}
+
+// NewRouterWithConfig shares one parsed startup configuration with discovery.
+func NewRouterWithConfig(store datastore.Store, routerConfig *conf.RouterConfiguration, transportRegistry *common.TransportRegistry) *Router {
 	// User fairness and session boost are mutually exclusive scheduling strategies.
 	// Enabling both is a configuration error.
 	if EnableFairnessScheduling && EnableSessionBoost {
@@ -164,11 +173,6 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 			loadRateLimiter.DeleteLimiter(data.ModelName)
 		}
 	})
-
-	routerConfig, err := conf.ParseRouterConfig(routerConfigPath)
-	if err != nil {
-		klog.Fatalf("failed to parse router config: %v", err)
-	}
 
 	sessionStickyStore, err := sessionsticky.NewStore(routerConfig.SessionSticky)
 	if err != nil {
