@@ -12,6 +12,10 @@ The router supports two main types of rate limiting:
 
 Limits are based on the number of input/output tokens over a specific time window (second, minute, hour, day, or month).
 
+Input token quota is charged only when the router has selected a backend for the request: a target Pod for a `ModelServer` or `InferencePool`, or the provider for an `ExternalModelProvider`. Requests that fail before that point do not consume quota. Examples include a missing `ModelServer`, no available Pods, a scheduling failure, or a timeout in the fairness or session-boost queue. A request that is already over the limit is rejected with `429` before it is queued or scheduled, without consuming quota. When fairness scheduling or session boost is enabled, the quota is charged after the request leaves the queue, so a request that passed the early check can still be rejected if the quota ran out while it was waiting.
+
+If the request then never reaches the selected backend, the router refunds its input token quota. This happens when the connection to every candidate Pod or to the provider is refused or cannot be established, or when the router fails while preparing the upstream request. Once a backend has received the request, the quota stays charged even if the request later fails, because the backend may already have spent work on it. This covers an error response, a timeout, or a dropped connection. A refund cannot raise the available quota above the configured limit.
+
 ## Preparation
 
 Before diving into the rate-limiting configurations, let's set up the environment. All the configuration examples in this document can be found in the [examples/kthena-router](https://github.com/volcano-sh/kthena/tree/main/examples/kthena-router) directory of the Kthena repository.

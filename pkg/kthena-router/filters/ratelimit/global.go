@@ -176,6 +176,41 @@ func (g *GlobalRateLimiter) AllowN(now time.Time, n int) bool {
 	return allowed == 1
 }
 
+// ReturnN implements Limiter interface by adding n tokens back to the shared bucket, capped at capacity
+func (g *GlobalRateLimiter) ReturnN(now time.Time, n int) {
+	key := fmt.Sprintf("%s:%s:%s", g.keyPrefix, g.modelName, g.tokenType)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	luaScript := `
+		local key = KEYS[1]
+		local returned_tokens = tonumber(ARGV[1])
+		local capacity = tonumber(ARGV[2])
+		local refill_rate = tonumber(ARGV[3])
+		local expire_seconds = tonumber(ARGV[4])
+
+		local time_result = redis.call('time')
+		local current_time = tonumber(time_result[1]) + tonumber(time_result[2]) / 1000000
+
+		local current_tokens = tonumber(redis.call('hget', key, 'tokens')) or capacity
+		local last_update = tonumber(redis.call('hget', key, 'last_update')) or current_time
+
+		-- Refill first so the returned tokens and the elapsed refill share the same capacity cap
+		local time_passed = math.max(0, current_time - last_update)
+		current_tokens = math.min(capacity, current_tokens + time_passed * refill_rate + returned_tokens)
+
+		redis.call('hset', key, 'tokens', current_tokens, 'last_update', current_time)
+		redis.call('expire', key, expire_seconds)
+		return 1
+	`
+
+	result := g.client.Eval(ctx, luaScript, []string{key}, n, g.burst, g.getRefillRate(), g.getExpireSeconds())
+	if result.Err() != nil {
+		klog.Errorf("failed to execute token return lua script: %v", result.Err())
+	}
+}
+
 // getRefillRate calculates the token refill rate per second
 func (g *GlobalRateLimiter) getRefillRate() float64 {
 	duration := getTimeUnitDuration(g.unit)
