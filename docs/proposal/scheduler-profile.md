@@ -144,6 +144,9 @@ Two cases decide which chain serves a ModelServer's requests:
   (build failure or dangling reference): its requests fail directly
   (503 with a reason).
 
+Users migrating from the global config must copy every plugin and arg
+they rely on into the profile — nothing carries over.
+
 Each profile chain builds its own plugin instances from its own args
 (see [Plugin lifecycle](#plugin-lifecycle)), so every plugin's args —
 including the stateful prefix-cache and kvcache-aware — take effect per
@@ -168,12 +171,10 @@ profile.
     - *Structural* (webhook-local): duplicate plugin entries, score
       weight ranges.
     - *Plugin-dependent*: plugin names must be registered, args must pass
-      each plugin's validator, plugins must support their declared role
-      (filter vs score), and the random plugin must be the only score
-      plugin (mirroring `handleRandomPluginConflicts` for the global
-      config). These checks are delegated to the plugins package — the
-      single source of truth for the plugin set — so the webhook does not
-      depend on the scheduling engine.
+      each plugin's validator, and plugins must support their declared
+      role (filter vs score). These checks are delegated to the plugins
+      package — the single source of truth for the plugin set — so the
+      webhook does not depend on the scheduling engine.
 3. **Chain construction (runtime)**: the last line of defense when the
    ChainManager materializes a profile into a plugin chain.
 
