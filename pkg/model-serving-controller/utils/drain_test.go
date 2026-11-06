@@ -17,8 +17,16 @@ limitations under the License.
 package utils
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -187,4 +195,112 @@ func TestApplyDrainWithKVBuffer(t *testing.T) {
 			t.Fatalf("DRAIN_BUFFER_SECONDS = %q, want 30", e.Value)
 		}
 	}
+}
+
+// TestDrainHookMetricPattern verifies the hook's metric pattern accepts the
+// labeled format engines actually emit (vllm:num_requests_running{...} 0.0).
+// Keep the pattern below in sync with DrainHookScript.
+func TestDrainHookMetricPattern(t *testing.T) {
+	if !strings.Contains(DrainHookScript, `(?:\{[^}]*\})?`) || !strings.Contains(DrainHookScript, "if counts and all(") {
+		t.Fatal("DrainHookScript must accept optional labels and never treat an empty match as drained")
+	}
+	pattern := regexp.MustCompile(`(?m)^(?:vllm|sglang):(?:num_requests_running|num_running_reqs|num_requests_waiting|num_queue_reqs)(?:\{[^}]*\})?\s+(\S+)`)
+
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "vllm labeled metrics",
+			body: "vllm:num_requests_running{engine=\"0\",model_name=\"m\"} 3.0\n" +
+				"vllm:num_requests_waiting{engine=\"0\",model_name=\"m\"} 1.0",
+			want: []string{"3.0", "1.0"},
+		},
+		{
+			name: "sglang labeled metrics",
+			body: "sglang:num_running_reqs{model_name=\"m\"} 0.0\n" +
+				"sglang:num_queue_reqs{model_name=\"m\"} 0.0",
+			want: []string{"0.0", "0.0"},
+		},
+		{
+			name: "unlabeled metrics",
+			body: "vllm:num_requests_running 5",
+			want: []string{"5"},
+		},
+		{
+			name: "suffixed metric is not matched",
+			body: "vllm:num_requests_waiting_by_reason{reason=\"capacity\"} 2.0",
+			want: nil,
+		},
+		{
+			name: "unrelated body is not matched",
+			body: "python_gc_objects_collected_total{generation=\"0\"} 3.0",
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			matches := pattern.FindAllStringSubmatch(tc.body, -1)
+			var got []string
+			for _, m := range matches {
+				got = append(got, m[1])
+			}
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestDrainHookScriptBehavior runs the hook against a mocked metrics endpoint.
+// It is skipped when python3 is unavailable.
+func TestDrainHookScriptBehavior(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	if err := exec.Command(python, "--version").Run(); err != nil {
+		t.Skipf("python3 is not runnable: %v", err)
+	}
+
+	serve := func(body string) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(srv.Close)
+		_, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+		require.NoError(t, err)
+		return port
+	}
+	run := func(t *testing.T, port, drainTimeout string) string {
+		cmd := exec.Command(python, "-c", DrainHookScript)
+		cmd.Env = append(os.Environ(),
+			"DRAIN_TIMEOUT="+drainTimeout,
+			"GRACE_SECONDS=60",
+			"DRAIN_BUFFER_SECONDS=0",
+			"DRAIN_METRICS_PORT="+port,
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err)
+		return string(out)
+	}
+
+	t.Run("zero metrics exits early", func(t *testing.T) {
+		port := serve("vllm:num_requests_running{engine=\"0\"} 0.0\nvllm:num_requests_waiting{engine=\"0\"} 0.0")
+		out := run(t, port, "60")
+		require.Contains(t, out, "in-flight drained")
+	})
+
+	t.Run("in-flight metrics keep polling until timeout", func(t *testing.T) {
+		port := serve("vllm:num_requests_running{engine=\"0\"} 5.0\nvllm:num_requests_waiting{engine=\"0\"} 0.0")
+		out := run(t, port, "2")
+		require.Contains(t, out, "timeout before in-flight reached zero")
+		require.NotContains(t, out, "in-flight drained")
+	})
+
+	t.Run("unmatched metrics do not end the drain", func(t *testing.T) {
+		port := serve("python_gc_objects_collected_total{generation=\"0\"} 3.0")
+		out := run(t, port, "2")
+		require.Contains(t, out, "no drain metrics matched")
+		require.NotContains(t, out, "in-flight drained")
+	})
 }

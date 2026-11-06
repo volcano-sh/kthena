@@ -54,10 +54,13 @@ port = os.environ.get("DRAIN_METRICS_PORT", "")
 budget = min(drain_timeout, int(grace_seconds * 0.7))
 if budget <= 0:
     sys.exit(0)
+# Engine metrics carry labels, e.g. vllm:num_requests_running{engine="0"} 0.0;
+# the label block is optional so both forms match.
 pattern = re.compile(
     r"^(?:vllm|sglang):(?:num_requests_running|num_running_reqs|"
-    r"num_requests_waiting|num_queue_reqs)\s+(\S+)", re.M)
+    r"num_requests_waiting|num_queue_reqs)(?:\{[^}]*\})?\s+(\S+)", re.M)
 deadline = time.time() + budget
+no_metrics_reported = False
 while time.time() < deadline:
     counts = None
     try:
@@ -66,7 +69,12 @@ while time.time() < deadline:
         counts = [float(v) for v in pattern.findall(body)]
     except Exception as err:
         print("drain: metrics scrape failed: %s" % err, flush=True)
-    if counts is not None and all(c == 0 for c in counts):
+    if counts is not None and not counts and not no_metrics_reported:
+        # Unrecognized metric names must not end the drain: keep polling and
+        # leave the residual to SIGTERM + grace.
+        no_metrics_reported = True
+        print("drain: no drain metrics matched; check the engine metric names", flush=True)
+    if counts and all(c == 0 for c in counts):
         if buffer_s > 0:
             print("drain: in-flight drained, holding %ss KV buffer" % buffer_s, flush=True)
             time.sleep(buffer_s)
