@@ -381,6 +381,146 @@ func TestBootstrapInPlaceUpdateFallsBackToRecreate(t *testing.T) {
 	assert.True(t, c.updatesInPlace(ms))
 }
 
+func TestBootstrapMultiPodReplicaRequiresAllPodsReady(t *testing.T) {
+	ms := bootstrapModelServing("bootstrap-multipod", 3, 1)
+	ms.Spec.Template.Roles[0].WorkerReplicas = 1
+	ms.Spec.Template.Roles[0].WorkerTemplate = &workloadv1alpha1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "worker-container", Image: "test-image:latest"}},
+		},
+	}
+	ms.Spec.BootstrapAccelerateStrategy.ModelExpress.EngineContainers = []string{"prefill-container", "worker-container"}
+	h, _ := newBootstrapTestController(t, ms)
+	c := h.controller
+	key := utils.GetNamespaceName(ms)
+	group0 := ms.Name + "-0"
+	roleHash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
+
+	h.sync(ms)
+	groups, err := c.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	require.Len(t, groups, 1, "only the seed group is created initially")
+	pods := h.listPods(ms)
+	require.Len(t, pods, 2, "seed group has entry and worker pods")
+
+	revisionsByPod := make(map[string]string, len(pods))
+	for _, pod := range pods {
+		for _, env := range pod.Spec.Containers[0].Env {
+			if env.Name == plugins.EnvModelRevision {
+				revisionsByPod[pod.Name] = env.Value
+			}
+		}
+	}
+	assert.Equal(t, roleHash+"-0", revisionsByPod[group0+"-prefill-0-0"], "entry pod uses position 0")
+	assert.Equal(t, roleHash+"-1", revisionsByPod[group0+"-prefill-0-1"], "worker pod uses position 1")
+
+	// Mark only the entry pod Ready; the worker pod remains NotReady.
+	entryPod, err := h.kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), group0+"-prefill-0-0", metav1.GetOptions{})
+	require.NoError(t, err)
+	entryPod.Status.Phase = corev1.PodRunning
+	entryPod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	_, err = h.kubeClient.CoreV1().Pods(ms.Namespace).UpdateStatus(context.Background(), entryPod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		cached, err := c.podsLister.Pods(ms.Namespace).Get(entryPod.Name)
+		return err == nil && utils.IsPodRunningAndReady(cached)
+	}, 2*time.Second, 10*time.Millisecond)
+
+	h.sync(ms)
+	assert.NotEqual(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group0, "prefill", "prefill-0"))
+	groups, err = c.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	assert.Len(t, groups, 1, "entry readiness alone must not release remaining groups")
+
+	// Mark all pods of the replica Ready; remaining groups should now be admitted.
+	h.markRoleReady(ms, group0, "prefill", "prefill-0")
+	h.sync(ms)
+	groups, err = c.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	assert.Len(t, groups, 3)
+	assert.Len(t, h.listPods(ms), 6)
+}
+
+func TestBootstrapPercentageInitialSeedReplicas(t *testing.T) {
+	ms := bootstrapModelServing("bootstrap-pct-seed", 4, 1)
+	ms.Spec.BootstrapAccelerateStrategy.Roles[0].InitialSeedReplicas = ptr.To(intstr.FromString("50%"))
+	h, _ := newBootstrapTestController(t, ms)
+	c := h.controller
+	key := utils.GetNamespaceName(ms)
+
+	h.sync(ms)
+	groups, err := c.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	require.Len(t, groups, 2, "50% of 4 replicas admits 2 seed groups")
+
+	// Once a single seed group becomes Ready, the pool has a Ready source and releases the rest.
+	h.markRoleReady(ms, ms.Name+"-0", "prefill", "prefill-0")
+	h.sync(ms)
+	groups, err = c.store.GetServingGroupByModelServing(key)
+	require.NoError(t, err)
+	assert.Len(t, groups, 4)
+}
+
+func TestBootstrapRoleRollingUpdateStagesNewTemplateBySeed(t *testing.T) {
+	ms := bootstrapModelServing("bootstrap-rollout", 1, 3)
+	ms.Spec.Template.GangPolicy = &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 1}}
+	ms.Spec.Template.Roles[0].MaxUnavailable = ptr.To(intstr.FromInt32(3))
+	ms.Spec.Template.Roles[0].MaxSurge = ptr.To(intstr.FromInt32(0))
+	ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
+		Type: workloadv1alpha1.RoleRollingUpdate,
+	}
+	h, _ := newBootstrapTestController(t, ms)
+	c := h.controller
+	key := utils.GetNamespaceName(ms)
+	group := ms.Name + "-0"
+
+	// Cold start: seed first, then remaining 2 replicas.
+	h.sync(ms)
+	h.markRoleReady(ms, group, "prefill", "prefill-0")
+	h.sync(ms)
+	for _, roleID := range []string{"prefill-1", "prefill-2"} {
+		h.markRoleReady(ms, group, "prefill", roleID)
+	}
+	h.sync(ms)
+	roles, err := c.store.GetRoleList(key, group, "prefill")
+	require.NoError(t, err)
+	require.Len(t, roles, 3)
+
+	// Update the prefill image so the new revision has a new role template hash.
+	updated := ms.DeepCopy()
+	updated.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "test-image:v2"
+	newHash := utils.CalRoleTemplateHash(updated.Spec.Template.Roles[0])
+	_, err = h.kthenaClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(context.Background(), updated, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		current, err := c.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name)
+		return err == nil && current.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image == "test-image:v2"
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Reconcile 1 deletes the 3 outdated v1 replicas (permitted by maxUnavailable=3).
+	h.sync(updated)
+	require.Eventually(t, func() bool {
+		pods, err := c.getPodsByIndex(GroupNameKey, fmt.Sprintf("%s/%s", ms.Namespace, group))
+		return err == nil && len(pods) == 0
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Reconcile 2 finalizes any remaining deleting roles and scales up the new template:
+	// only 1 v2 seed replica may be created while v2 has no Ready source.
+	h.sync(updated)
+	roles, err = c.store.GetRoleList(key, group, "prefill")
+	require.NoError(t, err)
+	require.Len(t, roles, 1, "only the v2 seed replica is admitted before a v2 source is Ready")
+	assert.Equal(t, "prefill-0", roles[0].Name)
+	assert.Equal(t, newHash, roles[0].RoleTemplateHash)
+
+	// Once the v2 seed is Ready, the remaining 2 v2 replicas are created together.
+	h.markRoleReady(updated, group, "prefill", "prefill-0")
+	h.sync(updated)
+	roles, err = c.store.GetRoleList(key, group, "prefill")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"prefill-0", "prefill-1", "prefill-2"}, roleNames(roles))
+}
+
 func roleNames(roles []datastore.Role) []string {
 	names := make([]string, 0, len(roles))
 	for _, role := range roles {
