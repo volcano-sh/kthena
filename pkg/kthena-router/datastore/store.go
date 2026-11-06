@@ -1020,7 +1020,11 @@ func (s *store) GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, err
 
 	for _, podName := range podNames {
 		if value, ok := s.pods.Load(podName); ok {
-			pods = append(pods, value.(*PodInfo))
+			pi := value.(*PodInfo)
+			if pi.IsDraining() {
+				continue
+			}
+			pods = append(pods, pi)
 		}
 	}
 
@@ -1085,7 +1089,11 @@ func (s *store) GetDecodePods(modelServerName types.NamespacedName) ([]*PodInfo,
 
 	for _, podName := range decodePodNames {
 		if value, ok := s.pods.Load(podName); ok {
-			decodePods = append(decodePods, value.(*PodInfo))
+			pi := value.(*PodInfo)
+			if pi.IsDraining() {
+				continue
+			}
+			decodePods = append(decodePods, pi)
 		}
 	}
 
@@ -1105,7 +1113,11 @@ func (s *store) GetPrefillPods(modelServerName types.NamespacedName) ([]*PodInfo
 
 	for _, podName := range prefillPodNames {
 		if value, ok := s.pods.Load(podName); ok {
-			prefillPods = append(prefillPods, value.(*PodInfo))
+			pi := value.(*PodInfo)
+			if pi.IsDraining() {
+				continue
+			}
+			prefillPods = append(prefillPods, pi)
 		}
 	}
 
@@ -1130,7 +1142,11 @@ func (s *store) GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedNam
 	prefillPods := make([]*PodInfo, 0, len(prefillPodNames))
 	for _, podName := range prefillPodNames {
 		if value, ok := s.pods.Load(podName); ok {
-			prefillPods = append(prefillPods, value.(*PodInfo))
+			pi := value.(*PodInfo)
+			if pi.IsDraining() {
+				continue
+			}
+			prefillPods = append(prefillPods, pi)
 		}
 	}
 
@@ -2128,6 +2144,13 @@ func (p *PodInfo) GetRequestRunningNum() float64 {
 	return p.RequestRunningNum
 }
 
+// IsDraining reports whether the Pod is terminating; draining Pods stay
+// tracked but are excluded from scheduling candidates.
+func (p *PodInfo) IsDraining() bool {
+	pod := p.GetPod()
+	return pod != nil && pod.DeletionTimestamp != nil
+}
+
 // IncrOnFlightRequests atomically increments the local in-flight counter and
 // returns the new value.
 func (p *PodInfo) IncrOnFlightRequests() int64 {
@@ -2455,7 +2478,7 @@ func (s *store) GetPodsByInferencePool(name types.NamespacedName) ([]*PodInfo, e
 	s.pods.Range(func(key, value interface{}) bool {
 		podInfo := value.(*PodInfo)
 		pod := podInfo.GetPod()
-		if pod != nil && pod.Namespace == name.Namespace && selector.Matches(labels.Set(podInfo.GetPodLabels())) {
+		if pod != nil && pod.Namespace == name.Namespace && !podInfo.IsDraining() && selector.Matches(labels.Set(podInfo.GetPodLabels())) {
 			pods = append(pods, podInfo)
 		}
 		return true
