@@ -186,6 +186,8 @@ kthenaRouter:
 | `kthenaRouter.terminationGracePeriodSeconds` | int    | `330`   | Pod termination grace period for the router                             |
 | `kthenaRouter.drainTimeout`                  | string | `"5m"`  | Time allowed for the router to drain in-flight requests before shutdown |
 
+When `drainTimeout` passes, the router closes the connections that are still open. It can then take up to 5 more seconds to clean up those requests, so set `terminationGracePeriodSeconds` more than 5 seconds higher than `drainTimeout`.
+
 ## Installation
 
 ### Basic Installation

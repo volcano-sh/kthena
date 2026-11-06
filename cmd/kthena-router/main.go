@@ -135,13 +135,9 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	signalCh := make(chan os.Signal, 1)
+	signalCh := make(chan os.Signal, 2)
 	signal.Notify(signalCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-signalCh
-		klog.Info("Received termination, signaling shutdown")
-		cancel()
-	}()
+	go handleTerminationSignals(signalCh, cancel, os.Exit)
 
 	if enableWebhook {
 		go runWebhook(ctx, webhookPort, webhookCert, webhookKey, certSecretName, serviceName, kubeAPIQPS, kubeAPIBurst)
@@ -155,6 +151,20 @@ func main() {
 	server.ConfigSyncPeriod = configSyncPeriod
 	server.RouterConfigFile = routerConfigFile
 	server.Run(ctx)
+}
+
+// handleTerminationSignals cancels the router's context on the first signal.
+// The router then drains in-flight requests before it exits, which can take up
+// to DRAIN_TIMEOUT plus a few seconds, so a second signal exits without waiting
+// for the drain.
+func handleTerminationSignals(signalCh <-chan os.Signal, cancel context.CancelFunc, exit func(int)) {
+	<-signalCh
+	klog.Info("Received termination, signaling shutdown")
+	cancel()
+	<-signalCh
+	klog.Warning("Received second termination signal, exiting without waiting for the drain")
+	klog.Flush()
+	exit(1)
 }
 
 // ensureWebhookCertificate generates a certificate secret if needed and returns the CA bundle.
