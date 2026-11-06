@@ -111,15 +111,14 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 	outputLimiter, hasOutputLimit := r.outputLimiter[model]
 	r.mutex.RUnlock()
 
-	// Check input token rate limit
-	if hasInputLimit && !inputLimiter.AllowN(time.Now(), tokens) {
-		return &InputRateLimitExceededError{}
-	}
-
-	// Check output token rate limit - we conservatively check if there's at least 1 token available
-	// This prevents starting requests that likely won't be able to complete
+	// Check output capacity before consuming input tokens. AllowN deducts from the
+	// bucket, so rejecting on output after a successful input AllowN would leak quota.
 	if hasOutputLimit && outputLimiter.Tokens() < 1.0 {
 		return &OutputRateLimitExceededError{}
+	}
+
+	if hasInputLimit && !inputLimiter.AllowN(time.Now(), tokens) {
+		return &InputRateLimitExceededError{}
 	}
 
 	return nil
@@ -159,7 +158,8 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 			}
 		}
 
-		// Create global rate limiters
+		// Create or clear global rate limiters. A nil field means that side has no
+		// limit (per CRD comments), so drop any previously configured limiter.
 		if ratelimit.InputTokensPerUnit != nil {
 			r.inputLimiter[model] = NewGlobalRateLimiter(
 				r.redisClient,
@@ -169,6 +169,8 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 				*ratelimit.InputTokensPerUnit,
 				ratelimit.Unit,
 			)
+		} else {
+			delete(r.inputLimiter, model)
 		}
 
 		if ratelimit.OutputTokensPerUnit != nil {
@@ -180,9 +182,11 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 				*ratelimit.OutputTokensPerUnit,
 				ratelimit.Unit,
 			)
+		} else {
+			delete(r.outputLimiter, model)
 		}
 	} else {
-		// Create local rate limiters
+		// Create or clear local rate limiters
 		duration := getTimeUnitDuration(ratelimit.Unit)
 
 		if ratelimit.InputTokensPerUnit != nil {
@@ -190,6 +194,8 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 				rate.Limit(float64(*ratelimit.InputTokensPerUnit)/duration.Seconds()),
 				int(*ratelimit.InputTokensPerUnit),
 			)
+		} else {
+			delete(r.inputLimiter, model)
 		}
 
 		if ratelimit.OutputTokensPerUnit != nil {
@@ -197,6 +203,8 @@ func (r *TokenRateLimiter) AddOrUpdateLimiter(model string, ratelimit *networkin
 				rate.Limit(float64(*ratelimit.OutputTokensPerUnit)/duration.Seconds()),
 				int(*ratelimit.OutputTokensPerUnit),
 			)
+		} else {
+			delete(r.outputLimiter, model)
 		}
 	}
 
