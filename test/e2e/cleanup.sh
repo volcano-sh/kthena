@@ -31,8 +31,8 @@ echo "Deleting Kind cluster: ${CLUSTER_NAME}"
 kind delete cluster --name "${CLUSTER_NAME}"
 
 # Clean up kubeconfig
-if [ -f "/tmp/kubeconfig-e2e" ]; then
-    rm -f /tmp/kubeconfig-e2e
+if [ -f "${KUBECONFIG_E2E:-/tmp/kubeconfig-e2e}" ]; then
+    rm -f "${KUBECONFIG_E2E:-/tmp/kubeconfig-e2e}"
     echo "Cleaned up kubeconfig file"
 fi
 
