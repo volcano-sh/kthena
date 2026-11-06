@@ -104,6 +104,7 @@ spec:
                               description: |-
                                 Weight multiplies this plugin's score before it is summed with the
                                 other plugins' weighted scores. Must be greater than 0.
+                              format: int32
                               minimum: 1
                               type: integer
                           required:

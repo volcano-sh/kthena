@@ -104,5 +104,5 @@ type PluginWithWeight struct {
 	// Weight multiplies this plugin's score before it is summed with the
 	// other plugins' weighted scores. Must be greater than 0.
 	// +kubebuilder:validation:Minimum=1
-	Weight int `json:"weight"`
+	Weight int32 `json:"weight"`
 }

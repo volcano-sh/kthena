@@ -332,7 +332,7 @@ func (m *ProfileChainManager) buildChain(profile *aiv1alpha1.SchedulerProfile) (
 		}
 		scores = append(scores, &scorePlugin{
 			plugin: sc,
-			weight: pw.Weight,
+			weight: int(pw.Weight),
 		})
 		enabledScoreNames = append(enabledScoreNames, pw.Name)
 	}

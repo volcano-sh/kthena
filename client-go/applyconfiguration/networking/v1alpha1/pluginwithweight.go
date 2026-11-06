@@ -26,8 +26,8 @@ type PluginWithWeightApplyConfiguration struct {
 	// Name of the score plugin, e.g. "prefix-cache".
 	Name *string `json:"name,omitempty"`
 	// Weight multiplies this plugin's score before it is summed with the
-	// other plugins' weighted scores. Must be greater than 0.
-	Weight *int `json:"weight,omitempty"`
+	// other plugins' weighted scores. Must be between 1 and 100.
+	Weight *int32 `json:"weight,omitempty"`
 }
 
 // PluginWithWeightApplyConfiguration constructs a declarative configuration of the PluginWithWeight type for use with
@@ -47,7 +47,7 @@ func (b *PluginWithWeightApplyConfiguration) WithName(value string) *PluginWithW
 // WithWeight sets the Weight field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Weight field is set to the value of the last call.
-func (b *PluginWithWeightApplyConfiguration) WithWeight(value int) *PluginWithWeightApplyConfiguration {
+func (b *PluginWithWeightApplyConfiguration) WithWeight(value int32) *PluginWithWeightApplyConfiguration {
 	b.Weight = &value
 	return b
 }
