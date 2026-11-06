@@ -57,6 +57,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/providers"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/sessionsticky"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/testutil"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
@@ -109,6 +110,44 @@ func TestRouter_FinalizeSessionSticky_ReplacesModeMismatchedBinding(t *testing.T
 		Pod:         "new-decode",
 		PrefillPod:  "new-prefill",
 	}, got)
+}
+
+// TestRouter_FinalizeSessionSticky_CommitsPodWhileItIsUpdated commits the
+// selected pod while another goroutine replaces it, as the ModelServer
+// controller does; with -race it fails if the commit reads PodInfo.Pod without
+// the PodInfo lock.
+func TestRouter_FinalizeSessionSticky_CommitsPodWhileItIsUpdated(t *testing.T) {
+	store := sessionsticky.NewMemoryStore()
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	router := &Router{sessionStickyStore: store}
+	key := "sticky:model-route:session"
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	podInfo := testutil.PodInfoWithEngine("pod-a", "default", "10.0.0.1", "")
+	ctx := &framework.Context{BestPods: []*datastore.PodInfo{podInfo}}
+
+	updated := make(chan struct{})
+	go func() {
+		defer close(updated)
+		podInfo.UpdatePod(podInfo.GetPod().DeepCopy(), "", nil)
+	}()
+	router.finalizeSessionSticky(
+		c,
+		ctx,
+		&aiv1alpha1.SessionSticky{},
+		"session",
+		key,
+		sessionsticky.Binding{},
+		false,
+		"ms",
+	)
+	<-updated
+
+	got, ok := store.Get(t.Context(), key)
+	require.True(t, ok)
+	require.Equal(t, sessionsticky.Binding{ModelServer: "ms", Pod: "pod-a"}, got)
 }
 
 func withMetricsEndpoint(handler http.Handler) http.Handler {
