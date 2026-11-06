@@ -20,6 +20,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1334,10 +1335,35 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
 	assert.NoError(t, err)
 
+	// The subtests sync directly while the controller's worker runs. The workqueue
+	// never syncs one ModelServing twice at the same time, but direct calls skip it,
+	// so the worker and the subtests take turns through lockedSync. Set it before Run,
+	// because the worker reads syncHandler.
+	var syncMu sync.Mutex
+	lockedSync := func(ctx context.Context, key string) error {
+		syncMu.Lock()
+		defer syncMu.Unlock()
+		return controller.syncModelServing(ctx, key)
+	}
+	controller.syncHandler = lockedSync
+
 	stop := make(chan struct{})
 	defer close(stop)
 
-	go controller.Run(context.Background(), 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		controller.Run(ctx, 1)
+	}()
+	// Stop the controller when the test ends. Run returns without waiting for its
+	// workers, so also wait for the item a worker is processing; otherwise the worker
+	// keeps running and races with the controllers that later tests create.
+	defer func() {
+		cancel()
+		<-runDone
+		controller.workqueue.ShutDownWithDrain()
+	}()
 
 	// Start informers
 	kthenaInformerFactory.Start(stop)
@@ -1366,7 +1392,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
 		// Simulate controller processing the creation
-		err = controller.syncModelServing(context.Background(), "default/test-ms")
+		err = lockedSync(context.Background(), "default/test-ms")
 		assert.NoError(t, err)
 
 		// Wait for pods to be created and synced to cache
@@ -1404,7 +1430,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
 		// Process initial creation
-		err = controller.syncModelServing(context.Background(), "default/test-ms-scale-up")
+		err = lockedSync(context.Background(), "default/test-ms-scale-up")
 		assert.NoError(t, err)
 
 		// Verify ServingGroups initial state
@@ -1426,7 +1452,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
 		// Process the update
-		err = controller.syncModelServing(context.Background(), "default/test-ms-scale-up")
+		err = lockedSync(context.Background(), "default/test-ms-scale-up")
 		assert.NoError(t, err)
 
 		// Wait for pods to be created and synced to cache
@@ -1464,7 +1490,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
 		// Process initial creation
-		err = controller.syncModelServing(context.Background(), "default/test-ms-scale-down")
+		err = lockedSync(context.Background(), "default/test-ms-scale-down")
 		assert.NoError(t, err)
 
 		// Wait for pods to be created and synced to cache
@@ -1499,7 +1525,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
 		// Process the update
-		err = controller.syncModelServing(context.Background(), "default/test-ms-scale-down")
+		err = lockedSync(context.Background(), "default/test-ms-scale-down")
 		assert.NoError(t, err)
 
 		requirement, err := labels.NewRequirement(
@@ -1571,7 +1597,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
 		// Process initial creation
-		err = controller.syncModelServing(context.Background(), "default/test-role-scale-up")
+		err = lockedSync(context.Background(), "default/test-role-scale-up")
 		assert.NoError(t, err)
 
 		// Verify ServingGroups initial state
@@ -1644,7 +1670,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
 		// Process initial creation
-		err = controller.syncModelServing(context.Background(), "default/test-role-scale-down")
+		err = lockedSync(context.Background(), "default/test-role-scale-down")
 		assert.NoError(t, err)
 
 		// Wait for pods to be created and synced to cache
@@ -1679,7 +1705,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
 		// Process the update - may need multiple syncs for role scaling
-		err = controller.syncModelServing(context.Background(), "default/test-role-scale-down")
+		err = lockedSync(context.Background(), "default/test-role-scale-down")
 		assert.NoError(t, err)
 
 		requirement, err := labels.NewRequirement(
@@ -1769,7 +1795,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
 		// Process initial creation
-		err = controller.syncModelServing(context.Background(), "default/test-binpack-scale")
+		err = lockedSync(context.Background(), "default/test-binpack-scale")
 		assert.NoError(t, err)
 
 		// Wait for pods to be created and synced to cache
@@ -1846,7 +1872,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
 		// Process the update
-		err = controller.syncModelServing(context.Background(), "default/test-binpack-scale")
+		err = lockedSync(context.Background(), "default/test-binpack-scale")
 		assert.NoError(t, err)
 
 		// Binpack scale-down is based on deletion cost rather than ordinal. Group
@@ -1922,6 +1948,10 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		})
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
+		// Process initial creation
+		err = lockedSync(context.Background(), "default/test-gang-ms")
+		assert.NoError(t, err)
+
 		// Verify ServingGroups were created in store
 		verifyServingGroups(t, controller, ms, 2)
 
@@ -1974,7 +2004,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
 		// Process the update - may need multiple syncs to create new PodGroup
-		err = controller.syncModelServing(context.Background(), "default/test-gang-ms")
+		err = lockedSync(context.Background(), "default/test-gang-ms")
 		assert.NoError(t, err)
 
 		// Wait until three PodGroups for this ModelServing are created after scale up

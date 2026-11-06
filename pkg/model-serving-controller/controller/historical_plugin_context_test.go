@@ -94,6 +94,9 @@ func TestCoordinatedHistoryFormatsAndOwnerIdentity(t *testing.T) {
 					require.ErrorContains(t, readErr, "is not controlled by ModelServing")
 					require.ErrorContains(t, persistErr, "is not controlled by ModelServing")
 					for _, action := range client.Actions() {
+						if action.GetResource().Resource == "events" {
+							continue // RevisionUnresolved warnings are expected, workload writes are not.
+						}
 						require.Equal(t, "get", action.GetVerb(), "foreign history must have no metadata or workload writes")
 					}
 				}
@@ -323,6 +326,9 @@ func TestHistoricalContextRejectsUnusableHistoryBeforeEffects(t *testing.T) {
 				}
 				require.Error(t, err)
 				for _, a := range client.Actions() {
+					if a.GetResource().Resource == "events" {
+						continue // RevisionUnresolved warnings are expected, workload writes are not.
+					}
 					require.NotContains(t, []string{"create", "update", "delete", "patch"}, a.GetVerb())
 				}
 			})
