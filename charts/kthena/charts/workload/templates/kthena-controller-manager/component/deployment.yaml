@@ -47,6 +47,9 @@ spec:
             {{- if .Values.controllerManager.autoscalingSyncPeriodSeconds }}
             - --autoscaling-sync-period-seconds={{ .Values.controllerManager.autoscalingSyncPeriodSeconds }}
             {{- end }}
+            {{- if .Values.controllerManager.modelExpressServerAddress }}
+            - --modelexpress-server-address={{ .Values.controllerManager.modelExpressServerAddress }}
+            {{- end }}
           imagePullPolicy: {{ .Values.controllerManager.image.pullPolicy }}
           resources:
             {{- toYaml .Values.controllerManager.resource | nindent 12 }}

@@ -97,6 +97,53 @@ func TestBuildRevisionDataCanonicalSemantics(t *testing.T) {
 	}
 }
 
+// Bootstrap acceleration only changes when replicas are created and what the
+// managed plugin injects into generated Pods, so it must never roll a fleet.
+func TestRevisionNeutralToBootstrapAccelerateStrategy(t *testing.T) {
+	prefill := revisionTestRole("prefill", "prefill:v1")
+	base := revisionTestModelServing(prefill)
+	baseData, err := BuildRevisionData(base)
+	if err != nil {
+		t.Fatalf("BuildRevisionData(base) error = %v", err)
+	}
+	baseRevision := ModelServingRevision(base)
+	baseRoleHash := CalRoleTemplateHash(base.Spec.Template.Roles[0])
+
+	variants := map[string]*workloadv1alpha1.BootstrapAccelerateStrategy{
+		"added": {
+			Roles: []workloadv1alpha1.BootstrapRole{{Name: "prefill", InitialSeedReplicas: ptr.To(intstr.FromInt32(2))}},
+			ModelExpress: &workloadv1alpha1.ModelExpressConfig{
+				EngineContainers: []string{"prefill"},
+				ReadyURL:         "http://127.0.0.1:8000/health",
+			},
+		},
+		"edited": {
+			Provider: workloadv1alpha1.BootstrapAccelerateStrategyProviderModelExpress,
+			Roles:    []workloadv1alpha1.BootstrapRole{{Name: "prefill", InitialSeedReplicas: ptr.To(intstr.FromString("50%"))}},
+		},
+		"removed": nil,
+	}
+	for name, strategy := range variants {
+		t.Run(name, func(t *testing.T) {
+			ms := base.DeepCopy()
+			ms.Spec.BootstrapAccelerateStrategy = strategy
+			data, err := BuildRevisionData(ms)
+			if err != nil {
+				t.Fatalf("BuildRevisionData error = %v", err)
+			}
+			if !bytes.Equal(baseData, data) {
+				t.Fatalf("revision data changed:\nbase: %s\nother: %s", baseData, data)
+			}
+			if got := ModelServingRevision(ms); got != baseRevision {
+				t.Fatalf("ModelServingRevision changed from %s to %s", baseRevision, got)
+			}
+			if got := CalRoleTemplateHash(ms.Spec.Template.Roles[0]); got != baseRoleHash {
+				t.Fatalf("CalRoleTemplateHash changed from %s to %s", baseRoleHash, got)
+			}
+		})
+	}
+}
+
 func TestBuildRevisionDataDeduplicatesPluginScopeRoles(t *testing.T) {
 	base := revisionTestModelServing(revisionTestRole("prefill", "prefill:v1"))
 	base.Spec.Plugins = []workloadv1alpha1.PluginSpec{{

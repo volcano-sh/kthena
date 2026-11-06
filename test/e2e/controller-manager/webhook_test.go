@@ -124,6 +124,23 @@ func TestWebhook(t *testing.T) {
 			expectError: true,
 			errorMsg:    "should be a non-negative integer",
 		},
+		{
+			name:        "Invalid ModelServing (bootstrapAccelerateStrategy unknown role)",
+			resource:    createInvalidBootstrapModelServingUnknownRole(),
+			expectError: true,
+			errorMsg:    "does not exist in spec.template.roles",
+		},
+		{
+			name:        "Invalid ModelServing (managed modelexpress plugin in spec.plugins)",
+			resource:    createInvalidBootstrapModelServingManagedPlugin(),
+			expectError: true,
+			errorMsg:    "plugin modelexpress is managed by spec.bootstrapAccelerateStrategy",
+		},
+		{
+			name:        "Valid ModelServing with BootstrapAccelerateStrategy (DryRun)",
+			resource:    createValidBootstrapModelServingForWebhookTest(),
+			expectError: false,
+		},
 	}
 
 	for _, tc := range testCases {

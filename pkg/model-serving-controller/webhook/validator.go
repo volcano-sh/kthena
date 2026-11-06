@@ -138,6 +138,7 @@ func modelServingValidationErrors(modelServing *workloadv1alpha1.ModelServing) f
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
 	allErrs = append(allErrs, validateEvictionStrategy(modelServing)...)
+	allErrs = append(allErrs, validateBootstrapAccelerateStrategy(modelServing)...)
 
 	return allErrs
 }
