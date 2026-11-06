@@ -23,10 +23,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
@@ -373,4 +376,94 @@ func TestProfileStatusController_ReferenceRemovedClearsCondition(t *testing.T) {
 	kthenaClient.ClearActions()
 	controller.reportSchedulerProfileCondition(got)
 	assert.Empty(t, kthenaClient.Actions())
+}
+
+// TestProfileStatusController_FailedWriteIsReturned verifies a failed status
+// write is surfaced so the workqueue retries it, while a NotFound (the object
+// is gone) is swallowed.
+func TestProfileStatusController_FailedWriteIsReturned(t *testing.T) {
+	t.Run("transient error is retried", func(t *testing.T) {
+		controller, kthenaClient, store, chainManager, _, _ := newProfileStatusTestController(t)
+
+		ms := newModelServerWithProfileRef("default", "ms", "p1")
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		store.AddOrUpdateSchedulerProfile(builtProfile("p1"))
+		waitForChainBuild(t, chainManager, types.NamespacedName{Namespace: "default", Name: "p1"})
+
+		kthenaClient.PrependReactor("update", "modelservers", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+			return true, nil, apierrors.NewServiceUnavailable("apiserver unavailable")
+		})
+
+		require.Error(t, controller.reportSchedulerProfileCondition(ms),
+			"a failed status write must be returned so the workqueue retries")
+	})
+
+	t.Run("not found is not retried", func(t *testing.T) {
+		controller, kthenaClient, store, chainManager, _, _ := newProfileStatusTestController(t)
+
+		ms := newModelServerWithProfileRef("default", "ms", "p1")
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		store.AddOrUpdateSchedulerProfile(builtProfile("p1"))
+		waitForChainBuild(t, chainManager, types.NamespacedName{Namespace: "default", Name: "p1"})
+
+		kthenaClient.PrependReactor("update", "modelservers", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+			return true, nil, apierrors.NewNotFound(aiv1alpha1.Resource("modelservers"), "ms")
+		})
+
+		require.NoError(t, controller.reportSchedulerProfileCondition(ms),
+			"a ModelServer that is already gone needs no retry")
+	})
+
+	t.Run("clear failure is retried", func(t *testing.T) {
+		controller, kthenaClient, _, _, _, _ := newProfileStatusTestController(t)
+
+		// A ModelServer that still carries the condition but no longer
+		// references a profile goes through the clear path.
+		ms := newModelServerWithProfileRef("default", "ms", "")
+		ms.Status.Conditions = []metav1.Condition{{
+			Type:   aiv1alpha1.SchedulerProfileResolvedConditionType,
+			Status: metav1.ConditionTrue,
+			Reason: aiv1alpha1.SchedulerProfileResolvedReasonResolved,
+		}}
+		_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
+			context.Background(), ms, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		kthenaClient.PrependReactor("update", "modelservers", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+			return true, nil, apierrors.NewServiceUnavailable("apiserver unavailable")
+		})
+
+		require.Error(t, controller.reportSchedulerProfileCondition(ms),
+			"a failed clear must be returned so the workqueue retries")
+	})
+}
+
+// TestProfileStatusController_FailedWriteIsRequeued verifies a failed status
+// write puts the key back on the workqueue, so the condition converges without
+// waiting for an unrelated event.
+func TestProfileStatusController_FailedWriteIsRequeued(t *testing.T) {
+	controller, kthenaClient, store, chainManager, kthenaInformerFactory, _ := newProfileStatusTestController(t)
+
+	ms := newModelServerWithProfileRef("default", "ms", "p1")
+	require.NoError(t, kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer().Add(ms))
+
+	store.AddOrUpdateSchedulerProfile(builtProfile("p1"))
+	waitForChainBuild(t, chainManager, types.NamespacedName{Namespace: "default", Name: "p1"})
+
+	kthenaClient.PrependReactor("update", "modelservers", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("apiserver unavailable")
+	})
+
+	const key = "default/ms"
+	controller.workqueue.Add(key)
+	require.True(t, controller.processNextWorkItem())
+
+	assert.Equal(t, 1, controller.workqueue.NumRequeues(key),
+		"a failed write must requeue the key so the condition converges on retry")
 }
