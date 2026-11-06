@@ -1,0 +1,42 @@
+name: "smoke-test-s3-concurrency-scaling"
+description: "s3 scenario: connection pool behavior as concurrent connections scale"
+
+load:
+  schedule:
+    mode: "concurrency"
+  concurrency:
+    connections: 100
+    ramp:
+      strategy: "linear"
+      duration: "15s"
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "homogeneous"
+      count: 8
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"

@@ -1,0 +1,29 @@
+# Router scheduler config — Least Latency + KVCache Aware
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kthena-router-config
+  namespace: kthena-system
+data:
+  routerConfiguration: |
+    scheduler:
+      pluginConfig:
+        - name: least-latency
+          args:
+            TTFTTPOTWeightFactor: 0.5
+        - name: kvcache-aware
+          args:
+            blockSizeToHash: 16
+            maxBlocksToMatch: 128
+      plugins:
+        Filter:
+          enabled: []
+          disabled:
+            - least-request
+            - lora-affinity
+        Score:
+          enabled:
+            - name: least-latency
+              weight: 1
+            - name: kvcache-aware
+              weight: 1
