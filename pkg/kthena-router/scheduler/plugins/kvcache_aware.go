@@ -294,7 +294,7 @@ func (t *KVCacheAware) normalizeAndTokenizePrompt(ctx *framework.Context, pods [
 	if t.tokenizerManager == nil {
 		return nil, fmt.Errorf("tokenizer manager not available")
 	}
-	return t.tokenizerManager.TokenizePrompt(ctx.Model, ctx.Prompt, pods)
+	return t.tokenizerManager.TokenizePrompt(ctx.UpstreamModel, ctx.Prompt, pods)
 }
 
 func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
@@ -310,12 +310,12 @@ func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 			podNames = append(podNames, p.GetPodNamespacedName().Name)
 		}
 		klog.Infof("KVCacheAware.Score: called for model=%q, pods=%v, promptTextLen=%d, messagesLen=%d",
-			ctx.Model, podNames, len(ctx.Prompt.Text), len(ctx.Prompt.Messages))
+			ctx.UpstreamModel, podNames, len(ctx.Prompt.Text), len(ctx.Prompt.Messages))
 	}
 
-	if (ctx.Prompt.Text == "" && len(ctx.Prompt.Messages) == 0) || ctx.Model == "" {
+	if (ctx.Prompt.Text == "" && len(ctx.Prompt.Messages) == 0) || ctx.UpstreamModel == "" {
 		klog.V(4).Infof("KVCacheAware.Score: early return — empty prompt or model (model=%q, textLen=%d, messagesLen=%d)",
-			ctx.Model, len(ctx.Prompt.Text), len(ctx.Prompt.Messages))
+			ctx.UpstreamModel, len(ctx.Prompt.Text), len(ctx.Prompt.Messages))
 		return nil
 	}
 
@@ -348,7 +348,7 @@ func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 	}
 
 	redisStart := time.Now()
-	blockToPods, err := t.queryBlocks(blockHashes, ctx.Model, ownerStartTimes(pods))
+	blockToPods, err := t.queryBlocks(blockHashes, ctx.UpstreamModel, ownerStartTimes(pods))
 	redisDuration := time.Since(redisStart)
 	if err != nil {
 		if ctx.MetricsRecorder != nil {

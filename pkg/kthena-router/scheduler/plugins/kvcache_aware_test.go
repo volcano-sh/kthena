@@ -19,6 +19,7 @@ package plugins
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -716,8 +717,8 @@ func TestKVCacheAware_Score_Core(t *testing.T) {
 		{
 			name: "Empty prompt returns zero scores",
 			context: &framework.Context{
-				Model:  "test-model",
-				Prompt: nil,
+				UpstreamModel: "test-model",
+				Prompt:        nil,
 			},
 			pods:           pods,
 			expectedScores: map[string]int{},
@@ -725,7 +726,7 @@ func TestKVCacheAware_Score_Core(t *testing.T) {
 		{
 			name: "Empty model returns zero scores",
 			context: &framework.Context{
-				Model: "",
+				UpstreamModel: "",
 				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
@@ -736,7 +737,7 @@ func TestKVCacheAware_Score_Core(t *testing.T) {
 		{
 			name: "No tokenizer available returns zero scores",
 			context: &framework.Context{
-				Model: "test-model",
+				UpstreamModel: "test-model",
 				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
@@ -824,8 +825,8 @@ func TestKVCacheAware_ScoreMatchesOnlyNamespacedRedisOwner(t *testing.T) {
 	}
 
 	scores := plugin.Score(&framework.Context{
-		Model:  model,
-		Prompt: &common.ChatMessage{Text: "hello"},
+		UpstreamModel: model,
+		Prompt:        &common.ChatMessage{Text: "hello"},
 	}, []*datastore.PodInfo{pod})
 
 	if score := scores[pod]; score != 100 {
@@ -840,12 +841,79 @@ func TestKVCacheAware_ScoreMatchesOnlyNamespacedRedisOwner(t *testing.T) {
 	}
 
 	scores = plugin.Score(&framework.Context{
-		Model:  model,
-		Prompt: &common.ChatMessage{Text: "hello"},
+		UpstreamModel: model,
+		Prompt:        &common.ChatMessage{Text: "hello"},
 	}, []*datastore.PodInfo{pod})
 
 	if score, exists := scores[pod]; exists {
 		t.Fatalf("bare Redis owner matched namespaced pod with score %d; all scores: %v", score, scores)
+	}
+}
+
+// A client's model name can differ from the name the engine serves. vLLM's
+// /tokenize rejects a name it does not serve, and the runtime stores blocks under
+// the served name, so both calls must use UpstreamModel.
+func TestKVCacheAware_ScoreUsesUpstreamModel(t *testing.T) {
+	const (
+		clientModel   = "deepseek-simple"
+		upstreamModel = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+		podName       = "pod-1"
+		namespace     = "test-namespace"
+	)
+
+	tokenizerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Model != upstreamModel {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"count":1,"max_model_len":2048,"tokens":[1]}`)
+	}))
+	defer tokenizerServer.Close()
+
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer redisClient.Close()
+
+	pod := datastore.NewPodInfo(&v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+		Status:     v1.PodStatus{PodIP: "127.0.0.1"},
+	}, tokenization.EngineVLLM)
+
+	processor := &TokenBlockProcessor{blockSize: 1}
+	blockHashes := processor.TokensToBlockHashes([]uint32{1}, 1)
+	key := KVCacheAwareBlock{ModelName: upstreamModel, ChunkHash: blockHashes[0]}.String(kvCacheKeyPrefix)
+	if err := redisClient.HSet(context.Background(), key, podName+"."+namespace, time.Now().Unix()).Err(); err != nil {
+		t.Fatalf("failed to seed redis: %v", err)
+	}
+
+	plugin := &KVCacheAware{
+		name:             KVCacheAwarePluginName,
+		maxBlocksToMatch: 1,
+		keyPrefix:        kvCacheKeyPrefix,
+		redisClient:      redisClient,
+		processor:        processor,
+		tokenizerManager: tokenization.NewTokenizerManager(tokenization.TokenizerManagerConfig{
+			EndpointPorts: map[string]int{tokenization.EngineVLLM: tokenizerServer.Listener.Addr().(*net.TCPAddr).Port},
+		}),
+	}
+
+	scores := plugin.Score(&framework.Context{
+		Model:         clientModel,
+		UpstreamModel: upstreamModel,
+		Prompt:        &common.ChatMessage{Text: "hello"},
+	}, []*datastore.PodInfo{pod})
+
+	if score := scores[pod]; score != 100 {
+		t.Fatalf("score = %d, want 100; all scores: %v", score, scores)
 	}
 }
 
@@ -1102,7 +1170,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Core(t *testing.T) {
 			testFunc: func(t *testing.T) {
 				plugin := &KVCacheAware{}
 				ctx := &framework.Context{
-					Model: "test-model",
+					UpstreamModel: "test-model",
 					Prompt: &common.ChatMessage{
 						Text:     "",
 						Messages: []common.Message{},
@@ -1607,7 +1675,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Advanced_Core(t *testing.T) {
 		{
 			name: "Text prompt with nil tokenizer",
 			context: &framework.Context{
-				Model: "test-model",
+				UpstreamModel: "test-model",
 				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
@@ -1623,7 +1691,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Advanced_Core(t *testing.T) {
 		{
 			name: "Chat messages with nil tokenizer",
 			context: &framework.Context{
-				Model: "test-model",
+				UpstreamModel: "test-model",
 				Prompt: &common.ChatMessage{
 					Messages: []common.Message{
 						{Role: "user", Content: "Hello"},
@@ -1641,7 +1709,7 @@ func TestKVCacheAware_NormalizeAndTokenizePrompt_Advanced_Core(t *testing.T) {
 		{
 			name: "Empty text and empty messages",
 			context: &framework.Context{
-				Model: "test-model",
+				UpstreamModel: "test-model",
 				Prompt: &common.ChatMessage{
 					Text:     "",
 					Messages: []common.Message{},
@@ -1692,7 +1760,7 @@ func TestKVCacheAware_Score_Advanced_Core(t *testing.T) {
 		{
 			name: "Score with processor nil",
 			context: &framework.Context{
-				Model: "test-model",
+				UpstreamModel: "test-model",
 				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
@@ -1711,7 +1779,7 @@ func TestKVCacheAware_Score_Advanced_Core(t *testing.T) {
 		{
 			name: "Score with maxBlocksToMatch limit",
 			context: &framework.Context{
-				Model: "test-model",
+				UpstreamModel: "test-model",
 				Prompt: &common.ChatMessage{
 					Text: "Hello world",
 				},
@@ -1936,7 +2004,7 @@ func TestKVCacheAware_Score_ErrorHandling_Core(t *testing.T) {
 		{
 			name: "Nil context",
 			context: &framework.Context{
-				Model: "test-model",
+				UpstreamModel: "test-model",
 				Prompt: &common.ChatMessage{
 					Text: "Hello",
 				},
@@ -1954,7 +2022,7 @@ func TestKVCacheAware_Score_ErrorHandling_Core(t *testing.T) {
 		{
 			name: "Very small maxBlocksToMatch",
 			context: &framework.Context{
-				Model: "test-model",
+				UpstreamModel: "test-model",
 				Prompt: &common.ChatMessage{
 					Text: "Hello world this is a longer text",
 				},
@@ -2145,7 +2213,7 @@ func TestKVCacheAware_Concurrency_Core(t *testing.T) {
 
 	pods := createTestPods("pod1", "pod2")
 	ctx := &framework.Context{
-		Model: "",
+		UpstreamModel: "",
 		Prompt: &common.ChatMessage{
 			Text: "",
 		},
@@ -2299,7 +2367,7 @@ func TestKVCacheAware_ScoreMetrics_TokenizeError(t *testing.T) {
 	const model = "kvmetrics-tokenize-error"
 	recorder := metrics.NewRequestMetricsRecorder(metrics.DefaultMetrics, model, "/v1/chat/completions")
 	ctx := &framework.Context{
-		Model:           model,
+		UpstreamModel:   model,
 		Prompt:          &common.ChatMessage{Text: "hello world"},
 		MetricsRecorder: recorder,
 	}
