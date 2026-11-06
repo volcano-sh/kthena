@@ -53,11 +53,11 @@ a rollout, and matching hashes do not conceal different data.
 
 | Input | Effect on rolling updates |
 | --- | --- |
-| Role names, entry templates, worker replica count | Included; list order is normalized. Templates and worker counts may change. |
+| Role names, entry templates, worker replica count | Included. The Role name set is immutable after creation; list order is normalized. Templates and worker counts may change. |
 | Worker templates | Contents are included when workers exist. Template presence is also included when the applicable headless plugin uses it for entry DNS. Full templates remain in snapshots. |
 | Pod-template labels, annotations and PodSpec | Included, except inputs overwritten by the controller as described below. |
 | Ordered plugins, their type, config and effective Entry/Worker scope | Stored in snapshots and included in each applicable Role's comparison. Substantive plugin updates are rejected by admission. Historical comparison remains necessary for recovery and older persisted objects. |
-| Top-level `schedulerName` | Stored in snapshots and included in comparisons. Omitting it defaults to `volcano` at admission; an explicit empty string uses Kubernetes `default-scheduler`. |
+| Top-level `schedulerName` | Stored in snapshots, but changing the effective scheduler is rejected by the update webhook. Omitting it defaults to `volcano` at admission; an explicit empty string uses Kubernetes `default-scheduler`. |
 | ModelServing/Role `replicas` and rollout controls (`partition`, `maxSurge`, `maxUnavailable`, rollout strategy) | Not template identity; applied as current scaling/rollout controls. |
 | `recoveryPolicy`, `revisionHistoryLimit`, ModelServing metadata/status, ServingGroup `restartGracePeriodSeconds`, `gangPolicy`, `networkTopology` | Not template identity. |
 | Nested Pod `schedulerName`, controller-owned `GROUP_SIZE` and `WORKER_INDEX` environment entries | Normalized because the controller overwrites them. `ENTRY_ADDRESS` is normalized only where the applicable headless-service plugin overwrites it. |
@@ -65,6 +65,16 @@ a rollout, and matching hashes do not conceal different data.
 Plugins are compared as ordered configuration inputs, not by executing hooks and
 comparing their output. Kubernetes Pod admission defaults are not broadly removed
 from templates: plugins may observe those inputs before Pod admission.
+
+The update webhook rejects adding, removing or changing plugins, including their
+order, config and scope, even at zero replicas. Equivalent representations remain
+allowed: omitted and empty lists, effective BuiltIn/All defaults, reordered or
+duplicated `scope.roles`, and JSON object key order or whitespace. JSON arrays
+retain their order; omitted config is not equivalent to an empty object. Changing
+plugins together with an image or replica count rejects the entire request. Use a
+new ModelServing when a different plugin configuration is required. Existing Role
+names may be reordered but cannot be added, removed or renamed, including Roles
+with zero replicas.
 
 Older Roles-only revisions do not contain scheduler/plugin snapshots. On the first
 upgrade, the controller creates a durable compatibility baseline from historical
