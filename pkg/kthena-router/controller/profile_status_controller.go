@@ -198,23 +198,21 @@ func (c *ProfileStatusController) syncHandler(key string) error {
 		return err
 	}
 
-	c.reportSchedulerProfileCondition(ms)
-	return nil
+	return c.reportSchedulerProfileCondition(ms)
 }
 
 // reportSchedulerProfileCondition reports the referenced SchedulerProfile's
 // resolution state on the ModelServer's status.
-func (c *ProfileStatusController) reportSchedulerProfileCondition(ms *aiv1alpha1.ModelServer) {
+func (c *ProfileStatusController) reportSchedulerProfileCondition(ms *aiv1alpha1.ModelServer) error {
 	if c.kthenaClient == nil || c.buildStatus == nil {
-		return
+		return nil
 	}
 	if ms.Spec.TrafficPolicy == nil ||
 		ms.Spec.TrafficPolicy.LoadBalancer == nil ||
 		ms.Spec.TrafficPolicy.LoadBalancer.SchedulerProfile == nil {
 		// The reference is gone: the ModelServer now serves on the global
 		// chain, so the condition no longer applies and must not linger.
-		c.clearSchedulerProfileCondition(ms)
-		return
+		return c.clearSchedulerProfileCondition(ms)
 	}
 	ref := *ms.Spec.TrafficPolicy.LoadBalancer.SchedulerProfile
 	profileKey := types.NamespacedName{Namespace: ms.Namespace, Name: ref}
@@ -227,7 +225,7 @@ func (c *ProfileStatusController) reportSchedulerProfileCondition(ms *aiv1alpha1
 		// keep the current condition and let the build-settled signal
 		// re-trigger reporting.
 		if _, err := c.schedulerProfileLister.SchedulerProfiles(ms.Namespace).Get(ref); err == nil {
-			return
+			return nil
 		}
 	}
 
@@ -256,7 +254,7 @@ func (c *ProfileStatusController) reportSchedulerProfileCondition(ms *aiv1alpha1
 	updated := ms.DeepCopy()
 	apimeta.SetStatusCondition(&updated.Status.Conditions, cond)
 	if reflect.DeepEqual(ms.Status, updated.Status) {
-		return
+		return nil
 	}
 	// Log on the state transition only: an unchanged condition would
 	// otherwise re-log (and re-trigger a sync via the status update) on
@@ -269,31 +267,35 @@ func (c *ProfileStatusController) reportSchedulerProfileCondition(ms *aiv1alpha1
 	_, err := c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).
 		UpdateStatus(context.TODO(), updated, metav1.UpdateOptions{})
 	if errors.IsNotFound(err) {
-		return
+		return nil // the ModelServer is gone;
 	}
 	if err != nil {
 		klog.Warningf("ModelServer %s/%s: failed to report SchedulerProfile condition: %v",
 			ms.Namespace, ms.Name, err)
+		return err
 	}
+	return nil
 }
 
 // clearSchedulerProfileCondition removes the SchedulerProfileResolved
 // condition when the ModelServer no longer references a SchedulerProfile.
-func (c *ProfileStatusController) clearSchedulerProfileCondition(ms *aiv1alpha1.ModelServer) {
+func (c *ProfileStatusController) clearSchedulerProfileCondition(ms *aiv1alpha1.ModelServer) error {
 	if apimeta.FindStatusCondition(ms.Status.Conditions, aiv1alpha1.SchedulerProfileResolvedConditionType) == nil {
-		return
+		return nil
 	}
 	updated := ms.DeepCopy()
 	apimeta.RemoveStatusCondition(&updated.Status.Conditions, aiv1alpha1.SchedulerProfileResolvedConditionType)
 	_, err := c.kthenaClient.NetworkingV1alpha1().ModelServers(ms.Namespace).
 		UpdateStatus(context.TODO(), updated, metav1.UpdateOptions{})
 	if errors.IsNotFound(err) {
-		return
+		return nil
 	}
 	if err != nil {
 		klog.Warningf("ModelServer %s/%s: failed to clear SchedulerProfile condition: %v",
 			ms.Namespace, ms.Name, err)
+		return err
 	}
+	return nil
 }
 
 func (c *ProfileStatusController) enqueueModelServer(obj interface{}) {
