@@ -40,6 +40,10 @@ func (c *FakeNetworkingV1alpha1) ModelServers(namespace string) v1alpha1.ModelSe
 	return newFakeModelServers(c, namespace)
 }
 
+func (c *FakeNetworkingV1alpha1) SchedulerProfiles(namespace string) v1alpha1.SchedulerProfileInterface {
+	return newFakeSchedulerProfiles(c, namespace)
+}
+
 // RESTClient returns a RESTClient that is used to communicate
 // with API server by this client implementation.
 func (c *FakeNetworkingV1alpha1) RESTClient() rest.Interface {

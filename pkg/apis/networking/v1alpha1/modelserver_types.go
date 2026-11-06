@@ -199,7 +199,21 @@ type TrafficPolicy struct {
 	// +optional
 	SessionSticky *SessionSticky `json:"sessionSticky,omitempty"`
 
-	// TODO: add LoadBalancer policy
+	// LoadBalancer configures load-balancing behavior for this ModelServer.
+	// +optional
+	LoadBalancer *LoadBalancer `json:"loadBalancer,omitempty"`
+}
+
+// LoadBalancer configures the load-balancing policy of a ModelServer.
+type LoadBalancer struct {
+	// SchedulerProfile references a SchedulerProfile CRD by name. The
+	// referenced profile carries a whole scheduler plugin combination that
+	// replaces the global scheduler configuration for this ModelServer's
+	// pods. When unset, the global router scheduler configuration applies.
+	// The profile must be in the same namespace as this ModelServer.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	SchedulerProfile *string `json:"schedulerProfile,omitempty"`
 }
 
 // ConnectionPool configures the HTTP connection pool for a ModelServer.
@@ -271,10 +285,25 @@ type Retry struct {
 	RetryInterval *metav1.Duration `json:"retryInterval,omitempty"`
 }
 
+// SchedulerProfileResolvedConditionType is the condition type reporting the
+// resolution state of a ModelServer's referenced SchedulerProfile.
+const SchedulerProfileResolvedConditionType = "SchedulerProfileResolved"
+
+// Reasons for the SchedulerProfileResolved condition.
+const (
+	SchedulerProfileResolvedReasonResolved         = "Resolved"
+	SchedulerProfileResolvedReasonNotFound         = "ProfileNotFound"
+	SchedulerProfileResolvedReasonResolutionFailed = "ProfileResolutionFailed"
+)
+
 // ModelServerStatus defines the observed state of ModelServer.
 type ModelServerStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Conditions reports the resolution state of the referenced
+	// SchedulerProfile.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +kubebuilder:object:root=true

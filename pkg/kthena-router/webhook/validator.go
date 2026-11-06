@@ -29,6 +29,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes"
@@ -36,6 +37,7 @@ import (
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 )
 
 const timeout = 30 * time.Second
@@ -68,6 +70,7 @@ func (v *KthenaRouterValidator) Run(ctx context.Context, tlsCertFile, tlsPrivate
 	mux.HandleFunc("/validate/modelroute", v.HandleModelRoute)
 	mux.HandleFunc("/validate/modelserver", v.HandleModelServer)
 	mux.HandleFunc("/validate/externalmodelprovider", v.HandleExternalModelProvider)
+	mux.HandleFunc("/validate/schedulerprofile", v.HandleSchedulerProfile)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("ok")); err != nil {
@@ -548,4 +551,135 @@ func (v *KthenaRouterValidator) shutdown() {
 	if err := v.httpServer.Shutdown(ctx); err != nil {
 		klog.Errorf("failed to shutdown server: %v", err)
 	}
+}
+
+// HandleSchedulerProfile handles admission requests for SchedulerProfile resources
+func (v *KthenaRouterValidator) HandleSchedulerProfile(w http.ResponseWriter, r *http.Request) {
+	// Parse the admission request
+	admissionReview, profile, err := ParseSchedulerProfileFromRequest(r)
+	if err != nil {
+		klog.Errorf("Failed to parse admission request: %v", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Validate the SchedulerProfile
+	allowed, reason := ValidateSchedulerProfile(profile)
+
+	// Create the admission response
+	admissionResponse := admissionv1.AdmissionResponse{
+		Allowed: allowed,
+		UID:     admissionReview.Request.UID,
+	}
+
+	if !allowed {
+		admissionResponse.Result = &metav1.Status{
+			Message: reason,
+		}
+	}
+
+	// Create the admission review response
+	admissionReview.Response = &admissionResponse
+
+	// Send the response
+	if err := SendAdmissionResponse(w, admissionReview); err != nil {
+		klog.Errorf("Failed to send admission response: %v", err)
+		http.Error(w, fmt.Sprintf("could not send response: %v", err), http.StatusInternalServerError)
+		return
+	}
+}
+
+// ValidateSchedulerProfile validates a SchedulerProfile: plugin names must be
+// known, pluginConfig entries must be unique, plugin args must be valid, and
+// score weights must be positive.
+func ValidateSchedulerProfile(profile *networkingv1alpha1.SchedulerProfile) (bool, string) {
+	var allErrs field.ErrorList
+	specField := field.NewPath("spec")
+
+	seenConfig := sets.New[string]()
+	for i, pc := range profile.Spec.PluginConfig {
+		pcField := specField.Child("pluginConfig").Index(i)
+		if !plugins.IsKnownPlugin(pc.Name) {
+			allErrs = append(allErrs, field.Invalid(pcField.Child("name"), pc.Name, "unknown plugin name"))
+			continue
+		}
+		if seenConfig.Has(pc.Name) {
+			allErrs = append(allErrs, field.Duplicate(pcField.Child("name"), pc.Name))
+			continue
+		}
+		seenConfig.Insert(pc.Name)
+
+		if err := plugins.ValidatePluginArgs(pc.Name, pc.Args); err != nil {
+			allErrs = append(allErrs, field.Invalid(pcField.Child("args"), string(pc.Args.Raw), err.Error()))
+		}
+	}
+
+	validatePluginNames := func(names []string, path *field.Path) {
+		seen := sets.New[string]()
+		for i, name := range names {
+			if !plugins.IsKnownPlugin(name) {
+				allErrs = append(allErrs, field.Invalid(path.Index(i), name, "unknown plugin name"))
+				continue
+			}
+			if seen.Has(name) {
+				allErrs = append(allErrs, field.Duplicate(path.Index(i), name))
+				continue
+			}
+			seen.Insert(name)
+		}
+	}
+
+	validatePluginNames(profile.Spec.Plugins.Filter.Enabled, specField.Child("plugins", "Filter", "enabled"))
+	for i, name := range profile.Spec.Plugins.Filter.Enabled {
+		if !plugins.IsKnownPlugin(name) {
+			continue
+		}
+		if !plugins.SupportsFilterRole(name) {
+			allErrs = append(allErrs, field.Invalid(
+				specField.Child("plugins", "Filter", "enabled").Index(i), name,
+				fmt.Sprintf("plugin %q cannot be used as a filter", name)))
+		}
+	}
+	scoreEnabledField := specField.Child("plugins", "Score", "enabled")
+	seenScores := sets.New[string]()
+	for i, pw := range profile.Spec.Plugins.Score.Enabled {
+		pwField := scoreEnabledField.Index(i)
+		if !plugins.IsKnownPlugin(pw.Name) {
+			allErrs = append(allErrs, field.Invalid(pwField.Child("name"), pw.Name, "unknown plugin name"))
+			continue
+		}
+		if seenScores.Has(pw.Name) {
+			allErrs = append(allErrs, field.Duplicate(pwField.Child("name"), pw.Name))
+			continue
+		}
+		seenScores.Insert(pw.Name)
+
+		if !plugins.SupportsScoreRole(pw.Name) {
+			allErrs = append(allErrs, field.Invalid(pwField.Child("name"), pw.Name,
+				fmt.Sprintf("plugin %q cannot be used as a score plugin", pw.Name)))
+		}
+
+		if pw.Weight <= 0 {
+			allErrs = append(allErrs, field.Invalid(pwField.Child("weight"), pw.Weight, "must be greater than 0"))
+		}
+	}
+
+	// Cross-plugin semantic rules (e.g. the random plugin must be the only
+	// score plugin) live in the scheduler package.
+	enabledScoreNames := make([]string, 0, len(profile.Spec.Plugins.Score.Enabled))
+	for _, pw := range profile.Spec.Plugins.Score.Enabled {
+		enabledScoreNames = append(enabledScoreNames, pw.Name)
+	}
+	if err := plugins.ValidateScorePluginCombination(enabledScoreNames); err != nil {
+		allErrs = append(allErrs, field.Invalid(scoreEnabledField, enabledScoreNames, err.Error()))
+	}
+
+	if len(allErrs) > 0 {
+		var messages []string
+		for _, err := range allErrs {
+			messages = append(messages, "  - "+err.Error())
+		}
+		return false, "validation failed: " + strings.Join(messages, "")
+	}
+	return true, ""
 }

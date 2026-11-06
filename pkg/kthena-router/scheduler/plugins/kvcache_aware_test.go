@@ -2646,3 +2646,53 @@ func BenchmarkCalculatePodScores(b *testing.B) {
 		})
 	}
 }
+
+func TestKVCacheAware_Close(t *testing.T) {
+	t.Run("memory mode stops workers and unregisters", func(t *testing.T) {
+		store := datastore.New()
+		plugin, err := SchedulerPlugins[KVCacheAwarePluginName].NewScore(store, runtime.RawExtension{
+			Raw: []byte(`{"indexMode": "memory"}`),
+		})
+		if err != nil {
+			t.Fatalf("failed to create kvcache-aware plugin: %v", err)
+		}
+		kv := plugin.(*KVCacheAware)
+		if kv.modeStop == nil {
+			t.Fatal("memory mode must have started its workers")
+		}
+
+		if err := kv.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if kv.modeStop != nil {
+			t.Error("Close must clear the stop hook")
+		}
+		if err := kv.Close(); err != nil {
+			t.Errorf("Close must be idempotent, got error %v", err)
+		}
+	})
+
+	t.Run("redis mode stops the GC loop", func(t *testing.T) {
+		mr, err := miniredis.Run()
+		if err != nil {
+			t.Fatalf("failed to start miniredis: %v", err)
+		}
+		defer mr.Close()
+
+		kv := &KVCacheAware{keyPrefix: kvCacheKeyPrefix, redisClient: redis.NewClient(&redis.Options{Addr: mr.Addr()})}
+		kv.startGC()
+		if kv.modeStop == nil {
+			t.Fatal("redis mode must have started its GC loop")
+		}
+
+		if err := kv.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if kv.modeStop != nil {
+			t.Error("Close must clear the stop hook")
+		}
+		if err := kv.Close(); err != nil {
+			t.Errorf("Close must be idempotent, got error %v", err)
+		}
+	})
+}
