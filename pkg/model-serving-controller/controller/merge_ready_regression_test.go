@@ -151,14 +151,15 @@ func TestCoordinatedMissingHistoryDoesNotBlockExplicitScaleToZero(t *testing.T) 
 			}
 			require.NoError(t, err)
 			require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(key, group))
-			deletedGroup := false
+			deleted := 0
 			for _, action := range client.Actions() {
-				if deletion, ok := action.(clienttesting.DeleteCollectionAction); ok && action.GetResource().Resource == "pods" {
-					deletedGroup = true
-					require.Equal(t, api.GroupNameLabelKey+"="+group, deletion.GetListRestrictions().Labels.String())
+				if deletion, ok := action.(clienttesting.DeleteAction); ok && action.GetResource().Resource == "pods" {
+					require.Contains(t, []string{utils.GeneratePodName(group, "prefill-0", 0), utils.GeneratePodName(group, "decode-0", 0)}, deletion.GetName())
+					require.NotNil(t, deletion.GetDeleteOptions().Preconditions.UID)
+					deleted++
 				}
 			}
-			require.True(t, deletedGroup, "explicit zero replicas must issue group deletion without decoding its old template")
+			require.Equal(t, 2, deleted, "explicit zero replicas deletes each observed member without decoding its old template")
 		})
 	}
 }
@@ -212,7 +213,7 @@ func TestCoordinatedSparseOrdinalOutsidePartitionCanCreateSurge(t *testing.T) {
 		surgeCount++
 		require.Equal(t, surgeRole, pod.Annotations[surgeAnnotation])
 		require.Equal(t, revision, utils.ObjectRevision(&pod))
-		require.Equal(t, utils.CalRoleTemplateHash(prefill), utils.ObjectRoleTemplateHash(&pod))
+		require.Equal(t, canonicalRoleHashForTest(t, ms, prefill.Name), utils.ObjectRoleTemplateHash(&pod))
 	}
 	require.Equal(t, 1, surgeCount)
 }
@@ -414,7 +415,7 @@ func TestCoordinatedScaleToZeroPreservesLastCompletedRevision(t *testing.T) {
 					pod, err := c.kubeClientSet.CoreV1().Pods(next.Namespace).Get(context.Background(), utils.GeneratePodName(group, "prefill-0", 0), metav1.GetOptions{})
 					require.NoError(t, err)
 					require.Equal(t, completedRevision, utils.ObjectRevision(pod))
-					require.Equal(t, utils.CalRoleTemplateHash(completed.Spec.Template.Roles[0]), utils.ObjectRoleTemplateHash(pod))
+					require.Equal(t, canonicalRoleHashForTest(t, completed, completed.Spec.Template.Roles[0].Name), utils.ObjectRoleTemplateHash(pod))
 					require.Equal(t, "test-image:completed-a", pod.Spec.Containers[0].Image)
 				}
 			})

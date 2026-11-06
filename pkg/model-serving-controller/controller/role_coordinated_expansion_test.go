@@ -316,3 +316,33 @@ func TestCoordinatedPodGroupUsesAppliedWorkerLayoutUntilReplacement(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, ms, projected)
 }
+
+func TestCoordinatedPodGroupRefreshUsesDesiredPolicyWithHistoricalLayout(t *testing.T) {
+	c, ms, pg := coordinatedExpansionFixture(t, []string{"prefill", "decode"}, []api.RoleRolloutDependency{{Role: "prefill", DependsOn: []string{"decode"}}}, 1, 2)
+	for i := range ms.Spec.Template.Roles {
+		role := &ms.Spec.Template.Roles[i]
+		role.WorkerReplicas = 1
+		role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+	}
+	revision := utils.ModelServingRevision(ms)
+	ms.Status.UpdateRevision = revision
+	require.NoError(t, c.persistCoordinatedRoleRevision(context.Background(), ms, revision))
+	original := ms.DeepCopy()
+	crd := &apiextv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "podgroups.scheduling.volcano.sh"}, Spec: apiextv1.CustomResourceDefinitionSpec{Versions: []apiextv1.CustomResourceDefinitionVersion{{Schema: &apiextv1.CustomResourceValidation{OpenAPIV3Schema: &apiextv1.JSONSchemaProps{Properties: map[string]apiextv1.JSONSchemaProps{"spec": {Properties: map[string]apiextv1.JSONSchemaProps{"subGroupPolicy": {}}}}}}}}}}
+	client := volcanofake.NewSimpleClientset(pg.DeepCopy())
+	manager := podgroupmanager.NewManager(c.kubeClientSet, client, apiextfake.NewSimpleClientset(crd), nil)
+	require.NoError(t, manager.GetPodGroupInformer().GetIndexer().Add(pg))
+	c.podGroupManager = manager
+	ctx := c.withRevisionHistory(context.Background(), ms)
+	require.NoError(t, c.syncServingGroupReplicas(ctx, ms, revision))
+	actual, err := client.SchedulingV1beta1().PodGroups(ms.Namespace).Get(context.Background(), pg.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	minima := map[string]int32{}
+	for _, sub := range actual.Spec.SubGroupPolicy {
+		minima[sub.Name] = *sub.MinSubGroups
+		require.EqualValues(t, 1, *sub.SubGroupSize, "historical workerless instances supply the transitional layout")
+	}
+	require.Equal(t, map[string]int32{"prefill": 1, "decode": 2}, minima, "the true target still waits for its decode dependency; projecting old templates must not turn it into a no-op rollout")
+	require.EqualValues(t, 3, actual.Spec.MinMember)
+	require.Equal(t, original, ms, "scheduling projection must not modify target replicas, worker layout or policy")
+}

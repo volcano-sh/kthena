@@ -199,17 +199,20 @@ func TestMigrationErrorDoesNotBlockAnotherRoleShrink(t *testing.T) {
 	shrink := workload.Role{Name: "shrink", Replicas: ptr.To[int32](0), WorkerTemplate: &workload.PodTemplateSpec{}}
 	ms.Spec.Template.Roles = []workload.Role{blocked, shrink}
 	ms.Spec.Plugins = []workload.PluginSpec{{Name: plugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}}
+	revision := utils.ModelServingRevision(ms)
+	recordTestRevision(t, client, ms, revision)
+	c.store.AddServingGroup(utils.GetNamespaceName(ms), 0, revision)
 	for _, role := range []workload.Role{blocked, shrink} {
 		c.store.AddRole(utils.GetNamespaceName(ms), "cleanup-0", role.Name, role.Name+"-0", utils.ModelServingRevision(ms), "hash")
 		for n := int32(0); n <= role.WorkerReplicas; n++ {
 			name := utils.GeneratePodName("cleanup-0", role.Name+"-0", int(n))
-			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ms.Namespace, UID: types.UID(name), Labels: map[string]string{workload.ModelServingNameLabelKey: ms.Name, workload.GroupNameLabelKey: "cleanup-0", workload.RoleLabelKey: role.Name, workload.RoleIDKey: role.Name + "-0", workload.EntryLabelKey: fmt.Sprint(n == 0)}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}}, Spec: corev1.PodSpec{Subdomain: utils.GeneratePodName("cleanup-0", role.Name+"-0", 0)}}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ms.Namespace, UID: types.UID(name), Labels: map[string]string{workload.ModelServingNameLabelKey: ms.Name, workload.GroupNameLabelKey: "cleanup-0", workload.RoleLabelKey: role.Name, workload.RoleIDKey: role.Name + "-0", workload.EntryLabelKey: fmt.Sprint(n == 0), workload.RevisionLabelKey: revision}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}}, Spec: corev1.PodSpec{Subdomain: utils.GeneratePodName("cleanup-0", role.Name+"-0", 0)}}
 			_, err := client.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
 			require.NoError(t, err)
 			require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
 		}
 	}
-	require.ErrorContains(t, c.syncRoleReplicas(context.Background(), ms, "v1", nil), "MigrationRequired")
+	require.ErrorContains(t, c.syncRoleReplicas(c.withRevisionHistory(context.Background(), ms), ms, revision, nil), "MigrationRequired")
 	_, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), "cleanup-0-shrink-0-0", metav1.GetOptions{})
 	require.True(t, apierrors.IsNotFound(err))
 	_, err = client.CoreV1().Pods(ms.Namespace).Get(context.Background(), "cleanup-0-blocked-0-1", metav1.GetOptions{})
@@ -394,7 +397,7 @@ func TestInPlaceFallbackPropagatesCleanupFailure(t *testing.T) {
 			if path == "resume-recreate" {
 				err = c.recreateInPlaceUnit(context.Background(), ms, &inPlaceUnit{groupName: "cleanup-0", roleName: "infer", roleID: "infer-0"})
 			} else {
-				err = c.updateRole(context.Background(), ms, "cleanup-0", "infer", "infer-0")
+				err = c.updateRole(context.Background(), ms, "cleanup-0", "infer", "infer-0", utils.ModelServingRevision(ms))
 			}
 			require.ErrorContains(t, err, "injected cleanup denial")
 			require.Equal(t, datastore.RoleDeleting, c.store.GetRoleStatus(key, "cleanup-0", "infer", "infer-0"))

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -118,6 +119,8 @@ func (v *ModelServingValidator) validateModelServingUpdate(
 ) (bool, string) {
 	allErrs := modelServingValidationErrors(modelServing)
 	allErrs = append(allErrs, validatePluginsImmutable(oldModelServing, modelServing)...)
+	allErrs = append(allErrs, validateSchedulerNameUpdate(oldModelServing, modelServing)...)
+	allErrs = append(allErrs, apivalidation.ValidateImmutableField(roleNameSet(modelServing), roleNameSet(oldModelServing), field.NewPath("spec", "template", "roles"))...)
 	allErrs = append(allErrs, validateRoleCoordinationUpdate(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateRoleCoordinationImmutable(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateCoordinatedPartitions(oldModelServing, modelServing)...)
@@ -680,4 +683,20 @@ func validateRoleMinAvailable(ms *workloadv1alpha1.ModelServing, roleMinAvailabl
 	}
 
 	return allErrs
+}
+
+func roleNameSet(ms *workloadv1alpha1.ModelServing) []string {
+	names := make([]string, 0, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		names = append(names, role.Name)
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
+}
+
+// Changing scheduler requires migrating the shared PodGroup as well as Pods.
+// Keep the effective scheduler immutable; explicit empty selects default-scheduler.
+func validateSchedulerNameUpdate(old, current *workloadv1alpha1.ModelServing) field.ErrorList {
+	return apivalidation.ValidateImmutableField(utils.EffectiveSchedulerName(current.Spec.SchedulerName),
+		utils.EffectiveSchedulerName(old.Spec.SchedulerName), field.NewPath("spec", "schedulerName"))
 }

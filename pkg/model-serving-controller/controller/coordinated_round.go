@@ -35,6 +35,7 @@ import (
 // A round belongs to one sync and one owner, never to the controller or its
 // event handlers. Read errors are retained only until that sync ends.
 type coordinatedRound struct {
+	history    *revisionHistory
 	owner      types.UID
 	podsLoaded bool
 	pods       []*corev1.Pod
@@ -129,7 +130,7 @@ func (c *ModelServingController) coordinatedInPlaceStarted(ctx context.Context, 
 	}
 	for _, pod := range pods {
 		state := inplace.StateOf(pod)
-		if pod.DeletionTimestamp == nil && state.InProgress() && state.Revision == utils.ModelServingRevision(ms) {
+		if pod.DeletionTimestamp == nil && state.InProgress() && state.Revision == c.revisionTarget(ctx, ms) {
 			return true
 		}
 	}
@@ -149,6 +150,14 @@ func (c *ModelServingController) coordinatedCreationContext(ctx context.Context,
 	if err != nil {
 		return ctx, err
 	}
+	workload, err := c.revisionHistory(ctx, ms).workload(ctx, revision)
+	if err != nil {
+		return ctx, err
+	}
+	expectedHash, err := utils.RoleRevisionHash(workload, desired.Name)
+	if err != nil {
+		return ctx, err
+	}
 	id := utils.GenerateRoleID(desired.Name, ordinal)
 	occupied, replay := sets.New[string](), false
 	for _, pod := range pods {
@@ -156,7 +165,41 @@ func (c *ModelServingController) coordinatedCreationContext(ctx context.Context,
 		if utils.GetRoleID(pod) != id {
 			continue
 		}
-		if pod.DeletionTimestamp != nil || utils.ObjectRevision(pod) != revision || utils.ObjectRoleTemplateHash(pod) != utils.CalRoleTemplateHash(applied) {
+		sameTemplate := utils.ObjectRoleTemplateHash(pod) == expectedHash
+		if !sameTemplate && utils.ObjectRevision(pod) == revision {
+			// Upgrade replay may retain a pre-canonical hash, but arbitrary hashes
+			// must not authorize adoption of a different physical incarnation.
+			cr, err := c.controllerRevisionInRound(ctx, ms, revision)
+			if err != nil {
+				return ctx, err
+			}
+			if cr == nil {
+				return ctx, fmt.Errorf("ControllerRevision %s is missing", revision)
+			}
+			if err := validateControllerRevisionOwner(ms, cr); err != nil {
+				return ctx, err
+			}
+			roles, err := utils.GetRolesFromControllerRevision(cr)
+			if err != nil {
+				return ctx, err
+			}
+			for _, historical := range roles {
+				if historical.Name != desired.Name {
+					continue
+				}
+				observedHash := utils.ObjectRoleTemplateHash(pod)
+				sameTemplate = observedHash == utils.CalRoleTemplateHash(historical)
+				// Before canonical JSON hashing, Role identity used the typed
+				// template's spew hash. Derive that value from trusted raw history,
+				// before normalization removes overwritten inputs or adds defaults.
+				historical.Replicas = nil
+				historical.RollingUpdateConfiguration = api.RollingUpdateConfiguration{}
+				sameTemplate = sameTemplate || observedHash == utils.Revision(historical)
+				break
+			}
+		}
+
+		if pod.DeletionTimestamp != nil || utils.ObjectRevision(pod) != revision || !sameTemplate {
 			return ctx, fmt.Errorf("Role %s is occupied by a different or terminating incarnation", id)
 		}
 		replay = true
@@ -170,11 +213,15 @@ func (c *ModelServingController) coordinatedCreationContext(ctx context.Context,
 	}
 	// First creation must establish the complete initial Gang. There is no
 	// previous rollout baseline whose first target start needs gating yet.
-	if !replay && ms.Status.CurrentRevision != "" && utils.EqualRoleTemplateForRevision(desired, applied) {
+	isTarget, err := utils.EqualRoleRevisions("", "", workload, ms, desired.Name)
+	if err != nil {
+		return ctx, err
+	}
+	if !replay && ms.Status.CurrentRevision != "" && isTarget {
 		if err := c.refreshCoordinatedAvailabilityInRound(ctx, ms); err != nil {
 			return ctx, err
 		}
-		policy, err := c.resolveRoleRolloutPolicy(ctx, ms, utils.ModelServingRevision(ms))
+		policy, err := c.resolveRoleRolloutPolicy(ctx, ms, c.revisionTarget(ctx, ms))
 		if err != nil {
 			return ctx, err
 		}
