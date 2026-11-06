@@ -50,14 +50,15 @@ func TestCoordinatedVersionCountsProtectedTargetAndFormalExpansion(t *testing.T)
 	ms := &api.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ratios", Namespace: "default", UID: "ratios"}, Spec: api.ModelServingSpec{Template: api.ServingGroup{Roles: []api.Role{role}}}}
 	c := &ModelServingController{kubeClientSet: kubefake.NewSimpleClientset()}
 	recordDifferentRevision(t, c, ms, "old")
+	recordTestRevision(t, c.kubeClientSet, ms, "target")
 	hash := utils.CalRoleTemplateHash(role)
 	state := c.resolveRoleRolloutState(context.Background(), ms, datastore.ServingGroup{Name: "ratios-0"}, role, 3,
 		[]datastore.Role{
-			{Name: "a-0", RoleTemplateHash: hash, Status: datastore.RoleRunning}, // protected target
+			{Name: "a-0", Revision: "target", RoleTemplateHash: hash, Status: datastore.RoleRunning}, // protected target
 			{Name: "a-1", Revision: "old", Status: datastore.RoleRunning},
-			{Name: "a-2", RoleTemplateHash: hash, Status: datastore.RoleCreating},
-			{Name: "a-3", RoleTemplateHash: hash, Status: datastore.RoleRunning}, // formal expansion
-			{Name: "a-4", RoleTemplateHash: hash, Status: datastore.RoleRunning}, // surge
+			{Name: "a-2", Revision: "target", RoleTemplateHash: hash, Status: datastore.RoleCreating},
+			{Name: "a-3", Revision: "target", RoleTemplateHash: hash, Status: datastore.RoleRunning}, // formal expansion
+			{Name: "a-4", Revision: "target", RoleTemplateHash: hash, Status: datastore.RoleRunning}, // surge
 		}, 1, true, nil, nil)
 	require.Equal(t, 4, state.versionTotal)
 	require.Equal(t, 2, state.versionReady)
@@ -136,6 +137,7 @@ func TestFullTailRequiresObservedReadyKnownCapacity(t *testing.T) {
 	ms := &api.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "tail", Namespace: "default", UID: "tail"}, Spec: api.ModelServingSpec{Template: api.ServingGroup{Roles: []api.Role{role}}}}
 	c := &ModelServingController{kubeClientSet: kubefake.NewSimpleClientset()}
 	recordDifferentRevision(t, c, ms, "old")
+	recordTestRevision(t, c.kubeClientSet, ms, "target")
 	for _, tc := range []struct {
 		name  string
 		alter func(*[]datastore.Role, map[int]templateComparison)
@@ -151,7 +153,7 @@ func TestFullTailRequiresObservedReadyKnownCapacity(t *testing.T) {
 		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			roles := []datastore.Role{{Name: "a-0", Revision: "old", Status: datastore.RoleRunning}, {Name: "a-1", RoleTemplateHash: utils.CalRoleTemplateHash(role), Status: datastore.RoleRunning}}
+			roles := []datastore.Role{{Name: "a-0", Revision: "old", Status: datastore.RoleRunning}, {Name: "a-1", Revision: "target", RoleTemplateHash: utils.CalRoleTemplateHash(role), Status: datastore.RoleRunning}}
 			terminating := map[int]templateComparison{}
 			tc.alter(&roles, terminating)
 			state := c.resolveRoleRolloutState(context.Background(), ms, datastore.ServingGroup{Name: "tail-0"}, role, 2, roles, 0, true, terminating, nil)
