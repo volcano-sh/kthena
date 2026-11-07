@@ -128,6 +128,9 @@ func (s *Server) Run(ctx context.Context) {
 
 	// start the configured resource source
 	if s.ConfigSource == ConfigSourceFile {
+		// File source only builds chains; no consumer is wired for the
+		// build-outcome notifications.
+		r.ProfileChainManager().DisableNotifications()
 		s.controllers = s.startFileSource(store, transportRegistry, ctx.Done())
 	} else {
 		s.controllers = startControllers(store, ctx.Done(), s.EnableGatewayAPI, s.Port, s.EnableGatewayAPIInferenceExtension, s.KubeAPIQPS, s.KubeAPIBurst, transportRegistry, r.ProfileChainManager())

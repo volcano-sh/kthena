@@ -117,7 +117,7 @@ func TestProfileChainManager_BuildStatusOnProfileEvents(t *testing.T) {
 	store.AddOrUpdateSchedulerProfile(failedProfile("p1"))
 	for i := 0; i < 2; i++ {
 		select {
-		case <-m.BuildSettled():
+		case <-m.StatusNotify():
 		case <-time.After(2 * time.Second):
 			t.Fatal("expected the add and the failed rebuild to settle")
 		}
@@ -456,46 +456,44 @@ func TestProfileChainManager_AcquireProfile(t *testing.T) {
 	})
 }
 
-// TestProfileChainManager_BuildSettledCarriesKeys verifies the manager's
-// build-settled channel carries the profile key once its build outcome
-// settles.
-func TestProfileChainManager_BuildSettledCarriesKeys(t *testing.T) {
+// TestProfileChainManager_StatusNotifyCarriesKeys verifies the manager signals
+// a changed profile key once its build status changes.
+func TestProfileChainManager_StatusNotifyCarriesKeys(t *testing.T) {
 	store := datastore.New()
 	m := NewProfileChainManager(store)
 
 	store.AddOrUpdateSchedulerProfile(validProfile("built"))
 
 	select {
-	case key := <-m.BuildSettled():
-		assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "built"}, key)
+	case <-m.StatusNotify():
 	case <-time.After(2 * time.Second):
-		t.Fatal("build-settled key not delivered")
+		t.Fatal("status change signal not delivered")
 	}
+	assert.Contains(t, m.TakePendingNotifies(), types.NamespacedName{Namespace: "default", Name: "built"})
 }
 
-// TestProfileChainManager_NotifySettledDropsWhenFull verifies a full
-// build-settled buffer makes notifySettled drop the hint instead of
-// blocking the store callback.
-func TestProfileChainManager_NotifySettledDropsWhenFull(t *testing.T) {
-	store := datastore.New()
-	m := NewProfileChainManager(store)
+// TestProfileChainManager_StatusNotifyNeverDrops verifies a burst of status
+// changes coalesce in the pending set instead of being dropped.
+func TestProfileChainManager_StatusNotifyNeverDrops(t *testing.T) {
+	m := NewProfileChainManager(datastore.New())
 
-	for i := 0; i < cap(m.buildSettled); i++ {
-		m.notifySettled(types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("p%d", i)})
-	}
+	const burst = 500
 	done := make(chan struct{})
 	go func() {
-		m.notifySettled(types.NamespacedName{Namespace: "default", Name: "overflow"})
+		for i := 0; i < burst; i++ {
+			m.notifyStatusNotify(types.NamespacedName{Namespace: "default", Name: fmt.Sprintf("p%d", i)})
+		}
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("notifySettled blocked on a full buffer; it must drop the hint instead")
+		t.Fatal("notifyStatusNotify blocked; it must never block the store callback")
 	}
-	for len(m.buildSettled) > 0 {
-		<-m.buildSettled
-	}
+
+	keys := m.TakePendingNotifies()
+	assert.Len(t, keys, burst, "no status change may be lost")
+	assert.Empty(t, m.TakePendingNotifies(), "a drain clears the pending statuses")
 }
 
 type closerSpy struct {
@@ -598,7 +596,7 @@ func TestProfileChainManager_StaleSuccessDiscarded(t *testing.T) {
 		return built
 	}, "newer version must build")
 	select {
-	case <-m.BuildSettled():
+	case <-m.StatusNotify():
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected the newer build to settle")
 	}
@@ -621,8 +619,8 @@ func TestProfileChainManager_StaleSuccessDiscarded(t *testing.T) {
 	assert.Equal(t, plugins.LeastRequestPluginName, chain.filters[0].Name(),
 		"the stale build must not replace the current chain")
 	select {
-	case k := <-m.BuildSettled():
-		t.Fatalf("stale build must not settle, got %v", k)
+	case <-m.StatusNotify():
+		t.Fatal("stale build must not settle")
 	case <-time.After(100 * time.Millisecond):
 	}
 }
@@ -643,8 +641,8 @@ func TestProfileChainManager_StaleFailureDiscarded(t *testing.T) {
 	assert.False(t, built)
 	assert.NoError(t, buildErr, "the stale failure must not be recorded")
 	select {
-	case k := <-m.BuildSettled():
-		t.Fatalf("stale build must not settle, got %v", k)
+	case <-m.StatusNotify():
+		t.Fatal("stale build must not settle")
 	case <-time.After(100 * time.Millisecond):
 	}
 }

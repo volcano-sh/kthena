@@ -57,12 +57,13 @@ type RouteInfo struct {
 }
 
 type ModelServerResponse struct {
-	Name           string                     `json:"name"`
-	Namespace      string                     `json:"namespace"`
-	Spec           aiv1alpha1.ModelServerSpec `json:"spec"`
-	AssociatedPods []string                   `json:"associatedPods,omitempty"`
-	DecodePods     []string                   `json:"decodePods,omitempty"`
-	PrefillPods    []string                   `json:"prefillPods,omitempty"`
+	Name           string                       `json:"name"`
+	Namespace      string                       `json:"namespace"`
+	Spec           aiv1alpha1.ModelServerSpec   `json:"spec"`
+	Status         aiv1alpha1.ModelServerStatus `json:"status,omitempty"`
+	AssociatedPods []string                     `json:"associatedPods,omitempty"`
+	DecodePods     []string                     `json:"decodePods,omitempty"`
+	PrefillPods    []string                     `json:"prefillPods,omitempty"`
 }
 
 type PodResponse struct {
@@ -147,6 +148,7 @@ func (h *DebugHandler) ListModelServers(c *gin.Context) {
 			Name:      namespacedName.Name,
 			Namespace: namespacedName.Namespace,
 			Spec:      ms.Spec,
+			Status:    ms.Status,
 		}
 
 		// Get associated pods
@@ -315,6 +317,7 @@ func (h *DebugHandler) GetModelServer(c *gin.Context) {
 		Name:      name,
 		Namespace: namespace,
 		Spec:      ms.Spec,
+		Status:    ms.Status,
 	}
 
 	// Get associated pods
@@ -504,4 +507,49 @@ func (h *DebugHandler) convertPodInfoToResponse(namespacedName types.NamespacedN
 	}
 
 	return response
+}
+
+// SchedulerProfileResponse is the API representation of a SchedulerProfile.
+type SchedulerProfileResponse struct {
+	Name      string                          `json:"name"`
+	Namespace string                          `json:"namespace"`
+	Spec      aiv1alpha1.SchedulerProfileSpec `json:"spec"`
+}
+
+// ListSchedulerProfiles handles GET /debug/schedulerprofiles
+func (h *DebugHandler) ListSchedulerProfiles(c *gin.Context) {
+	profiles := h.store.GetAllSchedulerProfiles()
+
+	var responses []SchedulerProfileResponse
+	for namespacedName, profile := range profiles {
+		responses = append(responses, SchedulerProfileResponse{
+			Name:      namespacedName.Name,
+			Namespace: namespacedName.Namespace,
+			Spec:      profile.Spec,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"schedulerprofiles": responses})
+}
+
+// GetSchedulerProfile handles GET /debug/namespaces/{namespace}/schedulerprofiles/{name}
+func (h *DebugHandler) GetSchedulerProfile(c *gin.Context) {
+	namespace := c.Param("namespace")
+	name := c.Param("name")
+	if namespace == "" || name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "namespace and name parameters are required"})
+		return
+	}
+
+	profile := h.store.GetSchedulerProfile(types.NamespacedName{Namespace: namespace, Name: name})
+	if profile == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "SchedulerProfile not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, SchedulerProfileResponse{
+		Name:      name,
+		Namespace: namespace,
+		Spec:      profile.Spec,
+	})
 }

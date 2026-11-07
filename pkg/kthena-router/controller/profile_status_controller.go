@@ -40,18 +40,21 @@ import (
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 )
 
-// ProfileBuildStatusReader reports whether a SchedulerProfile's chain build
-// settled, and the build error if it failed. scheduler.ProfileChainManager
-// implements it; declared here so this package does not import scheduler.
+// ProfileBuildStatusReader reports the profile's build outcome and signals
+// when it changes. Declared here so this package does not import scheduler.
 type ProfileBuildStatusReader interface {
 	BuildStatus(key types.NamespacedName) (built bool, buildErr error)
+	// StatusNotify signals that at least one profile's build status changed.
+	StatusNotify() <-chan struct{}
+	// TakePendingNotifies returns and clears the profiles whose build status
+	// changed.
+	TakePendingNotifies() []types.NamespacedName
 }
 
 // ProfileStatusController reports the resolution state of a ModelServer's
 // referenced SchedulerProfile on the ModelServer's status. It observes
-// ModelServer events, SchedulerProfile events and the ProfileChainManager's
-// build-settled signal, and is the single writer of the
-// SchedulerProfileResolved condition.
+// ModelServer events and the build-outcome notifications, and is the single
+// writer of the SchedulerProfileResolved condition.
 type ProfileStatusController struct {
 	modelServerLister      listerv1alpha1.ModelServerLister
 	schedulerProfileLister listerv1alpha1.SchedulerProfileLister
@@ -59,10 +62,9 @@ type ProfileStatusController struct {
 	modelServerSynced      cache.InformerSynced
 	schedulerProfileSynced cache.InformerSynced
 
-	// buildStatus reads the chain build outcome; buildSettled carries the
-	// profile keys whose outcome just settled (both from the ProfileChainManager).
-	buildStatus  ProfileBuildStatusReader
-	buildSettled <-chan types.NamespacedName
+	// buildStatus reports the chain build outcome and signals its changes.
+	buildStatus ProfileBuildStatusReader
+
 	kthenaClient clientset.Interface
 
 	workqueue   workqueue.TypedRateLimitingInterface[any]
@@ -72,7 +74,6 @@ type ProfileStatusController struct {
 func NewProfileStatusController(
 	kthenaInformerFactory informersv1alpha1.SharedInformerFactory,
 	buildStatus ProfileBuildStatusReader,
-	buildSettled <-chan types.NamespacedName,
 	kthenaClient clientset.Interface,
 ) (*ProfileStatusController, error) {
 	modelServerInformer := kthenaInformerFactory.Networking().V1alpha1().ModelServers()
@@ -84,7 +85,6 @@ func NewProfileStatusController(
 		modelServerSynced:      modelServerInformer.Informer().HasSynced,
 		schedulerProfileSynced: schedulerProfileInformer.Informer().HasSynced,
 		buildStatus:            buildStatus,
-		buildSettled:           buildSettled,
 		kthenaClient:           kthenaClient,
 		workqueue:              workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
 		initialSync:            &atomic.Bool{},
@@ -101,17 +101,6 @@ func NewProfileStatusController(
 		return nil, fmt.Errorf("failed to add modelserver event handler for profile status controller: %w", err)
 	}
 
-	_, err = schedulerProfileInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: controller.enqueueModelServersReferencing,
-		UpdateFunc: func(_, new interface{}) {
-			controller.enqueueModelServersReferencing(new)
-		},
-		DeleteFunc: controller.enqueueModelServersReferencing,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to add schedulerprofile event handler for profile status controller: %w", err)
-	}
-
 	return controller, nil
 }
 
@@ -125,7 +114,7 @@ func (c *ProfileStatusController) Run(stopCh <-chan struct{}) error {
 	c.workqueue.Add(initialSyncSignal)
 
 	go wait.Until(c.runWorker, time.Second, stopCh)
-	go c.consumeBuildSettled(stopCh)
+	go c.consumeStatusNotify(stopCh)
 
 	<-stopCh
 	return nil
@@ -135,19 +124,19 @@ func (c *ProfileStatusController) HasSynced() bool {
 	return c.initialSync.Load()
 }
 
-// consumeBuildSettled re-enqueues referencing ModelServers whenever a
-// profile's build outcome settles: the async chain build may finish after a
+// consumeStatusNotify re-enqueues referencing ModelServers whenever a
+// profile's build status changes: the async chain build may finish after a
 // sync already skipped reporting as in-flight, and nothing else re-triggers
-// those ModelServers. The channel is never closed — the producer
-// (ProfileChainManager) lives as long as the process; shutdown goes through
-// stopCh.
-func (c *ProfileStatusController) consumeBuildSettled(stopCh <-chan struct{}) {
+// those ModelServers.
+func (c *ProfileStatusController) consumeStatusNotify(stopCh <-chan struct{}) {
 	for {
 		select {
 		case <-stopCh:
 			return
-		case key := <-c.buildSettled:
-			c.enqueueModelServersReferencingProfile(key.Namespace, key.Name)
+		case <-c.buildStatus.StatusNotify():
+			for _, key := range c.buildStatus.TakePendingNotifies() {
+				c.enqueueModelServersReferencingProfile(key.Namespace, key.Name)
+			}
 		}
 	}
 }
@@ -222,7 +211,7 @@ func (c *ProfileStatusController) reportSchedulerProfileCondition(ms *aiv1alpha1
 		// The chain build runs in an async store callback, so a just-created
 		// profile may not have finished building when this sync runs. A
 		// profile that the lister knows about is in-flight, not missing —
-		// keep the current condition and let the build-settled signal
+		// keep the current condition and let the status-change signal
 		// re-trigger reporting.
 		if _, err := c.schedulerProfileLister.SchedulerProfiles(ms.Namespace).Get(ref); err == nil {
 			return nil
@@ -306,22 +295,8 @@ func (c *ProfileStatusController) enqueueModelServer(obj interface{}) {
 	c.workqueue.Add(key)
 }
 
-// enqueueModelServersReferencing re-queues every ModelServer referencing the
-// profile, so their conditions are re-reported after the profile changed.
-func (c *ProfileStatusController) enqueueModelServersReferencing(obj interface{}) {
-	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-	if err != nil {
-		return
-	}
-	namespace, name, err := cache.SplitMetaNamespaceKey(key)
-	if err != nil {
-		return
-	}
-	c.enqueueModelServersReferencingProfile(namespace, name)
-}
-
-// enqueueModelServersReferencingProfile is the key-based variant shared by
-// the informer handler and the build-settled consumer.
+// enqueueModelServersReferencingProfile re-queues every ModelServer referencing
+// the profile, so their conditions are re-reported after its status changed.
 func (c *ProfileStatusController) enqueueModelServersReferencingProfile(namespace, name string) {
 	servers, err := c.modelServerLister.ModelServers(namespace).List(labels.Everything())
 	if err != nil {

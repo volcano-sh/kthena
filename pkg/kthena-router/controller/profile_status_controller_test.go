@@ -30,7 +30,6 @@ import (
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/cache"
 
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
@@ -41,7 +40,7 @@ import (
 
 // newProfileStatusTestController builds a ProfileStatusController wired to a
 // fake kthena clientset and a real ProfileChainManager over the store, with the
-// build-settled channel connected.
+// status signal connected.
 func newProfileStatusTestController(t *testing.T) (*ProfileStatusController, *kthenafake.Clientset, datastore.Store, *scheduler.ProfileChainManager, informersv1alpha1.SharedInformerFactory, informers.SharedInformerFactory) {
 	t.Helper()
 	kubeClient := kubefake.NewSimpleClientset()
@@ -50,7 +49,7 @@ func newProfileStatusTestController(t *testing.T) (*ProfileStatusController, *kt
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := newStoreWithMockBackend()
 	chainManager := scheduler.NewProfileChainManager(store)
-	controller, err := NewProfileStatusController(kthenaInformerFactory, chainManager, chainManager.BuildSettled(), kthenaClient)
+	controller, err := NewProfileStatusController(kthenaInformerFactory, chainManager, kthenaClient)
 	require.NoError(t, err)
 	return controller, kthenaClient, store, chainManager, kthenaInformerFactory, kubeInformerFactory
 }
@@ -200,7 +199,7 @@ func TestProfileStatusController_SchedulerProfileCondition(t *testing.T) {
 
 		controller.reportSchedulerProfileCondition(ms)
 
-		// In-flight, not missing: no condition write; the build-settled
+		// In-flight, not missing: no condition write; the status-change
 		// signal re-triggers reporting.
 		assert.Empty(t, kthenaClient.Actions())
 	})
@@ -238,11 +237,11 @@ func TestProfileStatusController_ReportsResolvedOnSync(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "condition must be reported through the controller's own sync path")
 }
 
-// TestProfileStatusController_BuildSettledConverges verifies the closed loop:
+// TestProfileStatusController_StatusNotifyConverges verifies the closed loop:
 // a ModelServer referencing a missing profile first reports NotFound, and the
-// build-settled signal flips it to Resolved once the profile lands — with no
+// status signal flips it to Resolved once the profile lands — with no
 // other event in between.
-func TestProfileStatusController_BuildSettledConverges(t *testing.T) {
+func TestProfileStatusController_StatusNotifyConverges(t *testing.T) {
 	controller, kthenaClient, store, chainManager, kthenaInformerFactory, kubeInformerFactory := newProfileStatusTestController(t)
 
 	ms := newModelServerWithProfileRef("default", "ms", "p1")
@@ -264,7 +263,7 @@ func TestProfileStatusController_BuildSettledConverges(t *testing.T) {
 			got.Status.Conditions[0].Reason == aiv1alpha1.SchedulerProfileResolvedReasonNotFound
 	}, 5*time.Second, 50*time.Millisecond, "missing profile must report NotFound")
 
-	// Step 2: the profile lands and the chain settles; the settled signal
+	// Step 2: the profile lands and the chain settles; the status signal
 	// re-enqueues the referencing ModelServer, which now reports Resolved.
 	_, err = kthenaClient.NetworkingV1alpha1().SchedulerProfiles("default").Create(
 		context.Background(), builtProfile("p1"), metav1.CreateOptions{})
@@ -280,10 +279,9 @@ func TestProfileStatusController_BuildSettledConverges(t *testing.T) {
 	}, 5*time.Second, 50*time.Millisecond, "build settle must converge the condition to Resolved")
 }
 
-// TestProfileStatusController_EnqueueModelServersReferencing verifies a
-// SchedulerProfile event enqueues exactly the ModelServers referencing it,
-// including through delete-event tombstones.
-func TestProfileStatusController_EnqueueModelServersReferencing(t *testing.T) {
+// TestProfileStatusController_EnqueueModelServersReferencingProfile verifies a
+// status change enqueues exactly the ModelServers referencing that profile.
+func TestProfileStatusController_EnqueueModelServersReferencingProfile(t *testing.T) {
 	controller, _, _, _, kthenaInformerFactory, _ := newProfileStatusTestController(t)
 
 	indexer := kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer()
@@ -291,24 +289,9 @@ func TestProfileStatusController_EnqueueModelServersReferencing(t *testing.T) {
 	require.NoError(t, indexer.Add(newModelServerWithProfileRef("default", "ms-other", "p2")))
 	require.NoError(t, indexer.Add(newModelServerWithProfileRef("default", "ms-plain", "")))
 
-	profile := &aiv1alpha1.SchedulerProfile{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "p1"},
-	}
-
-	controller.enqueueModelServersReferencing(profile)
+	controller.enqueueModelServersReferencingProfile("default", "p1")
 	assert.Equal(t, 1, controller.workqueue.Len())
 	obj, _ := controller.workqueue.Get()
-	controller.workqueue.Done(obj)
-	controller.workqueue.Forget(obj)
-	assert.Equal(t, "default/ms-ref", obj.(string))
-
-	// Delete events deliver the object wrapped in a tombstone.
-	controller.enqueueModelServersReferencing(cache.DeletedFinalStateUnknown{
-		Key: "default/p1",
-		Obj: profile,
-	})
-	assert.Equal(t, 1, controller.workqueue.Len())
-	obj, _ = controller.workqueue.Get()
 	controller.workqueue.Done(obj)
 	controller.workqueue.Forget(obj)
 	assert.Equal(t, "default/ms-ref", obj.(string))

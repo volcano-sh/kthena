@@ -93,7 +93,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	if err != nil {
 		klog.Fatalf("Error creating model server controller: %s", err.Error())
 	}
-	profileStatusController, err := controller.NewProfileStatusController(kthenaInformerFactory, chainManager, chainManager.BuildSettled(), kthenaClient)
+	profileStatusController, err := controller.NewProfileStatusController(kthenaInformerFactory, chainManager, kthenaClient)
 	if err != nil {
 		klog.Fatalf("Error creating profile status controller: %s", err.Error())
 	}
