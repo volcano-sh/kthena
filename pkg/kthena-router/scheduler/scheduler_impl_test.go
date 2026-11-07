@@ -465,7 +465,8 @@ func TestScheduleStickyPod(t *testing.T) {
 				testutil.PodInfoWithEngine("pod-a", "default", "10.0.0.1", ""),
 				testutil.PodInfoWithEngine("pod-b", "default", "10.0.0.2", ""),
 			}
-			scheduler := NewScheduler(datastore.New(), nil).(*SchedulerImpl)
+			sched, _ := NewScheduler(datastore.New(), nil)
+			scheduler := sched.(*SchedulerImpl)
 			if tt.updatePods {
 				scheduler = schedulerWithoutFilters(datastore.New())
 			}
@@ -495,7 +496,7 @@ func TestScheduleStickyPod(t *testing.T) {
 // orders a concurrent update before the read and hides a missing lock from
 // -race.
 func schedulerWithoutFilters(store datastore.Store) *SchedulerImpl {
-	return &SchedulerImpl{store: store}
+	return &SchedulerImpl{store: store, globalChain: &PluginChain{}}
 }
 
 // updatePodsConcurrently updates each pod's Pod object from another goroutine,
