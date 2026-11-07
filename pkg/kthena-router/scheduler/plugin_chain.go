@@ -156,33 +156,71 @@ type ProfileChainManager struct {
 	chains    map[types.NamespacedName]*PluginChain
 	buildErrs map[types.NamespacedName]error
 
-	// buildSettled carries profile keys whose build outcome just settled.
-	// Full buffer drops the hint; conditions converge on the next event.
-	buildSettled chan types.NamespacedName
+	// notifyMu guards pendingNotifies: the profiles whose build status
+	// changed and still need their ModelServer condition re-reported.
+	// statusNotify coalesces the wake; disabled means no wake is ever sent.
+	notifyMu             sync.Mutex
+	pendingNotifies      map[types.NamespacedName]struct{}
+	statusNotify         chan struct{}
+	notificationsEnabled atomic.Bool
 }
 
 // NewProfileChainManager registers SchedulerProfile store callbacks; the
 // store must be shared with the SchedulerProfile controller.
 func NewProfileChainManager(store datastore.Store) *ProfileChainManager {
 	m := &ProfileChainManager{
-		store:        store,
-		chains:       make(map[types.NamespacedName]*PluginChain),
-		buildErrs:    make(map[types.NamespacedName]error),
-		buildSettled: make(chan types.NamespacedName, 128),
+		store:           store,
+		chains:          make(map[types.NamespacedName]*PluginChain),
+		buildErrs:       make(map[types.NamespacedName]error),
+		pendingNotifies: make(map[types.NamespacedName]struct{}),
+		statusNotify:    make(chan struct{}, 1),
 	}
+	m.notificationsEnabled.Store(true)
 	store.RegisterCallback("SchedulerProfile", m.onProfileEvent)
 	return m
 }
 
-func (m *ProfileChainManager) BuildSettled() <-chan types.NamespacedName {
-	return m.buildSettled
+// DisableNotifications stops signaling build-status changes; the file source
+// only builds chains and nothing would consume them. Must not be called
+// concurrently with itself.
+func (m *ProfileChainManager) DisableNotifications() {
+	m.notificationsEnabled.Store(false)
 }
 
-func (m *ProfileChainManager) notifySettled(key types.NamespacedName) {
+// StatusNotify signals that at least one profile's build status changed;
+// nothing is sent while notifications are disabled.
+func (m *ProfileChainManager) StatusNotify() <-chan struct{} {
+	return m.statusNotify
+}
+
+// TakePendingNotifies returns and clears the profiles whose build status
+// changed.
+func (m *ProfileChainManager) TakePendingNotifies() []types.NamespacedName {
+	m.notifyMu.Lock()
+	defer m.notifyMu.Unlock()
+	if len(m.pendingNotifies) == 0 {
+		return nil
+	}
+	keys := make([]types.NamespacedName, 0, len(m.pendingNotifies))
+	for key := range m.pendingNotifies {
+		keys = append(keys, key)
+	}
+	clear(m.pendingNotifies)
+	return keys
+}
+
+// notifyStatusNotify marks the profile and wakes the reporter; a full channel
+// only coalesces the wake, the key is never dropped.
+func (m *ProfileChainManager) notifyStatusNotify(key types.NamespacedName) {
+	if !m.notificationsEnabled.Load() {
+		return
+	}
+	m.notifyMu.Lock()
+	m.pendingNotifies[key] = struct{}{}
+	m.notifyMu.Unlock()
 	select {
-	case m.buildSettled <- key:
+	case m.statusNotify <- struct{}{}:
 	default:
-		klog.Warningf("SchedulerProfile %s: build-settled channel full, dropping the hint", key.String())
 	}
 }
 
@@ -224,7 +262,7 @@ func (m *ProfileChainManager) onProfileEvent(data datastore.EventData) {
 			old.retire()
 		}
 		m.mu.Unlock()
-		m.notifySettled(key)
+		m.notifyStatusNotify(key)
 		klog.Infof("SchedulerProfile %s: removed; referencing ModelServers fail their requests until the reference is updated", key.String())
 		return
 	}
@@ -260,12 +298,12 @@ func (m *ProfileChainManager) onProfileEvent(data datastore.EventData) {
 	}
 	if err != nil {
 		klog.Warningf("SchedulerProfile %s: failed to build plugin chain: %v", key.String(), err)
-		m.notifySettled(key)
+		m.notifyStatusNotify(key)
 		return
 	}
 	klog.V(4).Infof("SchedulerProfile %s: chain rebuilt (filters: [%s], scores: [%s])",
 		key.String(), pluginNames(chain.filters), scorePluginNames(chain.scores))
-	m.notifySettled(key)
+	m.notifyStatusNotify(key)
 }
 
 // buildChain validates the profile's plugins and instantiates the chain.

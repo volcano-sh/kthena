@@ -26,7 +26,7 @@ type PluginWithWeightApplyConfiguration struct {
 	// Name of the score plugin, e.g. "prefix-cache".
 	Name *string `json:"name,omitempty"`
 	// Weight multiplies this plugin's score before it is summed with the
-	// other plugins' weighted scores. Must be between 1 and 100.
+	// other plugins' weighted scores. Must be greater than 0.
 	Weight *int32 `json:"weight,omitempty"`
 }
 

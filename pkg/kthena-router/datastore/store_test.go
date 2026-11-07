@@ -3611,3 +3611,47 @@ func isClosed(ch chan struct{}) bool {
 		return false
 	}
 }
+
+func TestStoreUnregisterClearsBackingArraySlot(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]callbackEntry),
+	}
+
+	unregister := s.RegisterCallback("Pod", func(EventData) {})
+	unregister()
+
+	entries := s.callbacks["Pod"]
+	assert.Empty(t, entries)
+	for _, e := range entries[:cap(entries)] {
+		assert.Nil(t, e.fn, "the vacated slot must not retain the callback")
+	}
+}
+
+func TestStoreUnregisterTailKeepsRemainingCallbacks(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]callbackEntry),
+	}
+
+	events := make(chan string, 2)
+	s.RegisterCallback("Pod", func(EventData) { events <- "first" })
+	unregisterSecond := s.RegisterCallback("Pod", func(EventData) { events <- "second" })
+
+	unregisterSecond()
+	s.triggerCallbacks("Pod", EventData{EventType: EventAdd})
+
+	select {
+	case got := <-events:
+		assert.Equal(t, "first", got)
+	case <-time.After(time.Second):
+		t.Fatal("remaining callback did not fire")
+	}
+	entries := s.callbacks["Pod"]
+	assert.Len(t, entries, 1)
+	for _, e := range entries[:cap(entries)][1:] {
+		assert.Nil(t, e.fn, "the vacated slot must not retain the callback")
+	}
+}

@@ -25,6 +25,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -227,6 +228,8 @@ type Store interface {
 	DeleteSchedulerProfile(name types.NamespacedName)
 	// Get a SchedulerProfile, or nil when absent.
 	GetSchedulerProfile(name types.NamespacedName) *aiv1alpha1.SchedulerProfile
+	// GetAllSchedulerProfiles returns all SchedulerProfiles.
+	GetAllSchedulerProfiles() map[types.NamespacedName]*aiv1alpha1.SchedulerProfile
 	GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, error)
 
 	// Refresh Store and ModelServer when add a new pod or update a pod
@@ -1061,6 +1064,20 @@ func (s *store) GetSchedulerProfile(name types.NamespacedName) *aiv1alpha1.Sched
 		return value.(*aiv1alpha1.SchedulerProfile)
 	}
 	return nil
+}
+
+// GetAllSchedulerProfiles returns all SchedulerProfiles in the store
+func (s *store) GetAllSchedulerProfiles() map[types.NamespacedName]*aiv1alpha1.SchedulerProfile {
+	result := make(map[types.NamespacedName]*aiv1alpha1.SchedulerProfile)
+	s.schedulerProfiles.Range(func(key, value any) bool {
+		if namespacedName, ok := key.(types.NamespacedName); ok {
+			if profile, ok := value.(*aiv1alpha1.SchedulerProfile); ok {
+				result[namespacedName] = profile
+			}
+		}
+		return true
+	})
+	return result
 }
 
 func (s *store) GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, error) {
@@ -1994,10 +2011,9 @@ func (s *store) RegisterCallback(kind string, callback CallbackFunc) (unregister
 	return func() {
 		s.callbacksMu.Lock()
 		defer s.callbacksMu.Unlock()
-		entries := s.callbacks[kind]
-		for i, entry := range entries {
+		for i, entry := range s.callbacks[kind] {
 			if entry.id == id {
-				s.callbacks[kind] = append(entries[:i], entries[i+1:]...)
+				s.callbacks[kind] = slices.Delete(s.callbacks[kind], i, i+1)
 				return
 			}
 		}
