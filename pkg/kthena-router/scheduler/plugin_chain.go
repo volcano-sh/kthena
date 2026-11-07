@@ -212,6 +212,10 @@ func (m *ProfileChainManager) onProfileEvent(data datastore.EventData) {
 	klog.V(4).Infof("SchedulerProfile %s: received %s event", key.String(), data.EventType)
 	if data.EventType == datastore.EventDelete {
 		m.mu.Lock()
+		if m.store.GetSchedulerProfile(key) != nil {
+			m.mu.Unlock()
+			return
+		}
 		old, had := m.chains[key]
 		delete(m.chains, key)
 		delete(m.buildErrs, key)
@@ -364,12 +368,13 @@ func (m *ProfileChainManager) AcquireProfile(ms *aiv1alpha1.ModelServer) (*Plugi
 	}
 	name := *ms.Spec.TrafficPolicy.LoadBalancer.SchedulerProfile
 	key := types.NamespacedName{Namespace: ms.Namespace, Name: name}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	chain, ok := m.chains[key]
 	if ok {
-		// In-map chains are never retired; the increment under the lock
-		// makes a concurrent retire wait for this request's Release.
+		// Both retire paths hold the write lock, so a chain found here cannot
+		// be retiring concurrently; the increment makes a later retire wait
+		// for this request's Release.
 		chain.Acquire()
 		return chain, nil
 	}
