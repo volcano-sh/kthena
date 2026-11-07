@@ -68,7 +68,8 @@ type Config struct {
 	// RendererStartupTimeout is how long a renderer may take to become
 	// healthy before it is marked failed.
 	RendererStartupTimeout time.Duration
-	// RendererMaxRestarts is the restart budget for a crashed renderer.
+	// RendererMaxRestarts is how many consecutive restarts a crashed renderer
+	// gets; the count resets once it becomes ready.
 	RendererMaxRestarts int
 	// ProxyTimeout bounds a proxied /tokenize request.
 	ProxyTimeout time.Duration

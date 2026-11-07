@@ -123,7 +123,7 @@ Service environment variables (advanced, set via `extraEnv`):
 | `WATCH_NAMESPACE`                  | `""` (all) | Restrict the ModelServer watch to one namespace                                |
 | `VLLM_RENDER_EXTRA_ARGS`           | —          | Extra arguments appended to every renderer command, e.g. `--trust-remote-code` |
 | `RENDERER_STARTUP_TIMEOUT_SECONDS` | `600`      | Max time for a renderer to become healthy (includes tokenizer download)        |
-| `RENDERER_MAX_RESTARTS`            | `3`        | Restart budget for a crashed renderer                                          |
+| `RENDERER_MAX_RESTARTS`            | `3`        | Consecutive restarts allowed for a crashed renderer, reset once it is ready    |
 | `HF_TOKEN`                         | —          | Hugging Face token for gated models                                            |
 | `HF_ENDPOINT`                      | —          | Alternative Hugging Face endpoint, e.g. a private mirror                       |
 

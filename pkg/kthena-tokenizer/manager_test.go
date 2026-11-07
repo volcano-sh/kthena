@@ -202,3 +202,48 @@ func TestRendererManagerUnloadsRendererThatNeverStarted(t *testing.T) {
 	})
 	assert.Empty(t, m.Snapshot())
 }
+
+// crashRenderer kills a renderer's subprocess and waits for the manager to
+// observe the exit.
+func crashRenderer(t *testing.T, m *RendererManager, model string) {
+	t.Helper()
+	m.mu.Lock()
+	r := m.renderers[model]
+	require.NotNil(t, r, "no renderer for model %s", model)
+	cmd, done := r.cmd, r.done
+	m.mu.Unlock()
+	require.NotNil(t, cmd, "renderer for model %s never spawned", model)
+	require.NoError(t, cmd.Process.Kill())
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("renderer for model %s did not exit after kill", model)
+	}
+}
+
+func TestRendererManagerRestartBudgetResetsAfterReady(t *testing.T) {
+	// A renderer that crashes, recovers and serves again must still be
+	// restarted the next time it dies.
+	cfg := testConfig(t, 18370, map[string]string{"served": "some/source"})
+	cfg.RendererMaxRestarts = 1
+	m := NewRendererManager(cfg)
+	defer m.shutdown()
+
+	m.SetModels(map[string]struct{}{"served": {}})
+	waitForStatus(t, m, "served", StatusReady)
+
+	for i := 1; i <= 2; i++ {
+		crashRenderer(t, m, "served")
+		// The monitor loop is not running in this test, so drive retries here.
+		require.Eventually(t, func() bool {
+			m.restartCrashed()
+			_, ok := m.EndpointFor("served")
+			return ok
+		}, 20*time.Second, 100*time.Millisecond, "renderer did not recover from crash %d", i)
+	}
+
+	infos := m.Snapshot()
+	require.Len(t, infos, 1)
+	// Restarts is the lifetime total, not the budget.
+	assert.Equal(t, 2, infos[0].Restarts)
+}
