@@ -67,6 +67,7 @@ func testConfig(t *testing.T, basePort int, models map[string]string) Config {
 		RendererCommand:        []string{os.Args[0], "-test.run=TestHelperRenderer", "--"},
 		RendererStartupTimeout: 30 * time.Second,
 		RendererMaxRestarts:    3,
+		RendererStableWindow:   time.Second,
 		ProxyTimeout:           5 * time.Second,
 	}
 }
@@ -221,11 +222,12 @@ func crashRenderer(t *testing.T, m *RendererManager, model string) {
 	}
 }
 
-func TestRendererManagerRestartBudgetResetsAfterReady(t *testing.T) {
-	// A renderer that crashes, recovers and serves again must still be
+func TestRendererManagerRestartBudgetResetsAfterStableRun(t *testing.T) {
+	// A renderer that crashes, recovers and serves for a while must still be
 	// restarted the next time it dies.
 	cfg := testConfig(t, 18370, map[string]string{"served": "some/source"})
 	cfg.RendererMaxRestarts = 1
+	cfg.RendererStableWindow = 200 * time.Millisecond
 	m := NewRendererManager(cfg)
 	defer m.shutdown()
 
@@ -233,6 +235,7 @@ func TestRendererManagerRestartBudgetResetsAfterReady(t *testing.T) {
 	waitForStatus(t, m, "served", StatusReady)
 
 	for i := 1; i <= 2; i++ {
+		time.Sleep(2 * cfg.RendererStableWindow)
 		crashRenderer(t, m, "served")
 		// The monitor loop is not running in this test, so drive retries here.
 		require.Eventually(t, func() bool {
@@ -246,4 +249,42 @@ func TestRendererManagerRestartBudgetResetsAfterReady(t *testing.T) {
 	require.Len(t, infos, 1)
 	// Restarts is the lifetime total, not the budget.
 	assert.Equal(t, 2, infos[0].Restarts)
+}
+
+func TestRendererManagerRestartBudgetIsNotRestoredByFlapping(t *testing.T) {
+	// A renderer that becomes ready and dies straight away is still crash
+	// looping, so it must stop being restarted once the budget is spent.
+	cfg := testConfig(t, 18380, map[string]string{"served": "some/source"})
+	cfg.RendererMaxRestarts = 2
+	cfg.RendererStableWindow = time.Minute
+	m := NewRendererManager(cfg)
+	defer m.shutdown()
+
+	m.SetModels(map[string]struct{}{"served": {}})
+	waitForStatus(t, m, "served", StatusReady)
+
+	for i := 1; i <= cfg.RendererMaxRestarts; i++ {
+		crashRenderer(t, m, "served")
+		require.Eventually(t, func() bool {
+			m.restartCrashed()
+			_, ok := m.EndpointFor("served")
+			return ok
+		}, 20*time.Second, 100*time.Millisecond, "renderer did not recover from crash %d", i)
+	}
+
+	crashRenderer(t, m, "served")
+	require.Eventually(t, func() bool {
+		m.restartCrashed()
+		for _, info := range m.Snapshot() {
+			if info.Model == "served" {
+				return info.Status == string(StatusFailed)
+			}
+		}
+		return false
+	}, 20*time.Second, 100*time.Millisecond, "renderer kept restarting past its budget")
+
+	infos := m.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, "restart budget exhausted", infos[0].LastError)
+	assert.Equal(t, cfg.RendererMaxRestarts, infos[0].Restarts)
 }

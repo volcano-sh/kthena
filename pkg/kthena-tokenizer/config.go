@@ -69,8 +69,11 @@ type Config struct {
 	// healthy before it is marked failed.
 	RendererStartupTimeout time.Duration
 	// RendererMaxRestarts is how many consecutive restarts a crashed renderer
-	// gets; the count resets once it becomes ready.
+	// gets; the count resets after it stays ready for RendererStableWindow.
 	RendererMaxRestarts int
+	// RendererStableWindow is how long a renderer must stay ready before its
+	// restart budget is restored.
+	RendererStableWindow time.Duration
 	// ProxyTimeout bounds a proxied /tokenize request.
 	ProxyTimeout time.Duration
 }
@@ -90,6 +93,7 @@ func ConfigFromEnv() Config {
 		RendererExtraArgs:      envFields("VLLM_RENDER_EXTRA_ARGS", ""),
 		RendererStartupTimeout: time.Duration(envInt("RENDERER_STARTUP_TIMEOUT_SECONDS", 600)) * time.Second,
 		RendererMaxRestarts:    envInt("RENDERER_MAX_RESTARTS", 3),
+		RendererStableWindow:   time.Duration(envInt("RENDERER_STABLE_WINDOW_SECONDS", 600)) * time.Second,
 		ProxyTimeout:           time.Duration(envInt("PROXY_TIMEOUT_SECONDS", 5)) * time.Second,
 	}
 }

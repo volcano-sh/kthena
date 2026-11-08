@@ -66,9 +66,11 @@ type renderer struct {
 	status   RendererStatus
 	restarts int
 	lastErr  string
-	// budgetUsed counts restarts since the renderer was last ready; restarts
+	// budgetUsed counts restarts since the budget was last restored; restarts
 	// stays the lifetime total reported by /models.
 	budgetUsed int
+	// readyAt is when the renderer last became ready; zero while it is not.
+	readyAt time.Time
 
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
@@ -302,7 +304,7 @@ func (m *RendererManager) waitReady(r *renderer) {
 			if m.renderers[r.model] == r {
 				r.status = StatusReady
 				r.lastErr = ""
-				r.budgetUsed = 0
+				r.readyAt = time.Now()
 				klog.Infof("Tokenizer for model %s ready at %s", r.model, r.endpoint())
 			}
 			m.mu.Unlock()
@@ -357,6 +359,11 @@ func (m *RendererManager) restartCrashed() {
 		default:
 			continue
 		}
+		// Staying ready for the window means it recovered rather than crash
+		// looped, so give the budget back.
+		if !r.readyAt.IsZero() && time.Since(r.readyAt) >= m.config.RendererStableWindow {
+			r.budgetUsed = 0
+		}
 		if r.budgetUsed >= m.config.RendererMaxRestarts {
 			// Only log the transition once; already-failed renderers keep
 			// their original error message.
@@ -369,6 +376,7 @@ func (m *RendererManager) restartCrashed() {
 		}
 		r.restarts++
 		r.budgetUsed++
+		r.readyAt = time.Time{}
 		r.status = StatusLoading
 		toRestart = append(toRestart, r)
 	}
