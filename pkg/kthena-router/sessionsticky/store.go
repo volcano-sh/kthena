@@ -19,6 +19,7 @@ package sessionsticky
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -40,9 +41,10 @@ type Store interface {
 }
 
 const (
-	backendMemory       = "memory"
-	backendRedis        = "redis"
-	memorySweepInterval = time.Minute
+	backendMemory                 = "memory"
+	backendRedis                  = "redis"
+	memorySweepInterval           = time.Minute
+	sessionStickyRedisPasswordEnv = "SESSION_STICKY_REDIS_PASSWORD"
 )
 
 // NewStore builds a sticky store from router configuration.
@@ -62,7 +64,8 @@ func NewStore(cfg *conf.SessionStickyConfig) (Store, error) {
 		if addr == "" {
 			return nil, fmt.Errorf("sessionSticky.redis.address is required when backend is redis")
 		}
-		return NewRedisStore(addr)
+		password := os.Getenv(sessionStickyRedisPasswordEnv)
+		return newRedisStore(addr, password)
 	}
 	return nil, fmt.Errorf("sessionSticky.backend %q is invalid (use memory or redis)", cfg.Backend)
 }
@@ -188,7 +191,14 @@ end
 `
 
 func NewRedisStore(addr string) (*RedisStore, error) {
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	return newRedisStore(addr, "")
+}
+
+func newRedisStore(addr, password string) (*RedisStore, error) {
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     addr,
+		Password: password,
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {
