@@ -1423,6 +1423,33 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 				return err
 			}
 		}
+		ownedPods := make([]*corev1.Pod, 0, len(pods))
+		unownedPods := make(map[string]struct{})
+		staleFound := false
+		for _, pod := range pods {
+			ownerUID, isModelServingPod := modelServingOwnerUID(pod, ms.Name)
+			if !isModelServingPod || ownerUID == ms.UID {
+				// Owned by this ModelServing, or not owned by a ModelServing named ms.Name
+				// at all; leave it alone and keep counting it.
+				if !isModelServingPod {
+					unownedPods[pod.Name] = struct{}{}
+				}
+				ownedPods = append(ownedPods, pod)
+				continue
+			}
+			// Left over from a previous same-named ModelServing; delete it instead
+			// of waiting for GC.
+			staleFound = true
+			klog.Warningf("manageRoleReplicasPerGroup: deleting pod %s/%s left over from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s)",
+				pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, ownerUID)
+			if err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(pod.UID))); err != nil && !apierrors.IsNotFound(err) {
+				klog.Warningf("manageRoleReplicasPerGroup: failed to delete stale pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			}
+		}
+		if staleFound {
+			c.enqueueModelServingAfter(ms, 1*time.Second)
+		}
+		pods = ownedPods
 		roleToApply, revisionToUse, hashToUse, err := c.appliedRoleTemplate(ctx, ms, groupName, targetRole.Name, roleObj)
 		if err != nil {
 			klog.Warningf("manageRoleReplicasPerGroup: cannot resolve template for role %s/%s: %v", targetRole.Name, roleObj.Name, err)
@@ -1488,7 +1515,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			}
 		}
 		expectedPods := 1 + int(roleToApply.WorkerReplicas)
-		if !rolePodsComplete(ms, groupName, roleObj.Name, roleToApply, revisionToUse, pods, false) {
+		if !rolePodsComplete(ms, groupName, roleObj.Name, roleToApply, revisionToUse, pods, false) && !unownedPodsFillRole(groupName, roleObj.Name, roleToApply, pods, unownedPods) {
 			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 			if err := c.createPodsByRoleWithContext(ctx, roleToApply, applicable, roleIndex, servingGroupOrdinal, revisionToUse, hashToUse, applicableChain); err != nil {
@@ -2439,6 +2466,41 @@ func isOwnedByModelServing(metaObj metav1.Object) bool {
 	return false
 }
 
+// unownedPodsFillRole reports whether every expected pod of the role exists and at
+// least one of them is not owned by any ModelServing. Such pods are left untouched
+// and still count as present, so they must not trigger recreation.
+func unownedPodsFillRole(groupName, roleID string, role workloadv1alpha1.Role, pods []*corev1.Pod, unowned map[string]struct{}) bool {
+	if len(unowned) == 0 {
+		return false
+	}
+	present := make(map[string]struct{}, len(pods))
+	for _, pod := range pods {
+		present[pod.Name] = struct{}{}
+	}
+	hasUnowned := false
+	for ordinal := 0; ordinal <= int(role.WorkerReplicas); ordinal++ {
+		name := utils.GeneratePodName(groupName, roleID, ordinal)
+		if _, ok := present[name]; !ok {
+			return false
+		}
+		if _, ok := unowned[name]; ok {
+			hasUnowned = true
+		}
+	}
+	return hasUnowned
+}
+
+// modelServingOwnerUID returns the UID of metaObj's owner reference to the ModelServing named
+// msName, if any.
+func modelServingOwnerUID(metaObj metav1.Object, msName string) (types.UID, bool) {
+	for _, ownerRef := range metaObj.GetOwnerReferences() {
+		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == workloadv1alpha1.ModelServingKind.Kind && ownerRef.Name == msName {
+			return ownerRef.UID, true
+		}
+	}
+	return "", false
+}
+
 // handleDeletionInProgress checks and handles deletion states for ServingGroup or Role.
 // Returns true if the resource deletion is already in progress and the caller should stop further handling.
 func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) bool {
@@ -3213,6 +3275,13 @@ func (c *ModelServingController) createPod(
 				existing.Labels[workloadv1alpha1.RoleIDKey] == roleID &&
 				((utils.ObjectRevision(existing) == utils.ObjectRevision(pod) && roleTemplateHashMatches) || completedTarget)
 			if !identityMatches {
+				if ownerUID, ok := modelServingOwnerUID(existing, ms.Name); ok && ownerUID != ms.UID {
+					// existing is left over from a previous same-named ModelServing; delete it
+					// instead of waiting on garbage collection so a later reconcile can recreate it.
+					if delErr := c.kubeClientSet.CoreV1().Pods(existing.Namespace).Delete(ctx, existing.Name, *metav1.NewPreconditionDeleteOptions(string(existing.UID))); delErr != nil && !apierrors.IsNotFound(delErr) {
+						klog.Warningf("createPod: failed to delete stale %s pod %s left over from previous same-named ModelServing %s/%s: %v", roleKind, existing.Name, ms.Namespace, ms.Name, delErr)
+					}
+				}
 				c.enqueueModelServingAfter(ms, enqueueAfter)
 				return fmt.Errorf("existing %s pod %s does not match expected identity: owner=%t group=%q/%q role=%q/%q roleID=%q/%q revision=%q/%q roleTemplateHash=%q/%q",
 					roleKind, pod.Name,

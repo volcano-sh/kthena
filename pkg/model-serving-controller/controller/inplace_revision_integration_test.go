@@ -429,11 +429,9 @@ func TestInPlaceIntegrationRejectsSubstituteMembers(t *testing.T) {
 					}
 					require.NoError(t, err)
 					require.NoError(t, f.c.podsInformer.GetIndexer().Add(worker))
-					if invalid == "foreign" {
-						require.ErrorContains(t, f.c.syncModelServing(context.Background(), namespacedKey(f.current.Namespace, f.current.Name)), "does not match expected identity")
-					} else {
-						f.sync(t)
-					}
+					// A foreign-owned member from a previous same-named ModelServing is
+					// deleted and replaced rather than failing the sync.
+					f.sync(t)
 					f.requireUnitRevision(t, "old")
 					if phase == "complete" {
 						entry, err = f.c.kubeClientSet.CoreV1().Pods(entry.Namespace).Get(context.Background(), entry.Name, metav1.GetOptions{})

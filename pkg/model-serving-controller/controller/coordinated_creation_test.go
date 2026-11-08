@@ -202,8 +202,10 @@ func TestCoordinatedCreationDoesNotAdoptForeignSameNamePod(t *testing.T) {
 	c.scaleUpRoles(withCoordinatedRound(context.Background(), ms), ms, group, role, nil, 1, 0, revision, true)
 	pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, err)
-	require.Len(t, pods.Items, 1, "a foreign entry must not grant permission to create target workers or adopt the Role")
-	require.Equal(t, *foreign, pods.Items[0])
+	// The stale same-named entry is deleted rather than adopted, and it must not grant
+	// permission to create target workers or adopt the Role.
+	require.Empty(t, pods.Items, "a foreign entry must not grant permission to create target workers or adopt the Role")
+	require.NotEmpty(t, foreign.Name)
 	require.Equal(t, datastore.RoleNotFound, c.store.GetRoleStatus(utils.GetNamespaceName(ms), group, role.Name, "prefill-0"))
 }
 
@@ -242,8 +244,7 @@ func TestCoordinatedCreationRejectsLiveForeignDespiteStaleOwnedLister(t *testing
 	require.True(t, entryReadLive, "coordinated replay verification must read live identity despite a matching stale lister copy")
 	pods, err := client.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, err)
-	require.Len(t, pods.Items, 1)
-	require.Equal(t, *foreign, pods.Items[0])
+	require.Empty(t, pods.Items, "the stale same-named entry is deleted, and no workers are created")
 	require.Equal(t, datastore.RoleNotFound, c.store.GetRoleStatus(utils.GetNamespaceName(ms), group, role.Name, "prefill-0"))
 }
 
