@@ -91,6 +91,13 @@ spec:
                   name: redis-secret
                   key: REDIS_PASSWORD
                   optional: true
+            {{- if and .Values.kthenaRouter.sessionSticky (and .Values.kthenaRouter.sessionSticky.redis (and .Values.kthenaRouter.sessionSticky.redis.secretRef .Values.kthenaRouter.sessionSticky.redis.secretRef.name)) }}
+            - name: SESSION_STICKY_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.kthenaRouter.sessionSticky.redis.secretRef.name | quote }}
+                  key: {{ .Values.kthenaRouter.sessionSticky.redis.secretRef.key | default "password" | quote }}
+            {{- end }}
             # Scheduling strategy: user fairness and session boost are mutually exclusive
             {{- if .Values.kthenaRouter.fairness.enabled }}
             - name: ENABLE_FAIRNESS_SCHEDULING

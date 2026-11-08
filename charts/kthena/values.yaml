@@ -137,6 +137,20 @@ networking:
       # rejected with HTTP 504. Defaults to `30s`; set a non-positive duration<br/>
       # (e.g. `0s`) to disable it (bounded only by client disconnect).
       timeout: "30s"
+    # sessionSticky configures the router-wide session affinity backing store.
+    sessionSticky:
+      # -- Backend store for session affinity: "memory" (default) or "redis".
+      backend: memory
+      redis:
+        # -- Address of the Redis instance (e.g. "redis:6379"). Required when backend is redis.
+        address: ""
+        # secretRef references a Kubernetes Secret containing the Redis password.
+        # If Redis does not require authentication, leave name and key empty.
+        secretRef:
+          # -- Kubernetes Secret name containing the Redis password.
+          name: ""
+          # -- Key within the Secret containing the Redis password (defaults to "password").
+          key: ""
     gatewayAPI:
       # -- Enable Gateway API related features.
       enabled: false

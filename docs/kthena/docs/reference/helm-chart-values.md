@@ -45,6 +45,10 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.sessionBoost.inflightPerPod | int | `16` | Maximum inflight requests admitted per backend pod.<br/> Total inflight limit is this value times the number of backend pods.<br/> `0` or unset uses the router default (16). |
 | networking.kthenaRouter.sessionBoost.maxSessions | int | `4096` | Maximum number of recently-completed sessions kept warm for boosting.<br/> Bounds an LRU cache; the least-recently-used session is evicted automatically.<br/> Size it by the number of concurrent conversations to keep boosted. |
 | networking.kthenaRouter.sessionBoost.timeout | string | `"30s"` | Maximum time a request may wait in the session-boost queue before it is<br/> rejected with HTTP 504. Defaults to `30s`; set a non-positive duration<br/> (e.g. `0s`) to disable it (bounded only by client disconnect). |
+| networking.kthenaRouter.sessionSticky.backend | string | `"memory"` | Backend store for session affinity: "memory" (default) or "redis". |
+| networking.kthenaRouter.sessionSticky.redis.address | string | `""` | Address of the Redis instance (e.g. "redis:6379"). Required when backend is redis. |
+| networking.kthenaRouter.sessionSticky.redis.secretRef.key | string | `""` | Key within the Secret containing the Redis password (defaults to "password"). |
+| networking.kthenaRouter.sessionSticky.redis.secretRef.name | string | `""` | Kubernetes Secret name containing the Redis password. |
 | networking.kthenaRouter.terminationGracePeriodSeconds | int | `330` | The router will drain all in-flight requests before forcefully closing connections. |
 | networking.kthenaRouter.tls.dnsName | string | `"your-domain.com"` | DNS name to use for the certificate. |
 | networking.kthenaRouter.tls.enabled | bool | `false` | Enable TLS for Kthena Router server. |
@@ -86,6 +90,37 @@ A Helm chart for deploying Kthena
 | workload.controllerManager.webhook.tls.certSecretName | string | `"kthena-controller-manager-webhook-certs"` | Secret name for storing webhook certificates. |
 | workload.controllerManager.webhook.tls.serviceName | string | `"kthena-controller-manager-webhook"` | Service name for the webhook. |
 | workload.enabled | bool | `true` | Enable the workload subchart. |
+
+### Session-Sticky Redis Authentication
+
+When `networking.kthenaRouter.sessionSticky.backend` is set to `"redis"` and the Redis instance requires authentication, configure a Kubernetes Secret reference:
+
+```yaml
+networking:
+  kthenaRouter:
+    sessionSticky:
+      backend: "redis"
+      redis:
+        address: "redis:6379"
+        secretRef:
+          name: "session-sticky-redis-credentials"
+          key: "redis-password"  # optional; defaults to "password" if omitted
+```
+
+Example Kubernetes Secret:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: session-sticky-redis-credentials
+  namespace: kthena-system
+type: Opaque
+stringData:
+  redis-password: "<your-redis-password>"
+```
+
+The router deployment injects this secret into the container environment variable `SESSION_STICKY_REDIS_PASSWORD` via `secretKeyRef`. The password is read at runtime during store initialization and is never rendered into the router ConfigMap.
 
 ## Notes
 
