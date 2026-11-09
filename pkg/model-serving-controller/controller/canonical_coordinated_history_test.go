@@ -29,38 +29,57 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-func TestCanonicalCoordinatedHistoryKeepsReplicaBaselineAfterLegacySourceLoss(t *testing.T) {
-	ms := mergeReadyModelServing("canonical-counts", 1, 4)
-	c := newRevisionTestController(t, ms)
-	old := ms.DeepCopy()
-	for i := range old.Spec.Template.Roles {
-		old.Spec.Template.Roles[i].Replicas = ptr.To[int32](2)
-		old.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = "old-image"
+func TestCoordinatedHistoryKeepsRecordedReplicaCounts(t *testing.T) {
+	for _, format := range []string{"legacy", "annotated legacy", "canonical"} {
+		t.Run(format, func(t *testing.T) {
+			ctx := context.Background()
+			ms := mergeReadyModelServing("recorded-counts", 1, 4)
+			c := newRevisionTestController(t, ms)
+			old := ms.DeepCopy()
+			for i := range old.Spec.Template.Roles {
+				old.Spec.Template.Roles[i].Replicas = ptr.To[int32](2)
+				old.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = "old-image"
+			}
+			if format == "canonical" {
+				recordTestRevision(t, c.kubeClientSet, old, "historical")
+			} else {
+				_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, old, "historical", old.Spec.Template.Roles)
+				require.NoError(t, err)
+			}
+			source, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, "historical")
+			require.NoError(t, err)
+			wantOld := int32(2)
+			if format == "annotated legacy" {
+				source.Annotations = map[string]string{coordinatedRoleReplicaBaselineAnnotation: `{"decode":3,"prefill":3}`}
+				source, err = c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, source, metav1.UpdateOptions{})
+				require.NoError(t, err)
+				wantOld = 3
+			}
+			observation := c.withRevisionHistory(withCoordinatedRound(ctx, ms), ms)
+			roles, err := c.roleSpecsFromRevisionInRound(observation, ms, "historical")
+			require.NoError(t, err)
+			rendering, err := c.modelServingForRevision(observation, ms, "historical")
+			require.NoError(t, err)
+			for _, role := range rendering.Spec.Template.Roles {
+				require.EqualValues(t, 4, *role.Replicas, "rendering follows current desired counts")
+				require.Equal(t, wantOld, *roles[role.Name].Replicas, "coordination uses the recorded population")
+				require.Equal(t, "old-image", role.EntryTemplate.Spec.Containers[0].Image)
+			}
+			unchanged, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, "historical")
+			require.NoError(t, err)
+			require.Equal(t, source, unchanged)
+			if format == "canonical" {
+				delete(source.Annotations, coordinatedRoleReplicaBaselineAnnotation)
+				_, err = c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, source, metav1.UpdateOptions{})
+				require.NoError(t, err)
+				_, err = c.readCoordinatedRevision(ctx, ms, "historical")
+				require.ErrorContains(t, err, "no coordinated Role replica baseline", "a missing count must not become the current population")
+			}
+			require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, source.Name, metav1.DeleteOptions{}))
+			_, err = c.readCoordinatedRevision(ctx, ms, "historical")
+			require.Error(t, err, "a missing source must not be reconstructed from current counts")
+		})
 	}
-	cr, err := utils.CreateControllerRevision(context.Background(), c.kubeClientSet, old, "legacy", old.Spec.Template.Roles)
-	require.NoError(t, err)
-	_, err = utils.EnsureRevisionBaseline(context.Background(), c.kubeClientSet, ms, cr)
-	require.NoError(t, err)
-	require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(context.Background(), cr.Name, metav1.DeleteOptions{}))
-
-	ctx := c.withRevisionHistory(withCoordinatedRound(context.Background(), ms), ms)
-	roles, err := c.roleSpecsFromRevisionInRound(ctx, ms, "legacy")
-	require.NoError(t, err)
-	rendering, err := c.modelServingForRevision(ctx, ms, "legacy")
-	require.NoError(t, err)
-	for _, role := range rendering.Spec.Template.Roles {
-		require.EqualValues(t, 4, *role.Replicas, "rendering follows current desired counts")
-		require.EqualValues(t, 2, *roles[role.Name].Replicas, "coordination retains proven old population")
-		require.Equal(t, "old-image", role.EntryTemplate.Spec.Containers[0].Image)
-	}
-
-	companion, err := utils.GetControllerRevision(context.Background(), c.kubeClientSet, ms, "legacy")
-	require.NoError(t, err)
-	delete(companion.Annotations, coordinatedRoleReplicaBaselineAnnotation)
-	_, err = c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Update(context.Background(), companion, metav1.UpdateOptions{})
-	require.NoError(t, err)
-	_, err = c.readCoordinatedRevision(context.Background(), ms, "legacy")
-	require.ErrorContains(t, err, "no coordinated Role replica baseline", "a lost baseline must not silently become the current count")
 }
 
 func TestCanonicalCoordinatedHistoryReusesLegacyIdentityAndAnchorsLiveEntry(t *testing.T) {

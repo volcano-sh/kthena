@@ -272,9 +272,9 @@ type RollingUpdateConfiguration struct {
 	// +optional
 	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
 
-	// Partition protects the first N existing replicas in ascending ordinal order
-	// from updates. The remaining replicas are eligible for rolling update.
-	// For a contiguous ordinal set, this is equivalent to protecting [0, Partition).
+	// Partition protects replicas whose absolute ordinal is in [0, Partition)
+	// from template updates, including when the existing ordinal set is sparse.
+	// It does not change the selection priority of explicit replica-count decreases.
 	// Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).
 	// Absolute number is calculated from percentage by rounding up.
 	// The default value is 0.

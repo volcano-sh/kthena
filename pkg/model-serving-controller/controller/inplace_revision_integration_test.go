@@ -507,8 +507,14 @@ func (*integrationInPlacePlugin) SupportsInPlaceUpdate() bool { return true }
 
 func TestInPlaceIntegrationUsesTrustedSchedulerAndPluginHistory(t *testing.T) {
 	for _, strategy := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
-		for _, format := range []string{"canonical", "pinned-legacy"} {
-			for _, change := range []string{"scheduler", "plugin-this-role", "plugin-other-role"} {
+		for _, format := range []string{"canonical", "legacy"} {
+			changes := []string{"scheduler", "plugin-this-role", "plugin-other-role"}
+			if format == "legacy" {
+				// Legacy history never recorded global inputs. The immutable
+				// owner supplies them; exercise its legal image-only update.
+				changes = []string{"image"}
+			}
+			for _, change := range changes {
 				t.Run(fmt.Sprintf("%s/%s/%s", strategy, format, change), func(t *testing.T) {
 					c := newAppliedHistoryController(t)
 					c.pluginsRegistry = plugins.NewRegistry()
@@ -536,10 +542,8 @@ func TestInPlaceIntegrationUsesTrustedSchedulerAndPluginHistory(t *testing.T) {
 					if format == "canonical" {
 						recordTestRevision(t, c.kubeClientSet, old, "old")
 					} else {
-						cr, err := utils.CreateControllerRevision(context.Background(), c.kubeClientSet, old, "old", old.Spec.Template.Roles)
+						_, err := utils.CreateControllerRevision(context.Background(), c.kubeClientSet, old, "old", old.Spec.Template.Roles)
 						require.NoError(t, err)
-						_, err = utils.EnsureRevisionBaseline(context.Background(), c.kubeClientSet, old, cr)
-						require.NoError(t, err, "pin legacy non-Role inputs before the desired spec changes")
 					}
 					require.NoError(t, c.CreatePodsForServingGroup(c.withRevisionHistory(context.Background(), old), old, 0, "old", old.Spec.Template.Roles))
 					group := utils.GenerateServingGroupName(old.Name, 0)
@@ -560,7 +564,7 @@ func TestInPlaceIntegrationUsesTrustedSchedulerAndPluginHistory(t *testing.T) {
 					current.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "image:v2"
 					if change == "scheduler" {
 						current.Spec.SchedulerName = "default-scheduler"
-					} else {
+					} else if change != "image" {
 						current.Spec.Plugins[0].Config.Raw = []byte(`{"env":[{"name":"PLUGIN_MODE","value":"new"}]}`)
 					}
 					_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(current.Namespace).Create(context.Background(), current, metav1.CreateOptions{})
@@ -582,10 +586,11 @@ func TestInPlaceIntegrationUsesTrustedSchedulerAndPluginHistory(t *testing.T) {
 							}
 						}
 					}
-					require.Equal(t, strategy != workloadv1alpha1.RoleRollingUpdate || change != "plugin-other-role", decodeDeleted, "only scheduler or applicable plugin changes select decode for recreation")
-					if strategy == workloadv1alpha1.RoleRollingUpdate && change == "plugin-other-role" {
+					imageOnly := change == "image" || (strategy == workloadv1alpha1.RoleRollingUpdate && change == "plugin-other-role")
+					require.Equal(t, !imageOnly, decodeDeleted, "only recorded scheduler or applicable plugin changes select decode for recreation")
+					if imageOnly {
 						require.NoError(t, getErr)
-						require.NotNil(t, inplace.StateOf(decode), "a plugin scoped to another Role must not block this Role's image-only update")
+						require.NotNil(t, inplace.StateOf(decode), "an image-only update must retain the existing Role instance")
 						require.True(t, inplace.StateOf(decode).InProgress())
 						require.NotEqual(t, datastore.RoleDeleting, c.store.GetRoleStatus(utils.GetNamespaceName(current), group, "decode", "decode-0"))
 					} else {

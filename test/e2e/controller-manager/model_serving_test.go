@@ -1565,27 +1565,59 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 	}
 
 	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-	require.NoError(t, err, "Failed to get ModelServing for event watch")
+	require.NoError(t, err, "Failed to get ModelServing before readiness reconciliation")
+	originalUIDs := make(map[string]types.UID, len(podList.Items))
+	for _, pod := range podList.Items {
+		originalUIDs[pod.Name] = pod.UID
+	}
 
 	t.Log("Waiting for controller to observe the patched Ready pods")
-	// AvailableReplicas stays 0 while one role is NotReady, so it cannot signal that the
-	// controller processed the patches. Wait for RoleRunning events instead.
+	// One NotReady Role keeps AvailableReplicas at zero, and readiness may be
+	// observed without emitting a RoleRunning Event. Verify two successive
+	// non-template generations so an already running sync cannot acknowledge
+	// the readiness change without a following complete reconciliation.
+	var readyGeneration int64
+	observedGenerations := 0
 	require.Eventually(t, func() bool {
-		eventList, listErr := kubeClient.CoreV1().Events(testNamespace).List(ctx, metav1.ListOptions{})
-		if listErr != nil {
+		pods, listErr := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if listErr != nil || len(pods.Items) != int(initialRoleReplicas) {
 			return false
 		}
-		runningRoleEvents := 0
-		for _, ev := range eventList.Items {
-			if ev.InvolvedObject.Kind != "ModelServing" || ev.InvolvedObject.UID != ms.UID {
-				continue
+		unhealthy := 0
+		for _, pod := range pods.Items {
+			if !metav1.IsControlledBy(&pod, ms) || pod.DeletionTimestamp != nil || originalUIDs[pod.Name] != pod.UID {
+				return false
 			}
-			if ev.Reason == "RoleRunning" {
-				runningRoleEvents++
+			if pod.Labels[workload.RoleIDKey] == unhealthyRoleID {
+				if utils.IsPodReady(pod) {
+					return false
+				}
+				unhealthy++
+			} else if !utils.IsPodReady(pod) {
+				return false
 			}
 		}
-		return runningRoleEvents >= 3
-	}, 30*time.Second, 2*time.Second, "Expected 3 roles to transition to Running state")
+		if unhealthy != 1 {
+			return false
+		}
+		if readyGeneration == 0 {
+			updateModelServingWithRetry(t, ctx, kthenaClient, modelServing.Name, func(current *workload.ModelServing) {
+				current.Spec.RevisionHistoryLimit = ptr.To(ptr.Deref(current.Spec.RevisionHistoryLimit, 10) + 1)
+				readyGeneration = current.Generation + 1
+			})
+			return false
+		}
+		current, getErr := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		if getErr != nil || current.Status.ObservedGeneration != readyGeneration {
+			return false
+		}
+		observedGenerations++
+		if observedGenerations < 2 {
+			readyGeneration = 0
+			return false
+		}
+		return true
+	}, 30*time.Second, 2*time.Second, "Expected reconciliation of three Ready Roles and the original NotReady Role")
 
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err, "Failed to get ModelServing before scale down")
@@ -1605,7 +1637,11 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 	require.NoError(t, err, "Failed to list pods after scale down")
 
 	unhealthyCount := 0
+	require.Len(t, finalPods.Items, 3)
 	for _, pod := range finalPods.Items {
+		require.Equal(t, originalUIDs[pod.Name], pod.UID, "scale-down must preserve surviving Pod identities")
+		require.Nil(t, pod.DeletionTimestamp)
+		require.True(t, utils.IsPodReady(pod), "surviving Role must remain Ready")
 		if pod.Labels[workload.RoleIDKey] == unhealthyRoleID {
 			unhealthyCount++
 		}

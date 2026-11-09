@@ -23,66 +23,57 @@ import (
 
 	"github.com/stretchr/testify/require"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	kubefake "k8s.io/client-go/kubernetes/fake"
-	kubetesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
-func TestLegacyBaselineKeepsCoordinatedReplicaMetadata(t *testing.T) {
+func TestLegacyRevisionKeepsRecordedReplicaMetadata(t *testing.T) {
 	for _, explicit := range []bool{false, true} {
 		t.Run(map[bool]string{false: "legacy counts", true: "existing annotation"}[explicit], func(t *testing.T) {
 			ctx := context.Background()
 			ms := revisionTestModelServing(revisionTestRole("decode", "image"))
+			ms.ObjectMeta = metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "owner"}
 			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate, RoleCoordination: &workloadv1alpha1.RoleCoordination{}}
 			ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](4)
 			old := ms.DeepCopy()
 			old.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+			old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old-image"
 			client := kubefake.NewSimpleClientset()
 			source, err := CreateControllerRevision(ctx, client, ms, "old", old.Spec.Template.Roles)
 			require.NoError(t, err)
+			source.UID = "source-uid"
 			if explicit {
-				source.Annotations = map[string]string{CoordinatedRoleReplicaBaselineAnnotation: `{"decode":2}`}
-				source, err = client.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, source, metav1.UpdateOptions{})
-				require.NoError(t, err)
+				source.Annotations = map[string]string{CoordinatedRoleReplicaBaselineAnnotation: `{"decode":3}`}
 			}
-			companion, err := EnsureRevisionBaseline(ctx, client, ms, source)
-			require.NoError(t, err)
-			require.JSONEq(t, `{"decode":2}`, companion.Annotations[CoordinatedRoleReplicaBaselineAnnotation])
-			data := append([]byte(nil), companion.Data.Raw...)
-			rendered, err := ApplyRevision(ms, companion)
-			require.NoError(t, err)
-			require.EqualValues(t, 4, *rendered.Spec.Template.Roles[0].Replicas, "rendering retains current counts")
-			source, err = client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, source.Name, metav1.GetOptions{})
-			require.NoError(t, err)
-			source.Annotations[CoordinatedRoleReplicaBaselineAnnotation] = `{"decode":3}`
 			source, err = client.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, source, metav1.UpdateOptions{})
 			require.NoError(t, err)
-			conflicts := 0
-			client.PrependReactor("update", "controllerrevisions", func(action kubetesting.Action) (bool, runtime.Object, error) {
-				object := action.(kubetesting.UpdateAction).GetObject().(metav1.Object)
-				if object.GetName() == companion.Name && conflicts == 0 {
-					conflicts++
-					return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "controllerrevisions"}, companion.Name, nil)
-				}
-				return false, nil, nil
-			})
-			companion, err = EnsureRevisionBaseline(ctx, client, ms, source)
+			original := source.DeepCopy()
+			client.ClearActions()
+			for i := 0; i < 2; i++ {
+				reloaded, err := GetControllerRevision(ctx, client, ms, "old")
+				require.NoError(t, err)
+				require.Equal(t, original, reloaded, "reading history must not pin or rewrite its source")
+				recorded, err := GetRolesFromControllerRevision(reloaded)
+				require.NoError(t, err)
+				require.Len(t, recorded, 1)
+				require.EqualValues(t, 2, *recorded[0].Replicas, "legacy Data retains its recorded population")
+				rendered, err := ModelServingForControllerRevision(ms, reloaded)
+				require.NoError(t, err)
+				require.EqualValues(t, 4, *rendered.Spec.Template.Roles[0].Replicas, "rendering follows current operational counts")
+				require.Equal(t, "old-image", rendered.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image)
+				require.Equal(t, original, reloaded, "decoding must also leave annotation counts unchanged")
+			}
+			all, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
 			require.NoError(t, err)
-			require.Equal(t, 1, conflicts)
-			require.Equal(t, data, companion.Data.Raw)
-			require.JSONEq(t, `{"decode":3}`, companion.Annotations[CoordinatedRoleReplicaBaselineAnnotation])
-			require.NoError(t, client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, source.Name, metav1.DeleteOptions{}))
-			reloaded, err := GetControllerRevision(ctx, client, ms, "old")
-			require.NoError(t, err)
-			require.NotNil(t, reloaded)
-			require.JSONEq(t, `{"decode":3}`, reloaded.Annotations[CoordinatedRoleReplicaBaselineAnnotation])
+			require.Len(t, all.Items, 1, "legacy reads must not create an auxiliary revision")
+			require.Equal(t, source.Name, all.Items[0].Name)
+			for _, action := range client.Actions() {
+				require.Contains(t, []string{"get", "list"}, action.GetVerb(), "reading history must not write metadata or objects")
+			}
 		})
 	}
 }
@@ -254,41 +245,55 @@ func TestInactiveWorkerTemplateDoesNotRoll(t *testing.T) {
 	require.False(t, equal)
 }
 
-func TestLegacyRevisionBaselineIsDurableAndImmutable(t *testing.T) {
+func TestModelServingForControllerRevisionRejectsUnusableSources(t *testing.T) {
 	ctx := context.Background()
 	ms := revisionTestModelServing(revisionTestRole("decode", "image"))
-	ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "original"}}
+	ms.ObjectMeta = metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "owner"}
 	client := kubefake.NewSimpleClientset()
 	source, err := CreateControllerRevision(ctx, client, ms, "legacy", ms.Spec.Template.Roles)
 	require.NoError(t, err)
-	baseline, err := EnsureRevisionBaseline(ctx, client, ms, source)
-	require.NoError(t, err)
-	unchanged, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, source.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	require.Equal(t, source.Data, unchanged.Data)
-	require.Equal(t, source.UID, unchanged.UID)
-	require.Equal(t, source.Labels, unchanged.Labels)
-	require.Equal(t, source.Revision, unchanged.Revision)
-	require.Equal(t, baseline.Name, unchanged.Annotations[legacyRevisionBaseline])
-	require.Equal(t, "legacy", baseline.Labels[ControllerRevisionRevisionLabelKey])
-
-	ms.Spec.Plugins[0].Name = "changed-after-migration"
-	// Simulate an older or admission-bypassed edit; normal updates are immutable.
-	reloaded, err := EnsureRevisionBaseline(ctx, client, ms, source)
-	require.NoError(t, err)
-	require.Equal(t, baseline, reloaded, "a restart must not redefine the compatibility baseline")
-	historical, err := ModelServingForControllerRevision(ms, reloaded)
-	require.NoError(t, err)
-	require.Equal(t, "original", historical.Spec.Plugins[0].Name)
-	equal, err := EqualModelServingRevisions("legacy", ModelServingRevision(ms), historical, ms)
-	require.NoError(t, err)
-	require.False(t, equal, "subsequent plugin edits must not be masked by migration")
-
-	source.UID = "recreated-source"
-	_, err = EnsureRevisionBaseline(ctx, client, ms, source)
-	require.ErrorContains(t, err, "conflicting identity")
-
-	require.NoError(t, client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, baseline.Name, metav1.DeleteOptions{}))
-	_, err = EnsureRevisionBaseline(ctx, client, ms, unchanged)
-	require.ErrorContains(t, err, "previously established legacy baseline")
+	for _, scenario := range []string{"nil owner", "nil source", "nil data", "empty data", "malformed data", "empty roles", "null roles", "wrapped empty roles", "wrapped null roles", "unknown version", "foreign UID", "wrong owner name", "wrong owner kind", "wrong owner API", "not controller", "wrong namespace"} {
+		t.Run(scenario, func(t *testing.T) {
+			owner, cr := ms.DeepCopy(), source.DeepCopy()
+			switch scenario {
+			case "nil owner":
+				owner = nil
+			case "nil source":
+				cr = nil
+			case "nil data":
+				cr.Data.Raw = nil
+			case "empty data":
+				cr.Data.Raw = []byte{}
+			case "malformed data":
+				cr.Data.Raw = []byte(`{`)
+			case "empty roles":
+				cr.Data.Raw = []byte(`[]`)
+			case "null roles":
+				cr.Data.Raw = []byte(`null`)
+			case "wrapped empty roles":
+				cr.Data.Raw = []byte(`{"data":[]}`)
+			case "wrapped null roles":
+				cr.Data.Raw = []byte(`{"data":null}`)
+			case "unknown version":
+				cr.Annotations = map[string]string{ControllerRevisionDataVersionAnnotation: "future"}
+			case "foreign UID":
+				cr.OwnerReferences[0].UID = "other"
+			case "wrong owner name":
+				cr.OwnerReferences[0].Name = "other"
+			case "wrong owner kind":
+				cr.OwnerReferences[0].Kind = "Other"
+			case "wrong owner API":
+				cr.OwnerReferences[0].APIVersion = "other/v1"
+			case "not controller":
+				cr.OwnerReferences[0].Controller = nil
+			case "wrong namespace":
+				cr.Namespace = "other"
+			}
+			_, err := ModelServingForControllerRevision(owner, cr)
+			require.Error(t, err)
+			if scenario == "unknown version" {
+				require.ErrorContains(t, err, "unsupported revision data version", "otherwise valid wrapped Roles cannot bypass the format guard")
+			}
+		})
+	}
 }

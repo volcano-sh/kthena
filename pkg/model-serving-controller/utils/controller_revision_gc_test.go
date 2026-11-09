@@ -33,18 +33,23 @@ import (
 	kt "k8s.io/client-go/testing"
 )
 
-func TestRevisionGCRetainsLegacyCompanionsForLiveAndInPlaceReferences(t *testing.T) {
+func TestRevisionGCRetainsSourcesForLiveAndInPlaceReferences(t *testing.T) {
 	ctx := context.Background()
 	ms := revisionTestModelServing(revisionTestRole("decode", "image"))
+	ms.ObjectMeta = metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "owner"}
 	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "latest", "latest"
 	client := kubefake.NewSimpleClientset()
-	names := map[string][]string{}
+	names := map[string]string{}
 	for _, revision := range []string{"old", "patch-target", "unused"} {
 		cr, err := CreateControllerRevision(ctx, client, ms, revision, ms.Spec.Template.Roles)
 		require.NoError(t, err)
-		companion, err := EnsureRevisionBaseline(ctx, client, ms, cr)
-		require.NoError(t, err)
-		names[revision] = []string{cr.Name, companion.Name}
+		names[revision] = cr.Name
+		if revision == "old" {
+			alias := cr.DeepCopy()
+			alias.Name += "-baseline"
+			_, err := client.AppsV1().ControllerRevisions(ms.Namespace).Create(ctx, alias, metav1.CreateOptions{})
+			require.NoError(t, err)
+		}
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: "member", Namespace: ms.Namespace,
@@ -55,23 +60,21 @@ func TestRevisionGCRetainsLegacyCompanionsForLiveAndInPlaceReferences(t *testing
 	_, err := client.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	require.NoError(t, err)
 	require.NoError(t, CleanupOldControllerRevisions(ctx, client, ms))
-	for revision, pair := range names {
-		for _, name := range pair {
-			_, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
-			if revision == "unused" {
-				require.True(t, apierrors.IsNotFound(err), name)
-			} else {
-				require.NoError(t, err, name)
-			}
+	for revision, name := range names {
+		_, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if revision == "unused" {
+			require.True(t, apierrors.IsNotFound(err), name)
+		} else {
+			require.NoError(t, err, name)
 		}
 	}
+	_, err = client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, names["old"]+"-baseline", metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err), "a matching revision label must not preserve an unreferenced alias")
 	require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
 	require.NoError(t, CleanupOldControllerRevisions(ctx, client, ms))
-	for _, pair := range names {
-		for _, name := range pair {
-			_, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
-			require.True(t, apierrors.IsNotFound(err), name)
-		}
+	for _, name := range names {
+		_, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
+		require.True(t, apierrors.IsNotFound(err), name)
 	}
 }
 

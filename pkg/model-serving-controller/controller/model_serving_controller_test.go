@@ -412,6 +412,31 @@ func TestIsServingGroupOutdated(t *testing.T) {
 }
 
 // TestGetPartition tests the getPartition helper for both integer and percentage-based partitions.
+func TestShouldSkipObjectsWithoutGeneratedIdentity(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "uid"}}
+	owner := []metav1.OwnerReference{{APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: workloadv1alpha1.ModelServingKind.Kind, Name: "ms", UID: "uid", Controller: ptr.To(true)}}
+	tests := []struct {
+		name   string
+		group  string
+		labels map[string]string
+		skip   bool
+	}{
+		{name: "generated Role identity", group: "ms-0", labels: map[string]string{workloadv1alpha1.RoleLabelKey: "prefill", workloadv1alpha1.RoleIDKey: "prefill-1"}},
+		{name: "group-only object", group: "ms-2"},
+		{name: "foreign ServingGroup parent", group: "other-0", skip: true},
+		{name: "ServingGroup without ordinal", group: "ms-a", skip: true},
+		{name: "Role ID without ordinal", group: "ms-0", labels: map[string]string{workloadv1alpha1.RoleLabelKey: "prefill", workloadv1alpha1.RoleIDKey: "prefill"}, skip: true},
+		{name: "Role ID for another Role", group: "ms-0", labels: map[string]string{workloadv1alpha1.RoleLabelKey: "prefill", workloadv1alpha1.RoleIDKey: "decode-0"}, skip: true},
+	}
+	c := &ModelServingController{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", Labels: tt.labels, OwnerReferences: owner}}
+			assert.Equal(t, tt.skip, c.shouldSkipHandling(ms, tt.group, pod))
+		})
+	}
+}
+
 func TestGetPartition(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -3473,8 +3498,7 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 	}
 }
 
-// TestScaleDownServingGroupsWithPartition tests the scaleDownServingGroups function with partition protection.
-// Partition protects the first N existing ServingGroups in ordinal order.
+// Partition limits template updates, not explicit shrink selection.
 func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 	tests := []struct {
 		name                   string
@@ -3487,16 +3511,16 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 		description            string
 	}{
 		{
-			name:            "partition=3 protects first three existing groups",
+			name:            "partition does not override deletion costs",
 			partition:       ptr.To(intstr.FromInt32(3)),
 			existingIndices: []int{0, 1, 2, 3, 4},
 			expectedCount:   3,
 			podDeletionCosts: map[int]int{
-				0: 0,   // Low cost but protected by the partition prefix.
-				1: 0,   // Low cost but protected by the partition prefix.
-				2: 0,   // Low cost but protected by the partition prefix.
-				3: 100, // High cost, outside the partition prefix.
-				4: 50,  // Medium cost, outside the partition prefix.
+				0: 0,
+				1: 0,
+				2: 0,
+				3: 100,
+				4: 50,
 			},
 			groupStatuses: map[int]datastore.ServingGroupStatus{
 				0: datastore.ServingGroupRunning,
@@ -3505,40 +3529,40 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				3: datastore.ServingGroupRunning,
 				4: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"0", "1", "2"}, // R-3 and R-4 are outside the protected prefix.
-			description:            "Partition-protected replicas (R-0, R-1, R-2) should never be deleted even with low deletion cost",
+			expectedRemainingNames: []string{"0", "3", "4"},
+			description:            "Low-cost groups are removed first, including below partition; ties prefer high ordinals",
 		},
 		{
-			name:             "partition=3 protects not-ready groups in prefix",
+			name:             "partition does not override NotReady priority",
 			partition:        ptr.To(intstr.FromInt32(3)),
 			existingIndices:  []int{0, 1, 2, 3, 4},
 			expectedCount:    3,
 			podDeletionCosts: map[int]int{},
 			groupStatuses: map[int]datastore.ServingGroupStatus{
 				0: datastore.ServingGroupRunning,
-				1: datastore.ServingGroupCreating, // Not ready but protected by the partition prefix.
+				1: datastore.ServingGroupCreating,
 				2: datastore.ServingGroupRunning,
 				3: datastore.ServingGroupRunning,
 				4: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"0", "1", "2"}, // R-3, R-4 deleted, R-1 protected even though not ready
-			description:            "Partition-protected replicas should never be deleted even if not ready",
+			expectedRemainingNames: []string{"0", "2", "3"},
+			description:            "NotReady group 1 is removed before healthy group 4",
 		},
 		{
-			name:            "partition=1 protects first existing group with sparse ordinals",
+			name:            "sparse shrink keeps the higher-cost group",
 			partition:       ptr.To(intstr.FromInt32(1)),
 			existingIndices: []int{2, 5},
 			expectedCount:   1,
 			podDeletionCosts: map[int]int{
-				2: 0,   // Lowest cost but protected as the first existing group.
-				5: 100, // Higher cost but not protected.
+				2: 0,
+				5: 100,
 			},
 			groupStatuses: map[int]datastore.ServingGroupStatus{
 				2: datastore.ServingGroupRunning,
 				5: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"2"},
-			description:            "Sparse ordinals do not change the partition-protected prefix",
+			expectedRemainingNames: []string{"5"},
+			description:            "Sparse identities do not change explicit shrink priority",
 		},
 		{
 			name:            "no partition, all replicas can be deleted",
@@ -3561,7 +3585,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			description:            "Without partition, all replicas are candidates for deletion based on binpack scoring",
 		},
 		{
-			name:            "partition larger than group count protects all existing groups",
+			name:            "legacy invalid partition does not block explicit shrink",
 			partition:       ptr.To(intstr.FromInt32(5)),
 			existingIndices: []int{0, 1, 2, 3},
 			expectedCount:   2, // Scale down to trigger deletion of protected replicas
@@ -3578,10 +3602,10 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				3: datastore.ServingGroupRunning,
 			},
 			expectedRemainingNames: []string{"0", "3"}, // All groups are protected equally; binpack cost decides which remain
-			description:            "A partition larger than the group count protects all existing groups equally",
+			description:            "Existing invalid partition does not suppress a safe replica-count decrease",
 		},
 		{
-			name:            "partition=3, scale down below partition - delete protected after non-protected",
+			name:            "legacy partition above new count does not override costs",
 			partition:       ptr.To(intstr.FromInt32(3)),
 			existingIndices: []int{0, 1, 2, 3, 4},
 			expectedCount:   2, // Scale down below partition value
@@ -3599,8 +3623,8 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				3: datastore.ServingGroupRunning,
 				4: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"0", "1"}, // First delete R-3, R-4 (non-protected), then R-2 (protected, lowest cost)
-			description:            "When scaling down below partition, delete non-protected first, then protected",
+			expectedRemainingNames: []string{"3", "4"},
+			description:            "Even a legacy invalid partition does not change binpack cost ordering",
 		},
 	}
 
@@ -3737,32 +3761,40 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			assert.ElementsMatch(t, tt.expectedRemainingNames, actualNames,
 				fmt.Sprintf("[%s] Remaining group indices should match expected. Got: %v, Want: %v",
 					tt.description, actualNames, tt.expectedRemainingNames))
-
-			// Verify partition protection: protected groups should only be deleted after all non-protected groups are deleted.
-			if tt.partition != nil && tt.partition.IntValue() > 0 {
-				protectedOrdinals := make(map[int]struct{})
-				for i := 0; i < tt.partition.IntValue() && i < len(tt.existingIndices); i++ {
-					protectedOrdinals[tt.existingIndices[i]] = struct{}{}
-				}
-				// Count how many non-protected groups remain
-				remainingNonProtectedCount := 0
-				for _, g := range groups {
-					_, ordinal := utils.GetParentNameAndOrdinal(g.Name)
-					if _, protected := protectedOrdinals[ordinal]; !protected {
-						remainingNonProtectedCount++
-					}
-				}
-				// If there are remaining non-protected groups, protected groups should not be deleted
-				if remainingNonProtectedCount > 0 {
-					for ordinal := range protectedOrdinals {
-						groupName := utils.GenerateServingGroupName(msName, ordinal)
-						_, exists := controller.store.GetServingGroupRevision(utils.GetNamespaceName(ms), groupName)
-						assert.True(t, exists,
-							fmt.Sprintf("[%s] Partition-protected replica R-%d should not be deleted when non-protected groups still exist", tt.description, ordinal))
-					}
-				}
-			}
 		})
+	}
+}
+
+func TestScaleDownServingGroupsDoesNotRepeatTerminatingDeletions(t *testing.T) {
+	ms := createStandardModelServing("shrink-in-flight", 2, 1)
+	ms.UID = "shrink-owner"
+	c := newRevisionTestController(t, ms)
+	key := utils.GetNamespaceName(ms)
+	for ordinal, status := range []datastore.ServingGroupStatus{
+		datastore.ServingGroupRunning, datastore.ServingGroupCreating,
+		datastore.ServingGroupCreating, datastore.ServingGroupDeleting,
+	} {
+		group := utils.GenerateServingGroupName(ms.Name, ordinal)
+		c.store.AddServingGroup(key, ordinal, "observed")
+		require.NoError(t, c.store.UpdateServingGroupStatus(key, group, status))
+		pod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, group, "prefill-0", "observed", "hash")
+		pod.UID = types.UID(pod.Name + "-uid")
+		pod.Annotations = map[string]string{PodDeletionCostAnnotation: "100"}
+		if ordinal == 1 || ordinal == 2 {
+			pod.Annotations[PodDeletionCostAnnotation] = "-100"
+		}
+		_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+		require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		groups, err := c.store.GetServingGroupByModelServing(key)
+		require.NoError(t, err)
+		require.NoError(t, c.scaleDownServingGroups(context.Background(), ms, groups, 2))
+		require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(key, ms.Name+"-0"))
+		require.Equal(t, datastore.ServingGroupCreating, c.store.GetServingGroupStatus(key, ms.Name+"-1"))
+		require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(key, ms.Name+"-2"))
+		require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(key, ms.Name+"-3"))
 	}
 }
 
@@ -4300,8 +4332,8 @@ func TestUpdateModelServingStatusCountsAllServingGroups(t *testing.T) {
 	assert.Equal(t, int32(3), updated.Status.Replicas)
 	assert.Equal(t, int32(3), updated.Status.AvailableReplicas)
 	assert.Equal(t, int32(3), updated.Status.UpdatedReplicas)
-	assert.Equal(t, int32(3), updated.Status.CurrentReplicas)
-	assert.Equal(t, "new-revision", updated.Status.CurrentRevision)
+	assert.Zero(t, updated.Status.CurrentReplicas)
+	assert.Equal(t, "old-revision", updated.Status.CurrentRevision, "temporary capacity must drain before the baseline advances")
 	assert.Equal(t, "new-revision", updated.Status.UpdateRevision)
 	require.NotEmpty(t, updated.Status.Conditions)
 	assert.Equal(t, string(workloadv1alpha1.ModelServingProgressing), updated.Status.Conditions[len(updated.Status.Conditions)-1].Type)
@@ -4424,11 +4456,11 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 				1: "revision-v2",
 				2: "revision-v2",
 			},
-			statusCurrentRevision:   "revision-v1", // Invalid, not used by any group
+			statusCurrentRevision:   "revision-v1", // Completed baseline no longer used by a live group.
 			newRevision:             "revision-v2",
 			expectedCurrentRevision: "revision-v2", // Should equal UpdateRevision when all updated
 			expectedUpdateRevision:  "revision-v2",
-			description:             "When all groups are updated, CurrentRevision should equal UpdateRevision (invalid CurrentRevision should be recomputed)",
+			description:             "Complete Ready target capacity advances the prior completed baseline",
 		},
 		{
 			name: "multiple old revisions, should use most common",
@@ -4470,6 +4502,7 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      msName,
+					UID:       types.UID(msName + "-owner"),
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To(int32(len(tt.existingGroups))),
@@ -4507,11 +4540,15 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 			err = controller.modelServingsInformer.GetIndexer().Add(ms)
 			assert.NoError(t, err)
 
+			_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, tt.newRevision, ms.Spec.Template.Roles)
+			require.NoError(t, err)
 			// Create servingGroups with specified revisions
 			for ordinal, revision := range tt.existingGroups {
 				controller.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, revision)
 				// Mark groups as Running to simulate real scenario
 				groupName := utils.GenerateServingGroupName(msName, ordinal)
+				role := ms.Spec.Template.Roles[0]
+				addMergeReadyInstance(t, controller, ms, groupName, role, 0, revision, revision, utils.CalRoleTemplateHash(role))
 				controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupRunning)
 			}
 
@@ -4538,6 +4575,7 @@ func TestScaleDownRoles(t *testing.T) {
 		existingIndices        []int // Indices of existing Roles
 		expectedCount          int   // Target count after scale down
 		partition              *intstr.IntOrString
+		roleStatuses           map[int]datastore.RoleStatus
 		expectedRemainingNames []string // Expected remaining Role names (without test prefix)
 	}{
 		{
@@ -4571,11 +4609,19 @@ func TestScaleDownRoles(t *testing.T) {
 			expectedRemainingNames: []string{"prefill-0", "prefill-2"}, // Higher indices (5, 8) deleted first
 		},
 		{
-			name:                   "partition protects first replicas with non-continuous indices",
+			name:                   "partition does not change shrink ordering with sparse ordinals",
 			existingIndices:        []int{1, 3, 5, 8},
 			expectedCount:          2,
 			partition:              ptr.To(intstr.FromInt(2)),
 			expectedRemainingNames: []string{"prefill-1", "prefill-3"},
+		},
+		{
+			name:                   "partition does not protect an unhealthy low ordinal from shrink",
+			existingIndices:        []int{0, 1, 2},
+			expectedCount:          2,
+			partition:              ptr.To(intstr.FromInt(1)),
+			roleStatuses:           map[int]datastore.RoleStatus{0: datastore.RoleCreating},
+			expectedRemainingNames: []string{"prefill-1", "prefill-2"},
 		},
 	}
 
@@ -4621,20 +4667,28 @@ func TestScaleDownRoles(t *testing.T) {
 				},
 			}
 
+			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
 			targetRole := ms.Spec.Template.Roles[0]
 			targetRole.RollingUpdateConfiguration.Partition = tt.partition
 
 			// Pre-populate the store with ServingGroup and Roles
 			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "test-revision")
 			for _, ordinal := range tt.existingIndices {
-				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", utils.GenerateRoleID("prefill", ordinal), "test-revision", "test-roleTemplateHash")
+				roleID := utils.GenerateRoleID("prefill", ordinal)
+				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", roleID, "test-revision", "test-roleTemplateHash")
+				status := datastore.RoleRunning
+				if requested, exists := tt.roleStatuses[ordinal]; exists {
+					status = requested
+				}
+				require.NoError(t, controller.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "prefill", roleID, status))
 			}
 
 			// Build the roleList to pass to scaleDownRoles
 			existingRoles := make([]datastore.Role, len(tt.existingIndices))
 			for i, ordinal := range tt.existingIndices {
 				existingRoles[i] = datastore.Role{
-					Name: utils.GenerateRoleID("prefill", ordinal),
+					Name:   utils.GenerateRoleID("prefill", ordinal),
+					Status: controller.store.GetRoleStatus(utils.GetNamespaceName(ms), groupName, "prefill", utils.GenerateRoleID("prefill", ordinal)),
 				}
 			}
 
@@ -8348,16 +8402,16 @@ func TestHasUpdateableOutdatedServingGroup(t *testing.T) {
 			want:      false,
 		},
 		{
-			name: "partition protects first existing group with sparse ordinals",
+			name: "sparse ordinals above partition remain updateable",
 			groups: []datastore.ServingGroup{
 				{Name: "recovery-2", Revision: "old", Status: datastore.ServingGroupRunning},
 				{Name: "recovery-5", Revision: "new", Status: datastore.ServingGroupRunning},
 			},
 			partition: 1,
-			want:      false,
+			want:      true,
 		},
 		{
-			name: "outdated group after sparse partition prefix requires surge",
+			name: "outdated groups above absolute partition require surge",
 			groups: []datastore.ServingGroup{
 				{Name: "recovery-2", Revision: "old", Status: datastore.ServingGroupRunning},
 				{Name: "recovery-5", Revision: "old", Status: datastore.ServingGroupRunning},
@@ -8891,7 +8945,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			expectHistoryErr: true,
 		},
 		{
-			name: "partition protects first existing replicas with sparse ordinals",
+			name: "absolute partition protects only low ordinals in a sparse set",
 			roles: []workloadv1alpha1.Role{
 				func() workloadv1alpha1.Role {
 					role := newRole("prefill", "nginx:latest", 4, nil)
@@ -8909,6 +8963,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			expected: []roleToDelete{
 				{roleName: "prefill", roleID: "prefill-8"},
 				{roleName: "prefill", roleID: "prefill-5"},
+				{roleName: "prefill", roleID: "prefill-3"},
 			},
 			expectedOutdated: true,
 		},
@@ -9840,21 +9895,25 @@ func TestRoleTargetRejectsForeignSnapshotReuseRace(t *testing.T) {
 	require.NoError(t, kube.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, foreign.Name, metav1.DeleteOptions{}))
 	foreign.UID = "foreign-snapshot"
 	foreign.OwnerReferences[0].UID = "foreign-modelserving"
-	gets := 0
-	kube.PrependReactor("get", "controllerrevisions", func(kubetesting.Action) (bool, runtime.Object, error) {
-		gets++
-		if gets == 3 {
+	replaced := false
+	kube.PrependReactor("get", "controllerrevisions", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		get := action.(kubetesting.GetAction)
+		if get.GetName() != foreign.Name || replaced {
+			return false, nil, nil
+		}
+		if _, err := kube.Tracker().Get(get.GetResource(), ms.Namespace, foreign.Name); err == nil {
 			// Persistence has succeeded; replace that API incarnation before
 			// the subsequent historical-context read verifies its owner.
 			require.NoError(t, kube.Tracker().Delete(schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "controllerrevisions"}, ms.Namespace, foreign.Name))
 			require.NoError(t, kube.Tracker().Add(foreign))
+			replaced = true
 		}
 		return false, nil, nil
 	})
 	kube.ClearActions()
 	err = c.CreatePodsByRole(ctx, ms.Spec.Template.Roles[0], ms, 0, 0, revision, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]))
 	require.ErrorContains(t, err, "not controlled")
-	require.Equal(t, 3, gets)
+	require.True(t, replaced, "the race must occur after persistence and before historical-context reuse")
 	for _, action := range kube.Actions() {
 		require.False(t, action.GetVerb() == "create" && action.GetResource().Resource == "pods", "foreign reuse must not authorize dependent Pods")
 	}
