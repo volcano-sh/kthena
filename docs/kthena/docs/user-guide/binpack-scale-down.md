@@ -62,4 +62,4 @@ default              sample-1-prefill-1-0                                  1/1  
 
 ### Scale up
 
-After binpack scaling down, both the servingGroup Index and role Index will be changed. During scaling up, kthena will locate the largest Index and then incrementally create servingGroups and roles. This way, when performing subsequent deletions, if you opt for sequential deletion instead of binpack scale down, the newly created replicas will be deleted first, followed by the older replicas with longer running times.
+Binpack scale-down can leave sparse ServingGroup or Role ordinals. Scale-up adds only the requested capacity and fills the lowest missing ordinals first; it does not rebuild healthy high-ordinal survivors to make the set contiguous. For example, `{0, 3}` can expand from two to three replicas as `{0, 1, 3}`. See [partition and temporary capacity](./modelserving-behavior.md#partition-sparse-ordinals-and-temporary-capacity) for how the new slot selects its template.

@@ -8,6 +8,8 @@ ModelBooster is deprecated in v1.1; use ModelServing, ModelServer, and ModelRout
 
 For new deployments, create and manage `ModelServing`, `ModelServer`, and `ModelRoute` directly. Start with the [ModelServing quick start](../getting-started/quick-start.md#modelserving) or the complete [vLLM prefill-decode guide](./prefill-decode-disaggregation/modelserving-vllm-pd-disaggregation.md). Configure autoscaling separately when needed; see the [autoscaling guide](./autoscaler.md).
 
+See [ModelServing rollout, scaling, and recovery](./modelserving-behavior.md) for update budgets, partition, temporary capacity, fault recovery and rollout status.
+
 ModelBooster remains available and its controller remains enabled by default in v1.1. The ModelBooster examples below are retained for existing users. Deprecation does not require deleting existing resources: deleting a ModelBooster can also delete its generated resources through Kubernetes owner references.
 
 The earliest removal version is a lower bound, not a scheduled removal date. Follow [the deprecation tracking issue](https://github.com/volcano-sh/kthena/issues/1706) for migration work and future disabling and removal milestones; see [the original discussion](https://github.com/volcano-sh/kthena/issues/1679) for the rationale.
