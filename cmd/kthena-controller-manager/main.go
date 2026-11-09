@@ -36,6 +36,7 @@ import (
 	autoscalerwebhook "github.com/volcano-sh/kthena/pkg/autoscaler/webhook"
 	"github.com/volcano-sh/kthena/pkg/controller"
 	modelboosterwebhook "github.com/volcano-sh/kthena/pkg/model-booster-controller/webhook"
+	modelserving "github.com/volcano-sh/kthena/pkg/model-serving-controller/controller"
 	modelservingwebhook "github.com/volcano-sh/kthena/pkg/model-serving-controller/webhook"
 	webhookcert "github.com/volcano-sh/kthena/pkg/webhook/cert"
 	kubeinformers "k8s.io/client-go/informers"
@@ -93,9 +94,18 @@ func main() {
 	pflag.IntVar(&cc.DebugPort, "debug-port", 0, "Port for debug server to dump internal cache. If 0, debug server is disabled.")
 	pflag.IntVar(&cc.AutoscalingSyncPeriodSeconds, "autoscaling-sync-period-seconds", util.AutoscalingSyncPeriodSeconds,
 		"Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 falls back to the default (15).")
+	pflag.DurationVar(&cc.RecoveryBackoff.Base, "recovery-backoff-base", modelserving.DefaultRecoveryBackoffBase,
+		"Delay before the second consecutive recovery of a failing ModelServing ServingGroup, Role, or Pod. The delay doubles after each further failure. 0 disables the backoff.")
+	pflag.DurationVar(&cc.RecoveryBackoff.Max, "recovery-backoff-max", modelserving.DefaultRecoveryBackoffMax,
+		"Maximum delay between consecutive recoveries of a failing ModelServing ServingGroup, Role, or Pod.")
+	pflag.DurationVar(&cc.RecoveryBackoff.ResetAfter, "recovery-backoff-reset", modelserving.DefaultRecoveryBackoffResetAfter,
+		"How long a recovered ModelServing ServingGroup, Role, or Pod must stay Running before its failure count resets.")
 	pflag.Parse()
 
 	cc.Controllers = parseControllers(controllers)
+	if err := cc.RecoveryBackoff.Validate(); err != nil {
+		klog.Fatalf("Invalid recovery backoff flags: %v", err)
+	}
 
 	pflag.CommandLine.VisitAll(func(f *pflag.Flag) {
 		klog.Infof("Flag: %s, Value: %s", f.Name, f.Value.String())

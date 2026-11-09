@@ -1027,7 +1027,7 @@ func TestGraceTimeKeepsOnlyPodsThatFinishedTheUpdate(t *testing.T) {
 			}
 			f.kubeClient.ClearActions()
 
-			f.controller.handlePodAfterGraceTime(f.newMS, pod)
+			f.controller.handlePodAfterGraceTime(f.newMS, inPlaceTestGroup, pod, time.Second)
 
 			assert.Equal(t, tt.wantDelete, podDeleted(f))
 		})

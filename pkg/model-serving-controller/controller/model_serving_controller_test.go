@@ -6630,7 +6630,7 @@ func TestHandlePodAfterGraceTime(t *testing.T) {
 			}
 			controller, kubeClient := newGracePeriodTestController(t, currentPod)
 
-			controller.handlePodAfterGraceTime(ms, failedPod)
+			controller.handlePodAfterGraceTime(ms, "test-model-0", failedPod, time.Second)
 
 			_, err := kubeClient.CoreV1().Pods(namespace).Get(context.Background(), podName, metav1.GetOptions{})
 			if tt.wantDeleted {
@@ -6677,7 +6677,7 @@ func TestHandlePodWithoutGraceTimeUsesUIDPrecondition(t *testing.T) {
 	}
 	controller, kubeClient := newGracePeriodTestController(t, failedPod)
 
-	controller.handlePodAfterGraceTime(ms, failedPod)
+	controller.handlePodAfterGraceTime(ms, "test-model-0", failedPod, 0)
 
 	actions := kubeClient.Actions()
 	require.Len(t, actions, 1)
