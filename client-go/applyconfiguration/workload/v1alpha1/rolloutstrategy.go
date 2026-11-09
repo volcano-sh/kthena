@@ -35,7 +35,7 @@ type RolloutStrategyApplyConfiguration struct {
 	// ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;
 	// rolling update settings on individual Roles do not take effect.
 	// RoleRollingUpdate uses the rolling update configuration on each Role;
-	// rolloutStrategy.rollingUpdateConfiguration must not be set.
+	// rolloutStrategy.rollingUpdateConfiguration is allowed but ignored.
 	// Kthena performs RoleRollingUpdate across all ServingGroups at the same time.
 	// Therefore, we recommend using it only in scenarios with a single ServingGroup.
 	Type *workloadv1alpha1.RolloutStrategyType `json:"type,omitempty"`
@@ -50,8 +50,8 @@ type RolloutStrategyApplyConfiguration struct {
 	// It only applies to in-place updates, and defaults to 1800 seconds.
 	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty"`
 	// RollingUpdateConfiguration configures ServingGroupRollingUpdate.
-	// It must not be set when type is RoleRollingUpdate; configure maxUnavailable
-	// maxSurge, and partition on each Role instead.
+	// When type is RoleRollingUpdate, these settings are ignored; configure
+	// maxUnavailable, maxSurge, and partition on each Role instead.
 	RollingUpdateConfiguration *RollingUpdateConfigurationApplyConfiguration `json:"rollingUpdateConfiguration,omitempty"`
 	// RoleCoordination defines the cross-Role coordination parameters to be used
 	// when type is RoleRollingUpdate.

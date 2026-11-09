@@ -17,10 +17,12 @@ limitations under the License.
 package webhook
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	admissionv1 "k8s.io/api/admission/v1"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -243,7 +245,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			want: field.ErrorList(nil),
 		},
 		{
-			name: "rejects configuration for role rolling update",
+			name: "allows inactive configuration for role rolling update",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -260,12 +262,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList{
-				field.Forbidden(
-					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
-					"rollingUpdateConfiguration is only valid when rolloutStrategy.type is ServingGroupRollingUpdate",
-				),
-			},
+			want: nil,
 		},
 		{
 			name: "invalid maxUnavailable format",
@@ -292,14 +289,6 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 						StrVal: "invalid",
 					},
 					"a valid percent string must be a numeric string followed by an ending '%' (e.g. '1%',  or '93%', regex used for validation is '[0-9]+%')",
-				),
-				field.Invalid(
-					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxUnavailable"),
-					&intstr.IntOrString{
-						Type:   intstr.String,
-						StrVal: "invalid",
-					},
-					"invalid maxUnavailable: invalid value for IntOrString: invalid type: string is not a percentage",
 				),
 			},
 		},
@@ -343,7 +332,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "maxUnavailable greater than replicas is allowed for scale down",
+			name: "maxUnavailable greater than replicas is rejected after scale down",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -359,7 +348,8 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: field.ErrorList{field.Invalid(field.NewPath("spec", "rolloutStrategy", "rollingUpdateConfiguration", "maxUnavailable"),
+				ptr.To(intstr.FromInt(4)), "maxUnavailable cannot be greater than replicas (3)")},
 		},
 		{
 			name: "valid partition - within range",
@@ -440,7 +430,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "valid partition - greater than replicas",
+			name: "invalid partition - greater than replicas",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -469,7 +459,8 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: nil,
+			want: field.ErrorList{field.Invalid(field.NewPath("spec", "rolloutStrategy", "rollingUpdateConfiguration", "partition"),
+				ptr.To(intstr.FromInt(5)), "partition cannot be greater than replicas (3)")},
 		},
 		{
 			name: "valid partition - zero value",
@@ -550,6 +541,78 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 	}
 }
 
+func TestRolloutBudgetAdmission(t *testing.T) {
+	integer := func(value int) *intstr.IntOrString { return ptr.To(intstr.FromInt(value)) }
+	percent := func(value string) *intstr.IntOrString { return ptr.To(intstr.FromString(value)) }
+	for _, strategy := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
+		for _, operation := range []admissionv1.Operation{admissionv1.Create, admissionv1.Update} {
+			for _, tc := range []struct {
+				name     string
+				replicas int32
+				config   workloadv1alpha1.RollingUpdateConfiguration
+				inactive bool
+				allowed  bool
+			}{
+				{name: "defaults", replicas: 3, allowed: true},
+				{name: "zero defaults", allowed: true},
+				{name: "zero replicas skip double zero", config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: integer(0)}, allowed: true},
+				{name: "zero replicas skip percentage double zero", config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: percent("100%")}, allowed: true},
+				{name: "zero replicas skip replica limits", config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: integer(2), Partition: integer(1)}, allowed: true},
+				{name: "zero replicas check syntax", config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: percent("101%")}},
+				{name: "full partition double zero", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: integer(0), Partition: integer(3)}},
+				{name: "floor percentage double zero after shrink", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: percent("25%")}},
+				{name: "floor percentage positive surge", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: percent("25%"), MaxSurge: integer(1)}, allowed: true},
+				{name: "floor percentage nonzero", replicas: 4, config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: percent("25%")}, allowed: true},
+				{name: "partition ceiling", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{Partition: percent("34%")}, allowed: true},
+				{name: "partition above replicas", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{Partition: integer(4)}},
+				{name: "unavailable above replicas", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: integer(4)}},
+				{name: "surge over 100 percent", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: percent("200%")}, allowed: true},
+				{name: "surge int32 boundary", replicas: 2147483646, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: integer(1)}, allowed: true},
+				{name: "surge int32 overflow", replicas: 2147483647, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: integer(1)}},
+				{name: "surge percent exact boundary", replicas: 1, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: percent("214748364600%")}, allowed: true},
+				{name: "surge percent exceeds boundary", replicas: 1, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: percent("214748364601%")}},
+				{name: "surge percent ceiling fits", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: percent("71582788133%")}, allowed: true},
+				{name: "surge percent ceiling overflows", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: percent("71582788134%")}},
+				{name: "surge percent multiplication overflow", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: percent("9223372036854775807%")}},
+				{name: "surge percent parse overflow", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: percent("9223372036854775808%")}},
+				{name: "negative surge", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: integer(-1)}},
+				{name: "decimal percent", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: percent("2.5%")}},
+				{name: "numeric string", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{Partition: percent("1")}},
+				{name: "inactive counts and double zero ignored", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: integer(0), Partition: integer(4)}, inactive: true, allowed: true},
+				{name: "inactive unavailable format checked", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: percent("101%")}, inactive: true},
+				{name: "inactive surge over 100 allowed", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{MaxSurge: percent("200%")}, inactive: true, allowed: true},
+				{name: "inactive partition format checked", replicas: 3, config: workloadv1alpha1.RollingUpdateConfiguration{Partition: integer(-1)}, inactive: true},
+			} {
+				t.Run(string(strategy)+"/"+string(operation)+"/"+tc.name, func(t *testing.T) {
+					old := immutableAdmissionModelServing(strategy)
+					old.Spec.Template.Roles = old.Spec.Template.Roles[:1]
+					old.Spec.Replicas = ptr.To[int32](4)
+					old.Spec.Template.Roles[0].Replicas = ptr.To[int32](4)
+					current := old.DeepCopy()
+					current.Spec.Replicas = ptr.To(tc.replicas)
+					current.Spec.Template.Roles[0].Replicas = ptr.To(tc.replicas)
+					configureGroup := strategy == workloadv1alpha1.ServingGroupRollingUpdate
+					if tc.inactive {
+						configureGroup = !configureGroup
+					}
+					if configureGroup {
+						current.Spec.RolloutStrategy.RollingUpdateConfiguration = &tc.config
+					} else {
+						current.Spec.Template.Roles[0].RollingUpdateConfiguration = tc.config
+					}
+					oldRaw, err := json.Marshal(old)
+					assert.NoError(t, err)
+					if operation == admissionv1.Create {
+						oldRaw = nil
+					}
+					response := immutableAdmissionResponse(t, oldRaw, current, operation)
+					assert.Equal(t, tc.allowed, response.Allowed, "%v", response.Result)
+				})
+			}
+		}
+	}
+}
+
 func TestValidateMaxUnavailableForRoles(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -610,7 +673,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			}},
 		},
 		{
-			name: "requires role rolling update for partition",
+			name: "allows inactive role partition",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate},
 				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
@@ -621,7 +684,6 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 					},
 				}}},
 			}},
-			wantErr: true,
 		},
 		{
 			name: "allows role maxSurge",
@@ -652,7 +714,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			}},
 		},
 		{
-			name: "rejects role maxSurge for serving group rolling update",
+			name: "allows inactive role maxSurge",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate},
 				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
@@ -663,7 +725,6 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 					},
 				}}},
 			}},
-			wantErr: true,
 		},
 		{
 			name: "rejects maxUnavailable greater than role replicas",

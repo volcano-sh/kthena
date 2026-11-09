@@ -33,14 +33,17 @@ type RollingUpdateConfigurationApplyConfiguration struct {
 	// 5) or a percentage (for example, 10%). A percentage is calculated from
 	// ModelServing replicas for ServingGroupRollingUpdate and from the
 	// corresponding Role's replicas for RoleRollingUpdate, then rounded down.
-	// It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1.
+	// It may resolve to 0 only when MaxSurge resolves above 0, including when all
+	// replicas are partition-protected. It cannot exceed replicas. Limits that
+	// depend on replicas are not checked when replicas is 0. Defaults to 1.
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 	// MaxSurge is the maximum number of resources that may be created above
 	// the desired replica count during an update. It can be an absolute number
 	// (for example, 1) or a percentage (for example, 25%). A percentage is
 	// calculated from ModelServing replicas for ServingGroupRollingUpdate and
 	// from the corresponding Role's replicas for RoleRollingUpdate, then rounded
-	// up. It defaults to 0.
+	// up. Percentages above 100% are allowed, but replicas plus the resolved
+	// MaxSurge cannot exceed 2147483647. It defaults to 0.
 	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
 	// Partition protects replicas whose absolute ordinal is in [0, Partition)
 	// from template updates, including when the existing ordinal set is sparse.

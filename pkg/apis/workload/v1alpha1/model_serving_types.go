@@ -149,7 +149,7 @@ type RolloutStrategy struct {
 	// ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;
 	// rolling update settings on individual Roles do not take effect.
 	// RoleRollingUpdate uses the rolling update configuration on each Role;
-	// rolloutStrategy.rollingUpdateConfiguration must not be set.
+	// rolloutStrategy.rollingUpdateConfiguration is allowed but ignored.
 	// Kthena performs RoleRollingUpdate across all ServingGroups at the same time.
 	// Therefore, we recommend using it only in scenarios with a single ServingGroup.
 	//
@@ -176,8 +176,8 @@ type RolloutStrategy struct {
 	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty"`
 
 	// RollingUpdateConfiguration configures ServingGroupRollingUpdate.
-	// It must not be set when type is RoleRollingUpdate; configure maxUnavailable
-	// maxSurge, and partition on each Role instead.
+	// When type is RoleRollingUpdate, these settings are ignored; configure
+	// maxUnavailable, maxSurge, and partition on each Role instead.
 	// +optional
 	RollingUpdateConfiguration *RollingUpdateConfiguration `json:"rollingUpdateConfiguration,omitempty"`
 
@@ -257,7 +257,9 @@ type RollingUpdateConfiguration struct {
 	// 5) or a percentage (for example, 10%). A percentage is calculated from
 	// ModelServing replicas for ServingGroupRollingUpdate and from the
 	// corresponding Role's replicas for RoleRollingUpdate, then rounded down.
-	// It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1.
+	// It may resolve to 0 only when MaxSurge resolves above 0, including when all
+	// replicas are partition-protected. It cannot exceed replicas. Limits that
+	// depend on replicas are not checked when replicas is 0. Defaults to 1.
 	// +kubebuilder:validation:XIntOrString
 	// +kubebuilder:default=1
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
@@ -267,7 +269,8 @@ type RollingUpdateConfiguration struct {
 	// (for example, 1) or a percentage (for example, 25%). A percentage is
 	// calculated from ModelServing replicas for ServingGroupRollingUpdate and
 	// from the corresponding Role's replicas for RoleRollingUpdate, then rounded
-	// up. It defaults to 0.
+	// up. Percentages above 100% are allowed, but replicas plus the resolved
+	// MaxSurge cannot exceed 2147483647. It defaults to 0.
 	// +kubebuilder:validation:XIntOrString
 	// +optional
 	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
