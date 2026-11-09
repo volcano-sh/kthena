@@ -930,9 +930,7 @@ func createBasicModelServing(name string, servingGroupReplicas, workloadRoleRepl
 			RolloutStrategy: &workload.RolloutStrategy{
 				Type: workload.ServingGroupRollingUpdate,
 				RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
-					MaxUnavailable: &intstr.IntOrString{
-						IntVal: 2, // maxUnavailable = 2
-					},
+					MaxUnavailable: ptr.To(intstr.FromInt(1)),
 				},
 			},
 			Template: workload.ServingGroup{

@@ -27,10 +27,23 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 )
 
 const expectedModelBoosterDeprecationWarning = "ModelBooster is deprecated in v1.1; Use ModelServing, ModelServer, and ModelRoute. " +
 	"Removal is no earlier than v1.5."
+
+func createModelServingWithMaxUnavailable(name string, replicas int32, maxUnavailable int32) *workload.ModelServing {
+	ms := createBasicModelServing(name, replicas, 1)
+	ms.Spec.RolloutStrategy = &workload.RolloutStrategy{
+		Type: workload.ServingGroupRollingUpdate,
+		RollingUpdateConfiguration: &workload.RollingUpdateConfiguration{
+			MaxUnavailable: ptr.To(intstr.FromInt32(maxUnavailable)),
+		},
+	}
+	return ms
+}
 
 type recordingWarningHandler struct {
 	mu       sync.Mutex
@@ -123,6 +136,16 @@ func TestWebhook(t *testing.T) {
 			resource:    createInvalidModelServing(),
 			expectError: true,
 			errorMsg:    "should be a non-negative integer",
+		},
+		{
+			name:        "Invalid ModelServing (maxUnavailable above replicas)",
+			resource:    createModelServingWithMaxUnavailable("webhook-max-unavailable", 2, 3),
+			expectError: true,
+			errorMsg:    "maxUnavailable cannot be greater than replicas",
+		},
+		{
+			name:     "Valid ModelServing (zero replicas skip replica-bound budget checks)",
+			resource: createModelServingWithMaxUnavailable("webhook-zero-replicas", 0, 3),
 		},
 	}
 
