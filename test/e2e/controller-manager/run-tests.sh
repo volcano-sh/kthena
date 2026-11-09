@@ -16,12 +16,12 @@
 
 set -euo pipefail
 
-# ModelBooster's real vLLM lifecycle includes a long termination grace period.
-# Give that domain and the remaining controller tests separate Go test processes
-# without changing their timeouts or running against shared resources in parallel.
-# The same prefix and its complement run every test exactly once, including new
-# tests. Each process uses TestMain's existing installation and namespace cleanup.
+# Run ModelBooster, coordinated/in-place rollouts, and the remaining controller
+# tests in separate serial Go processes. Each domain gets its own 20m process
+# budget within the 50m CI job, with TestMain's existing installation and cleanup.
+# The two disjoint prefixes and their complement select every test once.
 suite_exit_code=0
 go test -v -count=1 -timeout=20m -run '^TestModelCR' ./test/e2e/controller-manager/... || suite_exit_code=$?
-go test -v -count=1 -timeout=20m -skip '^TestModelCR' ./test/e2e/controller-manager/... || suite_exit_code=$?
+go test -v -count=1 -timeout=20m -run '^TestModelServing(Coordinated|InPlace)' ./test/e2e/controller-manager/... || suite_exit_code=$?
+go test -v -count=1 -timeout=20m -skip '^TestModelCR|^TestModelServing(Coordinated|InPlace)' ./test/e2e/controller-manager/... || suite_exit_code=$?
 exit "$suite_exit_code"
