@@ -130,6 +130,13 @@ func (m *MockStore) GetPrefillPodsForDecodeGroup(modelServerName types.Namespace
 	return args.Get(0).([]*datastore.PodInfo), args.Error(1)
 }
 
+func (m *MockStore) GetPrefillPodsAndGroupForDecode(modelServerName types.NamespacedName, decodePodName types.NamespacedName) (string, []*datastore.PodInfo, error) {
+	args := m.Called(modelServerName, decodePodName)
+	group, _ := args.Get(0).(string)
+	pods, _ := args.Get(1).([]*datastore.PodInfo)
+	return group, pods, args.Error(2)
+}
+
 func (m *MockStore) RegisterCallback(kind string, callback datastore.CallbackFunc) {
 	m.Called(kind, callback)
 }
