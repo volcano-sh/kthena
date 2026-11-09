@@ -80,6 +80,8 @@ func newInPlaceFixture(t *testing.T, newMutate func(*workloadv1alpha1.ModelServi
 
 	oldMS := newInPlaceModelServing("img:v1", nil)
 	newMS := newInPlaceModelServing("img:v2", newMutate)
+	_, err = controller.modelServingClient.WorkloadV1alpha1().ModelServings(newMS.Namespace).Create(context.Background(), newMS, metav1.CreateOptions{})
+	require.NoError(t, err)
 	f := &inPlaceFixture{
 		controller: controller,
 		kubeClient: kubeClient,
@@ -634,17 +636,13 @@ func TestUpdatePodRecoversCrashDuringInPlaceUpdate(t *testing.T) {
 	kubeletRestart("img:v2", "id-v2")(&pod.Status.ContainerStatuses[0])
 	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
 	require.True(t, inplace.UnexpectedRestart(pod))
+	_, err := f.kubeClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	f.syncPodFromAPI(t)
 
 	f.controller.updatePod(nil, pod)
-
-	assert.Eventually(t, func() bool {
-		for _, action := range f.kubeClient.Actions() {
-			if action.Matches("delete", "pods") {
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 20*time.Millisecond, "a crash during the update must trigger recovery")
+	require.NoError(t, f.controller.syncPodRecovery(ctx, f.newMS))
+	require.True(t, podDeleted(f), "a crash during the update must trigger recovery through the queue")
 }
 
 func TestUpdateServingGroupRevisionLookup(t *testing.T) {
@@ -835,6 +833,8 @@ func TestRetargetedUnitStillHitsDeadline(t *testing.T) {
 			thirdRev := utils.ModelServingRevision(third)
 			require.NotEqual(t, f.newRev, thirdRev)
 
+			_, err := f.controller.modelServingClient.WorkloadV1alpha1().ModelServings(third.Namespace).Update(ctx, third, metav1.UpdateOptions{})
+			require.NoError(t, err)
 			require.NoError(t, f.controller.completeInPlaceUpdates(ctx, third, thirdRev))
 
 			if tt.wantDelete {
@@ -874,6 +874,8 @@ func TestRetargetedHalfPatchedUnitHitsDeadline(t *testing.T) {
 	})
 	f.kubeClient.ClearActions()
 
+	_, err = f.controller.modelServingClient.WorkloadV1alpha1().ModelServings(third.Namespace).Update(ctx, third, metav1.UpdateOptions{})
+	require.NoError(t, err)
 	require.NoError(t, f.controller.completeInPlaceUpdates(ctx, third, utils.ModelServingRevision(third)))
 
 	_, err = f.kubeClient.CoreV1().Pods("default").Get(ctx, second.Name, metav1.GetOptions{})
@@ -964,16 +966,19 @@ func TestHalfPatchedUnitHitsDeadline(t *testing.T) {
 	tests := []struct {
 		name       string
 		policy     workloadv1alpha1.RecoveryPolicy
+		grace      int64
 		wantDelete bool
 	}{
 		{name: "RoleRecreate deletes the never patched Pod", policy: workloadv1alpha1.RoleRecreate, wantDelete: true},
 		{name: "None keeps resuming", policy: workloadv1alpha1.NoneRestartPolicy},
+		{name: "minus one keeps resuming normal template update", policy: workloadv1alpha1.RoleRecreate, grace: -1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newInPlaceFixture(t, func(ms *workloadv1alpha1.ModelServing) {
 				ms.Spec.RolloutStrategy.ProgressDeadlineSeconds = ptr.To[int32](60)
 				ms.Spec.RecoveryPolicy = tt.policy
+				ms.Spec.Template.RestartGracePeriodSeconds = &tt.grace
 			}, nil)
 			ctx := context.Background()
 			second := f.syncPodFromAPI(t).DeepCopy()
@@ -1014,6 +1019,7 @@ func TestGraceTimeKeepsOnlyPodsThatFinishedTheUpdate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newInPlaceFixture(t, func(ms *workloadv1alpha1.ModelServing) {
 				ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](1)
+				ms.Spec.RolloutStrategy.ProgressDeadlineSeconds = ptr.To[int32](60)
 			}, nil)
 			ctx := context.Background()
 			sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
@@ -1023,13 +1029,102 @@ func TestGraceTimeKeepsOnlyPodsThatFinishedTheUpdate(t *testing.T) {
 				kubeletRestart("img:v2", "id-v2")(&pod.Status.ContainerStatuses[0])
 				_, err := f.kubeClient.CoreV1().Pods("default").Update(ctx, pod, metav1.UpdateOptions{})
 				require.NoError(t, err)
-				pod = f.syncPodFromAPI(t)
 			}
 			f.kubeClient.ClearActions()
 
-			f.controller.handlePodAfterGraceTime(f.newMS, pod)
+			expireInPlaceDeadline(t, f)
+			pod = f.syncPodFromAPI(t)
+			unit := splitInPlaceUnits(f.newMS, inPlaceTestGroup, []*corev1.Pod{pod}, false)[0]
+			require.NoError(t, f.controller.handleInPlaceTimeout(ctx, f.newMS, unit, f.newRev, time.Minute, time.Now().Add(-2*time.Second)))
 
 			assert.Equal(t, tt.wantDelete, podDeleted(f))
 		})
 	}
+}
+
+func TestInPlaceTimeoutWaitsForRestartGrace(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		grace      int64
+		elapsed    time.Duration
+		wantDelete bool
+	}{
+		{name: "minus one suppresses the whole partial unit", grace: -1},
+		{name: "finite grace has not expired", grace: 60, elapsed: 10 * time.Second},
+		{name: "finite grace expires for patched and unpatched members", grace: 60, elapsed: 90 * time.Second, wantDelete: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInPlaceFixture(t, func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy.ProgressDeadlineSeconds = ptr.To[int32](60)
+				ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](tc.grace)
+			}, nil)
+			ctx := context.Background()
+			second := f.syncPodFromAPI(t).DeepCopy()
+			second.Name, second.UID = "ms-0-prefill-0-extra", "unpatched-uid"
+			_, err := f.kubeClient.CoreV1().Pods(second.Namespace).Create(ctx, second, metav1.CreateOptions{})
+			require.NoError(t, err)
+			_, err = inplace.Start(ctx, f.kubeClient, f.syncPodFromAPI(t), map[string]string{"prefill-container": "img:v2"}, f.newRev, time.Now())
+			require.NoError(t, err)
+			expireInPlaceDeadline(t, f)
+			pod := f.syncPodFromAPI(t)
+			unit := splitInPlaceUnits(f.newMS, inPlaceTestGroup, []*corev1.Pod{pod, second}, false)[0]
+			f.kubeClient.ClearActions()
+			require.NoError(t, f.controller.handleInPlaceTimeout(ctx, f.newMS, unit, f.newRev, time.Minute, time.Now().Add(-tc.elapsed)))
+			for _, member := range unit.pods {
+				_, err := f.kubeClient.CoreV1().Pods(member.Namespace).Get(ctx, member.Name, metav1.GetOptions{})
+				require.Equal(t, tc.wantDelete, apierrors.IsNotFound(err), member.Name)
+			}
+		})
+	}
+}
+
+func TestInPlaceTimeoutAndCrashKeepTheirOwnGrace(t *testing.T) {
+	f := newInPlaceFixture(t, func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](120)
+		ms.Spec.RolloutStrategy.ProgressDeadlineSeconds = ptr.To[int32](60)
+	}, nil)
+	ctx := context.Background()
+	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}, f.newRev))
+	expireInPlaceDeadline(t, f)
+	pod := f.syncPodFromAPI(t)
+	kubeletRestart("img:v2", "id-v2")(&pod.Status.ContainerStatuses[0])
+	kubeletRestart("img:v2", "crashed-v2")(&pod.Status.ContainerStatuses[0])
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+	_, err := f.kubeClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	pod = f.syncPodFromAPI(t)
+	key := getPodGracePeriodKey(pod)
+	firstSeen := time.Now().Add(-20 * time.Second)
+	f.controller.graceMap.Store(key, firstSeen)
+	for range 3 {
+		require.NoError(t, f.controller.syncPodRecovery(ctx, f.newMS))
+		require.NoError(t, f.controller.completeInPlaceUpdates(ctx, f.newMS, f.newRev))
+		observed, ok := f.controller.graceMap.Load(key)
+		require.True(t, ok)
+		require.Equal(t, firstSeen, observed, "overlapping fault and timeout must not restart each other's grace")
+		require.False(t, podDeleted(f))
+	}
+	f.controller.graceMap.Store(key, time.Now().Add(-2*time.Minute))
+	require.NoError(t, f.controller.syncPodRecovery(ctx, f.newMS))
+	require.True(t, podDeleted(f), "continuous failure still expires when both recovery triggers are present")
+}
+
+func TestInPlaceMinusOneFinishesAfterSelfRecovery(t *testing.T) {
+	f := newInPlaceFixture(t, func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](-1)
+	}, nil)
+	ctx := context.Background()
+	require.NoError(t, f.controller.updateServingGroup(ctx, f.newMS, datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}, f.newRev))
+	pod := f.syncPodFromAPI(t)
+	kubeletRestart("img:v2", "id-v2")(&pod.Status.ContainerStatuses[0])
+	kubeletRestart("img:v2", "self-recovered-v2")(&pod.Status.ContainerStatuses[0])
+	_, err := f.kubeClient.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	f.syncPodFromAPI(t)
+	require.NoError(t, f.controller.completeInPlaceUpdates(ctx, f.newMS, f.newRev))
+	completed := f.syncPodFromAPI(t)
+	require.True(t, inplace.StateOf(completed).Done)
+	require.Equal(t, f.newRev, utils.ObjectRevision(completed))
+	require.Equal(t, pod.UID, completed.UID)
+	require.False(t, podDeleted(f))
 }

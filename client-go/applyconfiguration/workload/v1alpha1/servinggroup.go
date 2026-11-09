@@ -23,8 +23,11 @@ package v1alpha1
 //
 // ServingGroup is the smallest unit to complete the inference task
 type ServingGroupApplyConfiguration struct {
-	// RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs
-	// Defaults to 0 (ServingGroup will be rebuilt immediately after an error)
+	// RestartGracePeriodSeconds is the time to tolerate a recoverable Pod fault
+	// before applying recoveryPolicy. Defaults to 0; -1 disables active recovery.
+	// Finite grace uses the first fault observation in the current controller
+	// process and the latest configured value. Becoming Ready ends that observation.
+	// For an in-place update that misses its progress deadline, grace starts at the deadline.
 	RestartGracePeriodSeconds *int64 `json:"restartGracePeriodSeconds,omitempty"`
 	// GangPolicy defines the gang scheduler config.
 	GangPolicy *GangPolicyApplyConfiguration `json:"gangPolicy,omitempty"`
