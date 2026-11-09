@@ -28,7 +28,7 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.batch.storage.fsGroup | int | `65532` | fsGroup that lets the router user write to the volume; `0` leaves it unset. |
 | networking.kthenaRouter.batch.storage.mountPath | string | `"/var/lib/kthena/batch"` | Path where the claim is mounted in the router container. |
 | networking.kthenaRouter.debugPort | int | `15000` | Debug server port for Kthena Router (localhost only). |
-| networking.kthenaRouter.drainTimeout | string | `"5m"` | Keep it more than 5s below terminationGracePeriodSeconds: after the drain timeout, the router can take up to 5s more to clean up the requests it force-closed. |
+| networking.kthenaRouter.drainTimeout | string | `"5m"` | This should be less than terminationGracePeriodSeconds. |
 | networking.kthenaRouter.enabled | bool | `true` | Enable Kthena Router. |
 | networking.kthenaRouter.fairness.enabled | bool | `false` | Enable user-fairness scheduling. Mutually exclusive with sessionBoost. |
 | networking.kthenaRouter.fairness.inputTokenWeight | float | `1` | User-fairness strategy: weight multiplier for input tokens. |

@@ -51,17 +51,16 @@ func NewRouter(store datastore.Store, configFile string, transportRegistry *comm
 	return router.NewRouter(store, configFile, transportRegistry)
 }
 
-// Starts router. The inference listeners drain when ctx is cancelled; the
-// management servers stop when drainCtx is cancelled after that.
-func (s *Server) startRouter(ctx, drainCtx context.Context, router *router.Router, store datastore.Store) {
+// Starts router
+func (s *Server) startRouter(ctx context.Context, router *router.Router, store datastore.Store) {
 	gin.SetMode(gin.ReleaseMode)
 
 	// Metrics are served separately so the public inference listener does not
 	// expose operational data unless compatibility mode is explicitly enabled.
-	s.startMetricsServer(drainCtx)
+	s.startMetricsServer(ctx)
 
 	// Start debug server on localhost
-	s.startDebugServer(drainCtx, store)
+	s.startDebugServer(ctx, store)
 
 	// Gateway API features are optional
 	if s.EnableGatewayAPI {
@@ -104,7 +103,7 @@ func (s *Server) startRouter(ctx, drainCtx context.Context, router *router.Route
 			exposeMetrics:    s.ExposeMetricsOnRouterPort,
 			activeRequests:   router.ActiveRequestCount,
 			drainTimeout:     s.drainTimeout,
-			group:            &s.listeners,
+			listeners:        &s.listeners,
 			requests:         &s.requests,
 			startLog:         fmt.Sprintf("Starting default server on port %s", s.Port),
 			shutdownStartLog: "Shutting down default HTTP server ...",
@@ -225,10 +224,10 @@ type listenerConfig struct {
 	exposeMetrics  bool
 	activeRequests func() int64
 	drainTimeout   time.Duration
-	// group, when set, tracks the listener until it has drained.
-	group *drainGroup
-	// requests, when set, tracks each request the listener serves until its
-	// handler has returned.
+	// listeners tracks the listener until it has drained.
+	listeners *drainGroup
+	// requests tracks each request the listener serves until its handler has
+	// returned.
 	requests *drainGroup
 	// Gateway mode (non-nil => use gateway branch).
 	gateway          *listenerGatewayConfig
@@ -309,21 +308,16 @@ func newListenerHandler(cfg listenerConfig) http.Handler {
 }
 
 // startListener builds the HTTP handler, listens, and gracefully shuts down on ctx.
-// It returns nil without listening when cfg.group no longer accepts listeners
-// because the router is shutting down.
+// It returns nil without listening once the router is shutting down.
 func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
-	if cfg.group != nil && !cfg.group.add() {
+	if !cfg.listeners.add() {
 		klog.Infof("Not starting listener on %s: the router is shutting down", cfg.addr)
 		return nil
 	}
 
-	handler := newListenerHandler(cfg)
-	if cfg.requests != nil {
-		handler = cfg.requests.track(handler)
-	}
 	srv := &http.Server{
 		Addr:    cfg.addr,
-		Handler: handler,
+		Handler: cfg.requests.track(newListenerHandler(cfg)),
 	}
 
 	go func() {
@@ -347,9 +341,7 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 	}()
 
 	go func() {
-		if cfg.group != nil {
-			defer cfg.group.done()
-		}
+		defer cfg.listeners.done()
 		<-ctx.Done()
 		klog.Info(cfg.shutdownStartLog)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.drainTimeout)
@@ -405,25 +397,12 @@ func (g *drainGroup) done() {
 }
 
 // closeAndWait stops further registrations and waits until every registered
-// member has finished or ctx is done. It reports whether every member
-// finished. When ctx ends first, a goroutine keeps waiting for the remaining
-// members.
-func (g *drainGroup) closeAndWait(ctx context.Context) bool {
+// member has finished.
+func (g *drainGroup) closeAndWait() {
 	g.mu.Lock()
 	g.closed = true
 	g.mu.Unlock()
-
-	finished := make(chan struct{})
-	go func() {
-		g.wg.Wait()
-		close(finished)
-	}()
-	select {
-	case <-finished:
-		return true
-	case <-ctx.Done():
-		return false
-	}
+	g.wg.Wait()
 }
 
 // track returns a handler that serves each request as a member of g. A
@@ -636,7 +615,7 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 			exposeMetrics:    lm.server.ExposeMetricsOnRouterPort,
 			activeRequests:   lm.router.ActiveRequestCount,
 			drainTimeout:     lm.server.drainTimeout,
-			group:            &lm.server.listeners,
+			listeners:        &lm.server.listeners,
 			requests:         &lm.server.requests,
 			startLog:         fmt.Sprintf("Starting Gateway listener server on port %d", port),
 			shutdownStartLog: fmt.Sprintf("Shutting down Gateway listener server on port %d ...", port),

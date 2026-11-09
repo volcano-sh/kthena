@@ -31,7 +31,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -154,11 +153,9 @@ func streamingUpstream(t *testing.T, chunks int, interval time.Duration) *url.UR
 // shutdownTestRouter is a Server.Run started with the file config source, one
 // ModelServer pointing at upstream and the Redis on-flight counter.
 type shutdownTestRouter struct {
-	baseURL    string
-	metricsURL string
-	debugURL   string
-	redis      *miniredis.Miniredis
-	cancel     context.CancelFunc
+	baseURL string
+	redis   *miniredis.Miniredis
+	cancel  context.CancelFunc
 	// runReturned receives the Redis on-flight total read right after Run
 	// returned, which is when main() exits.
 	runReturned chan onFlightResult
@@ -169,7 +166,7 @@ type onFlightResult struct {
 	err   error
 }
 
-func startShutdownTestRouter(t *testing.T, drainTimeout string, handlerExitTimeout time.Duration, upstream *url.URL) *shutdownTestRouter {
+func startShutdownTestRouter(t *testing.T, drainTimeout string, upstream *url.URL) *shutdownTestRouter {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	t.Setenv("REDIS_HOST", mr.Host())
@@ -199,7 +196,6 @@ spec:
 	ports := freeTCPPorts(t, 3)
 	port, metricsPort, debugPort := ports[0], ports[1], ports[2]
 	s := NewServer(strconv.Itoa(port), false, "", "", false, false, debugPort, metricsPort, false, 0, 0)
-	s.handlerExitTimeout = handlerExitTimeout
 	s.ConfigSource = ConfigSourceFile
 	s.ConfigDir = resourceDir
 	s.RouterConfigFile = writeRouterConfig(t, dir)
@@ -207,8 +203,6 @@ spec:
 	ctx, cancel := context.WithCancel(context.Background())
 	tr := &shutdownTestRouter{
 		baseURL:     fmt.Sprintf("http://127.0.0.1:%d", port),
-		metricsURL:  fmt.Sprintf("http://127.0.0.1:%d/metrics", metricsPort),
-		debugURL:    fmt.Sprintf("http://localhost:%d/debug/config_dump/pods", debugPort),
 		redis:       mr,
 		cancel:      cancel,
 		runReturned: make(chan onFlightResult, 1),
@@ -280,61 +274,58 @@ func (tr *shutdownTestRouter) waitForRun(t *testing.T, timeout time.Duration) in
 	}
 }
 
+// goWait calls wait in a new goroutine and returns a channel that is closed
+// once wait returns.
+func goWait(wait func()) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wait()
+	}()
+	return done
+}
+
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
 func TestServerRunDrainsInFlightRequestsOnShutdown(t *testing.T) {
 	const chunks = 5
 	upstream := streamingUpstream(t, chunks, 200*time.Millisecond)
-	// With a tiny handler budget, only the listener drain can keep Server.Run
-	// from returning before the stream has finished.
-	tr := startShutdownTestRouter(t, "30s", 20*time.Millisecond, upstream)
+	tr := startShutdownTestRouter(t, "30s", upstream)
 	resp, reader := tr.startStream(t)
 	defer resp.Body.Close()
 
 	tr.cancel() // what main() does on SIGTERM
-
-	// Read one more event first. By then the drain is well under way, and a
-	// management server that stopped on SIGTERM would already be gone.
-	require.True(t, strings.HasPrefix(nextEvent(t, reader), "data: {"))
-	for _, u := range []string{tr.metricsURL, tr.debugURL} {
-		resp, err := http.Get(u)
-		require.NoError(t, err, "%s must keep serving while requests drain", u)
-		resp.Body.Close()
-		require.Equal(t, http.StatusOK, resp.StatusCode, u)
-	}
-
 	onFlight := tr.waitForRun(t, 20*time.Second)
 	require.Zero(t, onFlight, "Server.Run returned before the in-flight stream released its Redis on-flight count")
 
 	body, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	require.Equal(t, chunks-2, strings.Count(string(body), "data: {"), "the client should receive every remaining chunk")
+	require.Equal(t, chunks-1, strings.Count(string(body), "data: {"), "the client should receive every remaining chunk")
 	require.Contains(t, string(body), "data: [DONE]")
-
-	require.Eventually(t, func() bool {
-		for _, u := range []string{tr.metricsURL, tr.debugURL} {
-			if resp, err := http.Get(u); err == nil {
-				resp.Body.Close()
-				return false
-			}
-		}
-		return true
-	}, 5*time.Second, 10*time.Millisecond, "the metrics and debug servers must stop after the drain")
 }
 
 func TestServerRunForceClosesRequestsAfterDrainTimeout(t *testing.T) {
 	const drainTimeout = 300 * time.Millisecond
-	// 50 chunks 100ms apart: the stream outlives the drain timeout.
+	// 50 chunks 100ms apart: the stream would last 5s, well past the drain timeout.
 	upstream := streamingUpstream(t, 50, 100*time.Millisecond)
-	tr := startShutdownTestRouter(t, drainTimeout.String(), defaultHandlerExitTimeout, upstream)
+	tr := startShutdownTestRouter(t, drainTimeout.String(), upstream)
 	resp, reader := tr.startStream(t)
 	defer resp.Body.Close()
 
 	shutdownAt := time.Now()
 	tr.cancel()
-	onFlight := tr.waitForRun(t, drainTimeout+defaultHandlerExitTimeout+5*time.Second)
+	onFlight := tr.waitForRun(t, 10*time.Second)
 	elapsed := time.Since(shutdownAt)
 
 	require.GreaterOrEqual(t, elapsed, drainTimeout, "Server.Run should wait for the drain timeout")
-	require.Less(t, elapsed, drainTimeout+defaultHandlerExitTimeout, "the forced close should end the request quickly")
+	require.Less(t, elapsed, drainTimeout+2*time.Second, "the handler should return right after the forced close, not when the stream would have ended")
 	require.Zero(t, onFlight, "the Redis on-flight count must be released even when the request is force-closed")
 
 	body, _ := io.ReadAll(reader)
@@ -382,7 +373,7 @@ func TestServerRunAdmitsQueuedRequestsWhileDraining(t *testing.T) {
 			t.Cleanup(func() { *tt.enabled = enabled })
 
 			upstream := streamingUpstream(t, 5, 200*time.Millisecond)
-			tr := startShutdownTestRouter(t, "30s", 20*time.Millisecond, upstream)
+			tr := startShutdownTestRouter(t, "30s", upstream)
 			// The first stream holds the only slot, so the second request has to
 			// wait in the queue until the stream ends.
 			resp, _ := tr.startStream(t)
@@ -426,243 +417,34 @@ func TestServerRunAdmitsQueuedRequestsWhileDraining(t *testing.T) {
 }
 
 // TestServerShutdownOrder checks that shutdown waits for the listeners to
-// drain, then for the request handlers to return or handlerExitTimeout to pass,
-// and only then cancels drainCtx. It runs in a synctest bubble, so time passes
-// on a fake clock and synctest.Wait shows where shutdown is blocked.
+// drain and then for the request handlers to return, and that requests are
+// refused only once the listeners have stopped. It runs in a synctest bubble,
+// so synctest.Wait returns once shutdown is blocked.
 func TestServerShutdownOrder(t *testing.T) {
-	const handlerExitTimeout = time.Minute
-	tests := []struct {
-		name           string
-		handlerReturns bool
-		wantElapsed    time.Duration
-	}{
-		{name: "handler returns", handlerReturns: true, wantElapsed: 0},
-		{name: "handler outlives handlerExitTimeout", handlerReturns: false, wantElapsed: handlerExitTimeout},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				s := &Server{handlerExitTimeout: handlerExitTimeout}
-				require.True(t, s.listeners.add()) // a listener that is still draining
-				require.True(t, s.requests.add())  // the handler of a force-closed connection
-				var stopped atomic.Bool
-				returned := make(chan struct{})
-				start := time.Now()
-				go func() {
-					defer close(returned)
-					s.shutdown(func() { stopped.Store(true) })
-				}()
-
-				synctest.Wait()
-				require.False(t, stopped.Load(), "drainCtx was cancelled while a listener was draining")
-				require.True(t, s.requests.add(), "a request was refused while the listeners were draining")
-				s.requests.done()
-
-				s.listeners.done()
-				synctest.Wait()
-				require.False(t, stopped.Load(), "drainCtx was cancelled while a request handler was running")
-				require.False(t, s.requests.add(), "a request that arrives once the listeners have stopped must not join the wait")
-
-				if tt.handlerReturns {
-					s.requests.done()
-				}
-				<-returned
-				require.True(t, stopped.Load(), "shutdown must cancel drainCtx")
-				require.Equal(t, tt.wantElapsed, time.Since(start))
-				if !tt.handlerReturns {
-					s.requests.done() // lets the goroutine still waiting for the handler exit
-				}
-			})
-		})
-	}
-}
-
-// TestServerShutdownDrainsGatewayListeners checks that Gateway listeners drain
-// on SIGTERM, like the default listener, and that shutdown waits for them.
-func TestServerShutdownDrainsGatewayListeners(t *testing.T) {
-	const drainTimeout = 300 * time.Millisecond
-	ports := freeTCPPorts(t, 4)
-	port, metricsPort, debugPort, gatewayPort := ports[0], ports[1], ports[2], ports[3]
-	s := NewServer(strconv.Itoa(port), false, "", "", true, false, debugPort, metricsPort, false, 0, 0)
-	s.drainTimeout = drainTimeout
-	// With a tiny handler budget, only the listener drain can keep shutdown
-	// open until the drain timeout.
-	s.handlerExitTimeout = 20 * time.Millisecond
-	store := datastore.New()
-	require.NoError(t, store.AddOrUpdateGateway(&gatewayv1.Gateway{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "gw"},
-		Spec: gatewayv1.GatewaySpec{
-			Listeners: []gatewayv1.Listener{{Name: "http", Port: gatewayv1.PortNumber(gatewayPort), Protocol: gatewayv1.HTTPProtocolType}},
-		},
-	}))
-	s.store = store
-	r := NewRouter(store, writeRouterConfig(t, t.TempDir()), common.NewTransportRegistry())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	drainCtx, stopAfterDrain := context.WithCancel(context.Background())
-	defer stopAfterDrain()
-	s.startRouter(ctx, drainCtx, r, store)
-	gatewayAddr := fmt.Sprintf("127.0.0.1:%d", gatewayPort)
-	require.Eventually(t, func() bool {
-		conn, err := net.Dial("tcp", gatewayAddr)
-		if err != nil {
-			return false
-		}
-		conn.Close()
-		return true
-	}, 5*time.Second, 10*time.Millisecond, "the Gateway listener never started")
-
-	// Send the headers and part of the body: the handler starts and then waits
-	// for the rest, so the listener can only stop at the drain timeout.
-	client, err := net.Dial("tcp", gatewayAddr)
-	require.NoError(t, err)
-	defer client.Close()
-	_, err = client.Write([]byte("POST /drain HTTP/1.1\r\nHost: test\r\nContent-Length: 10\r\n\r\n{"))
-	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		return metrics.DefaultMetrics.ActiveRequestsCount() == 1
-	}, 5*time.Second, 10*time.Millisecond, "the request never reached the Gateway listener's handler")
-
-	shutdownAt := time.Now()
-	cancel() // what main() does on SIGTERM
-	stopped := make(chan struct{})
-	go func() {
-		s.shutdown(stopAfterDrain)
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-	case <-time.After(drainTimeout + 5*time.Second):
-		t.Fatal("shutdown did not return: the Gateway listener did not drain on SIGTERM")
-	}
-	require.GreaterOrEqual(t, time.Since(shutdownAt), drainTimeout, "shutdown must wait for the Gateway listener to drain")
-	if conn, err := net.Dial("tcp", gatewayAddr); err == nil {
-		conn.Close()
-		t.Fatal("the Gateway listener must be closed when shutdown returns")
-	}
-}
-
-// The drainGroup tests run in synctest bubbles: time passes on a fake clock,
-// and synctest.Wait returns once every other goroutine is blocked.
-
-func TestDrainGroupCloseAndWait(t *testing.T) {
-	const timeout = 5 * time.Second
-	tests := []struct {
-		name        string
-		members     int
-		finishAfter time.Duration
-		want        bool
-		wantElapsed time.Duration
-	}{
-		{name: "no members", want: true, wantElapsed: 0},
-		{name: "members finish before the timeout", members: 2, finishAfter: time.Second, want: true, wantElapsed: time.Second},
-		{name: "a member outlives the timeout", members: 1, finishAfter: time.Minute, want: false, wantElapsed: timeout},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				var g drainGroup
-				var members sync.WaitGroup
-				for range tt.members {
-					require.True(t, g.add())
-					members.Go(func() {
-						time.Sleep(tt.finishAfter)
-						g.done()
-					})
-				}
-				ctx, cancel := context.WithTimeout(context.Background(), timeout)
-				defer cancel()
-				start := time.Now()
-				require.Equal(t, tt.want, g.closeAndWait(ctx))
-				require.Equal(t, tt.wantElapsed, time.Since(start))
-				require.False(t, g.add(), "add must be refused once the group is closed")
-				members.Wait() // the fake clock stops once this function returns
-			})
-		})
-	}
-}
-
-func TestDrainGroupMembersJoiningDuringClose(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		var g drainGroup
-		var running atomic.Int64
-		for range 50 {
-			go func() {
-				if g.add() {
-					running.Add(1)
-					time.Sleep(time.Second)
-					running.Add(-1)
-					g.done()
-				}
-			}()
-		}
-		require.True(t, g.closeAndWait(context.Background()))
-		require.Zero(t, running.Load(), "closeAndWait returned while a member registered before the close was running")
-	})
-}
+		var s Server
+		require.True(t, s.listeners.add()) // a listener that is still draining
+		require.True(t, s.requests.add())  // the handler of a force-closed connection
+		returned := goWait(s.shutdown)
 
-// TestDrainGroupTrack checks that a tracked request is a member of the group
-// while its handler runs, and that once the group is closed new requests are
-// refused instead of joining the wait.
-func TestDrainGroupTrack(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var g drainGroup
-		release := make(chan struct{})
-		handler := g.track(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			<-release
-			w.WriteHeader(http.StatusOK)
-		}))
-
-		running := httptest.NewRecorder()
-		served := make(chan struct{})
-		go func() {
-			defer close(served)
-			handler.ServeHTTP(running, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
-		}()
-		synctest.Wait() // the handler is waiting for release
-
-		waited := make(chan bool, 1)
-		go func() { waited <- g.closeAndWait(context.Background()) }()
 		synctest.Wait()
-		select {
-		case <-waited:
-			t.Fatal("closeAndWait returned while a tracked handler was running")
-		default:
-		}
+		require.False(t, isClosed(returned), "shutdown returned while a listener was draining")
+		require.True(t, s.requests.add(), "a request was refused while the listeners were draining")
+		s.requests.done()
 
-		refused := httptest.NewRecorder()
-		handler.ServeHTTP(refused, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
-		require.Equal(t, http.StatusServiceUnavailable, refused.Code, "a request that arrives once the group is closed must be refused")
+		s.listeners.done()
+		synctest.Wait()
+		require.False(t, isClosed(returned), "shutdown returned while a request handler was running")
+		require.False(t, s.requests.add(), "a request that arrives once the listeners have stopped must not join the wait")
 
-		close(release)
-		<-served
-		require.Equal(t, http.StatusOK, running.Code)
-		require.True(t, <-waited)
+		s.requests.done()
+		<-returned
 	})
-}
-
-func TestStartListenerAfterShutdownStarted(t *testing.T) {
-	var g drainGroup
-	g.closeAndWait(context.Background())
-	port := freeTCPPorts(t, 1)[0]
-
-	srv := startListener(context.Background(), listenerConfig{
-		addr:          fmt.Sprintf("127.0.0.1:%d", port),
-		defaultRouter: &routerpkg.Router{},
-		readyCheck:    func() bool { return true },
-		group:         &g,
-	})
-	require.Nil(t, srv)
-
-	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	require.NoError(t, err, "no listener may be started once the router is shutting down")
-	l.Close()
 }
 
 func TestGatewayListenerNotStartedWhileShuttingDown(t *testing.T) {
 	s := &Server{Port: "8080"}
-	s.listeners.closeAndWait(context.Background())
+	s.listeners.closeAndWait()
 	lm := NewListenerManager(context.Background(), &routerpkg.Router{}, nil, s)
 
 	port := int32(freeTCPPorts(t, 1)[0])
@@ -695,11 +477,11 @@ func (s *blockingStore) HasModel(name string) bool {
 	return s.Store.HasModel(name)
 }
 
-// TestInferenceListenersTrackRequests checks that the default listener and
-// Gateway listeners count each request in Server.requests while its handler
-// runs, so that shutdown waits for it, and refuse requests once that group is
-// closed.
-func TestInferenceListenersTrackRequests(t *testing.T) {
+// TestInferenceListenersJoinDrainGroups checks that the default listener and
+// Gateway listeners stay in Server.listeners until they have drained, that each
+// request they serve is in Server.requests while its handler runs, and that
+// they refuse requests once that group is closed.
+func TestInferenceListenersJoinDrainGroups(t *testing.T) {
 	tests := []struct {
 		name    string
 		gateway bool
@@ -728,18 +510,17 @@ func TestInferenceListenersTrackRequests(t *testing.T) {
 			r := NewRouter(blocking, writeRouterConfig(t, t.TempDir()), common.NewTransportRegistry())
 
 			ctx, cancel := context.WithCancel(context.Background())
-			drainCtx, stopAfterDrain := context.WithCancel(context.Background())
-			s.startRouter(ctx, drainCtx, r, store)
+			s.startRouter(ctx, r, store)
 			t.Cleanup(func() {
 				release()
-				waitCtx, cancelWait := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancelWait()
+				cancel()
 				// The router's active-request count is shared by all tests, so
 				// the handler must have returned before the next test starts.
-				require.True(t, s.requests.closeAndWait(waitCtx), "the request handler did not return")
-				cancel()
-				require.True(t, s.listeners.closeAndWait(waitCtx), "the listener did not stop")
-				stopAfterDrain()
+				select {
+				case <-goWait(s.shutdown):
+				case <-time.After(10 * time.Second):
+					t.Error("the router did not stop")
+				}
 			})
 
 			addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
@@ -751,6 +532,10 @@ func TestInferenceListenersTrackRequests(t *testing.T) {
 				conn.Close()
 				return true
 			}, 5*time.Second, 10*time.Millisecond, "the listener never started")
+
+			listenersDone := goWait(s.listeners.closeAndWait)
+			require.Never(t, func() bool { return isClosed(listenersDone) }, 100*time.Millisecond, 10*time.Millisecond,
+				"the listener is not tracked, so shutdown would not wait for it")
 
 			slowDone := make(chan error, 1)
 			go func() {
@@ -768,14 +553,23 @@ func TestInferenceListenersTrackRequests(t *testing.T) {
 			}
 
 			// The handler is held in HasModel, so a wait for the requests cannot finish.
-			waitCtx, cancelWait := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer cancelWait()
-			require.False(t, s.requests.closeAndWait(waitCtx), "the running request is not tracked, so shutdown would not wait for it")
+			requestsDone := goWait(s.requests.closeAndWait)
+			require.Never(t, func() bool { return isClosed(requestsDone) }, 100*time.Millisecond, 10*time.Millisecond,
+				"the running request is not tracked, so shutdown would not wait for it")
+			require.Eventually(t, func() bool {
+				resp, err := http.Get("http://" + addr + "/v1/models")
+				if err != nil {
+					return false
+				}
+				resp.Body.Close()
+				return resp.StatusCode == http.StatusServiceUnavailable
+			}, 5*time.Second, 10*time.Millisecond, "a request that arrives once the group is closed must be refused")
 
-			resp, err := http.Get("http://" + addr + "/v1/models")
-			require.NoError(t, err)
-			resp.Body.Close()
-			require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, "a request that arrives once the group is closed must be refused")
+			// On SIGTERM the listener starts to drain, but the running request
+			// keeps its connection open.
+			cancel()
+			require.Never(t, func() bool { return isClosed(listenersDone) }, 100*time.Millisecond, 10*time.Millisecond,
+				"the listener left the group before it had drained")
 
 			release()
 			select {
@@ -784,6 +578,8 @@ func TestInferenceListenersTrackRequests(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("the request did not finish after its handler was released")
 			}
+			require.Eventually(t, func() bool { return isClosed(requestsDone) && isClosed(listenersDone) },
+				5*time.Second, 10*time.Millisecond, "the waits did not finish once the request had returned and the listener had drained")
 		})
 	}
 }
