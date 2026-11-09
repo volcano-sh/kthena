@@ -17,11 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -32,6 +34,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayclientset "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 	gatewaylisters "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1"
 
@@ -45,6 +48,7 @@ type HTTPRouteController struct {
 	httpRouteSynced cache.InformerSynced
 	namespaceSynced cache.InformerSynced
 	registration    cache.ResourceEventHandlerRegistration
+	gatewayClient   gatewayclientset.Interface
 
 	workqueue   workqueue.TypedRateLimitingInterface[any]
 	initialSync *atomic.Bool
@@ -55,6 +59,7 @@ func NewHTTPRouteController(
 	gatewayInformerFactory gatewayinformers.SharedInformerFactory,
 	kubeInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
+	gatewayClient gatewayclientset.Interface,
 ) (*HTTPRouteController, error) {
 	httpRouteInformer := gatewayInformerFactory.Gateway().V1().HTTPRoutes()
 	gatewayInformer := gatewayInformerFactory.Gateway().V1().Gateways()
@@ -66,6 +71,7 @@ func NewHTTPRouteController(
 		namespaceLister: namespaceInformer.Lister(),
 		httpRouteSynced: httpRouteInformer.Informer().HasSynced,
 		namespaceSynced: namespaceInformer.Informer().HasSynced,
+		gatewayClient:   gatewayClient,
 		workqueue:       workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
 		initialSync:     &atomic.Bool{},
 		store:           store,
@@ -212,7 +218,15 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 	if len(acceptedParentRefs) > 0 {
 		storedRoute := httpRoute.DeepCopy()
 		storedRoute.Spec.ParentRefs = acceptedParentRefs
-		return c.store.AddOrUpdateHTTPRoute(storedRoute)
+		if err := c.store.AddOrUpdateHTTPRoute(storedRoute); err != nil {
+			return err
+		}
+
+		// Update HTTPRoute status with Accepted=True and ResolvedRefs=True
+		if err := c.updateHTTPRouteStatus(httpRoute, acceptedParentRefs); err != nil {
+			klog.Errorf("Failed to update HTTPRoute %s/%s status: %v", namespace, name, err)
+		}
+		return nil
 	}
 	if gatewayPending {
 		return fmt.Errorf("gateway not synced yet")
@@ -363,4 +377,73 @@ func (c *HTTPRouteController) enqueueHTTPRoutesForNamespace(obj interface{}) {
 	for _, route := range routes {
 		c.workqueue.Add(fmt.Sprintf("%s/%s", route.Namespace, route.Name))
 	}
+}
+
+// updateHTTPRouteStatus patches the HTTPRoute status with Accepted=True and ResolvedRefs=True
+// for each accepted parent reference.
+func (c *HTTPRouteController) updateHTTPRouteStatus(httpRoute *gatewayv1.HTTPRoute, acceptedParentRefs []gatewayv1.ParentReference) error {
+	ctx := context.Background()
+
+	current, err := c.gatewayClient.GatewayV1().HTTPRoutes(httpRoute.Namespace).Get(ctx, httpRoute.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get httproute for status update: %w", err)
+	}
+
+	now := metav1.Now()
+	controllerName := gatewayv1.GatewayController(ControllerName)
+
+	var desiredParents []gatewayv1.RouteParentStatus
+	for _, parentRef := range acceptedParentRefs {
+		desiredParents = append(desiredParents, gatewayv1.RouteParentStatus{
+			ParentRef:      parentRef,
+			ControllerName: controllerName,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(gatewayv1.RouteConditionAccepted),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: current.Generation,
+					LastTransitionTime: now,
+					Reason:             string(gatewayv1.RouteReasonAccepted),
+					Message:            "Route is accepted by kthena-router controller",
+				},
+				{
+					Type:               string(gatewayv1.RouteConditionResolvedRefs),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: current.Generation,
+					LastTransitionTime: now,
+					Reason:             string(gatewayv1.RouteReasonResolvedRefs),
+					Message:            "All backend references are resolved",
+				},
+			},
+		})
+	}
+
+	// Check if status is already correct
+	if len(current.Status.Parents) == len(desiredParents) {
+		allCorrect := true
+		for i, p := range current.Status.Parents {
+			accepted := apimeta.FindStatusCondition(p.Conditions, string(gatewayv1.RouteConditionAccepted))
+			resolved := apimeta.FindStatusCondition(p.Conditions, string(gatewayv1.RouteConditionResolvedRefs))
+			if accepted == nil || accepted.Status != metav1.ConditionTrue ||
+				resolved == nil || resolved.Status != metav1.ConditionTrue {
+				allCorrect = false
+				break
+			}
+			_ = i
+		}
+		if allCorrect {
+			return nil
+		}
+	}
+
+	updated := current.DeepCopy()
+	updated.Status.Parents = desiredParents
+
+	_, err = c.gatewayClient.GatewayV1().HTTPRoutes(httpRoute.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update httproute status: %w", err)
+	}
+
+	klog.V(2).Infof("Updated HTTPRoute %s/%s status: Accepted=True, ResolvedRefs=True (%d parents)", httpRoute.Namespace, httpRoute.Name, len(desiredParents))
+	return nil
 }
