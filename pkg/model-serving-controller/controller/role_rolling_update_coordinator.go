@@ -156,9 +156,6 @@ func (c *ModelServingController) selectRoleRolloutCandidates(
 	role workloadv1alpha1.Role, instances, outdated []datastore.Role, budget rolloutBudget,
 	policy *roleRolloutGroupPolicy,
 ) ([]roleToDelete, error) {
-	if roleCoordination(ms) == nil {
-		return selectBudgetedRolesToDelete(role.Name, outdated, budget, false), nil
-	}
 	var pods []*corev1.Pod
 	if c.podsInformer != nil {
 		var err error
@@ -167,7 +164,16 @@ func (c *ModelServingController) selectRoleRolloutCandidates(
 			return nil, err
 		}
 	}
-	temporary := markedSurgeNames(pods, surgeRole, roleReplicas(role))
+	temporary := temporaryRoleNames(ms, pods, role)
+	missingFormal := len(instances)-temporary.Len() < roleReplicas(role)
+	if roleCoordination(ms) == nil {
+		if missingFormal {
+			outdated = slices.DeleteFunc(slices.Clone(outdated), func(instance datastore.Role) bool {
+				return instance.Status == datastore.RoleRunning && !temporary.Has(instance.Name)
+			})
+		}
+		return selectBudgetedRolesToDelete(role.Name, outdated, budget, false), nil
+	}
 	limits, _ := policy.role(role.Name)
 	remainingOld := len(outdated)
 	var selected []roleToDelete
@@ -206,6 +212,9 @@ func (c *ModelServingController) selectRoleRolloutCandidates(
 		}
 	}
 	stable, budget.total = policy.constrainRoleDeletion(role.Name, stable, budget.total)
+	if missingFormal {
+		budget.healthy = 0
+	}
 	selected = append(selected, selectBudgetedRolesToDelete(role.Name, stable, budget, true)...)
 	return selected, nil
 }

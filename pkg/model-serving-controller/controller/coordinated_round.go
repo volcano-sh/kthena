@@ -160,7 +160,7 @@ func (c *ModelServingController) coordinatedInPlaceStarted(ctx context.Context, 
 // without obtaining another start; a terminating or different incarnation may
 // not be adopted. Observed formal expansion counts against later replacements.
 func (c *ModelServingController) coordinatedCreationContext(ctx context.Context, ms *api.ModelServing, group string, desired, applied api.Role, ordinal int, revision string) (context.Context, error) {
-	if roleCoordination(ms) == nil || ms.ResourceVersion == "" {
+	if ms.ResourceVersion == "" || !isRoleRollingUpdate(ms) {
 		return ctx, nil
 	}
 	ctx = withCoordinatedRound(ctx, ms)

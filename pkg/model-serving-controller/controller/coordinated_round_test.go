@@ -361,6 +361,89 @@ func TestReadyEventSharesOneObservation(t *testing.T) {
 	}
 }
 
+func TestRolePlanningObservationsRefreshBetweenCalls(t *testing.T) {
+	ctx := context.Background()
+	ms := mergeReadyModelServing("role-planning-facts", 1, 1)
+	ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.RoleRollingUpdate}
+	for i := range ms.Spec.Template.Roles {
+		role := &ms.Spec.Template.Roles[i]
+		role.WorkerReplicas = 1
+		role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+	}
+	revision, key, group := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms), ms.Name+"-0"
+	c := newRevisionTestController(t, ms)
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	require.NoError(t, client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+	recordTestRevision(t, client, ms, revision)
+	c.store.AddServingGroup(key, 0, revision)
+	var entry, worker *corev1.Pod
+	for _, role := range ms.Spec.Template.Roles {
+		pods := addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))
+		if entry == nil {
+			entry, worker = pods[0].DeepCopy(), pods[1].DeepCopy()
+		}
+	}
+	for _, observation := range []string{"Ready", "worker NotReady", "foreign entry", "owned replacement"} {
+		switch observation {
+		case "worker NotReady":
+			worker = worker.DeepCopy()
+			worker.Status.Conditions[0].Status = corev1.ConditionFalse
+			_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+			require.NoError(t, err)
+		case "foreign entry":
+			worker = worker.DeepCopy()
+			worker.Status.Conditions[0].Status = corev1.ConditionTrue
+			_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(ctx, entry.Name, metav1.DeleteOptions{}))
+			entry = entry.DeepCopy()
+			entry.UID += "-replacement"
+			entry.OwnerReferences[0].UID = "another-owner"
+			_, err = client.CoreV1().Pods(ms.Namespace).Create(ctx, entry, metav1.CreateOptions{})
+			require.NoError(t, err)
+		case "owned replacement":
+			entry = entry.DeepCopy()
+			entry.OwnerReferences[0].UID = ms.UID
+			_, err := client.CoreV1().Pods(ms.Namespace).Update(ctx, entry, metav1.UpdateOptions{})
+			require.NoError(t, err)
+		}
+		// Keep the informer and datastore at their original Ready identities.
+		for _, planning := range []string{"comparison", "candidates"} {
+			client.ClearActions()
+			sg := datastore.ServingGroup{Name: group, Revision: revision}
+			if planning == "comparison" {
+				want := templateEquivalent
+				if observation == "foreign entry" {
+					want = templateUnknown
+				}
+				require.Equal(t, want, c.compareServingGroupTemplate(ctx, ms, sg, revision), observation)
+			} else {
+				selected, outdated, err := c.rolesToDeleteForRoleRollingUpdateInRound(ctx, ms, sg, nil)
+				require.NoError(t, err)
+				require.Empty(t, selected, "current or unresolved identities must not be deleted")
+				require.Equal(t, observation == "foreign entry", outdated, observation)
+			}
+			lists, gets := 0, 0
+			for _, action := range client.Actions() {
+				if action.GetResource().Resource == "pods" {
+					require.Contains(t, []string{"get", "list"}, action.GetVerb(), "planning must not mutate Pods")
+				}
+				if action.Matches("list", "pods") {
+					lists++
+				}
+				if action.Matches("get", "controllerrevisions") {
+					gets++
+				}
+			}
+			require.Equal(t, 1, lists, planning+": each call shares only its own Pod observation")
+			require.Equal(t, 1, gets, planning+": common immutable history is read once")
+		}
+		actual, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, entry.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, entry.UID, actual.UID)
+	}
+}
+
 func TestCoordinatedRoundReusesReadsAndRefreshesLiveFactsBetweenRounds(t *testing.T) {
 	ms := mergeReadyModelServing("round-facts", 1, 1)
 	c := newRevisionTestController(t, ms)

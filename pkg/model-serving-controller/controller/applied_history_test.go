@@ -545,6 +545,16 @@ func TestAppliedHistoryErrorDoesNotShrinkReadySurge(t *testing.T) {
 				}
 				for name, uid := range seedAppliedRole(t, c, workload, workload.Spec.Template.Roles[0], ordinal, 0, revision, -1) {
 					uids[name] = uid
+					if ordinal == 2 {
+						// This fixture is actual rollout surge, not an unmarked high
+						// binpack survivor; preserve its explicit temporary origin.
+						pod, err := c.kubeClientSet.CoreV1().Pods(current.Namespace).Get(context.Background(), name, metav1.GetOptions{})
+						require.NoError(t, err)
+						setSurgeScope(pod, surgeServingGroup)
+						_, err = c.kubeClientSet.CoreV1().Pods(current.Namespace).Update(context.Background(), pod, metav1.UpdateOptions{})
+						require.NoError(t, err)
+						require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+					}
 				}
 				group := utils.GenerateServingGroupName(current.Name, ordinal)
 				require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(current), group, "decode", "decode-0", datastore.RoleRunning))

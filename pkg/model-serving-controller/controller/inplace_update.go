@@ -409,7 +409,7 @@ func (c *ModelServingController) completeInPlaceUpdates(ctx context.Context, ms 
 		}
 		return err
 	}
-	roleMode := ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate
+	roleMode := isRoleRollingUpdate(ms)
 	for _, sg := range groups {
 		if sg.Status == datastore.ServingGroupDeleting {
 			continue

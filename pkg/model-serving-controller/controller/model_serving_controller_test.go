@@ -2493,6 +2493,46 @@ func TestScaleUpServingGroupsStopsWhenControllerRevisionCreationFails(t *testing
 	assert.Empty(t, pods.Items)
 }
 
+// TestScaleUpServingGroupsRepairsCreateErrorAfterPersist covers an API error
+// returned for an entry Pod that was nevertheless persisted, e.g. an etcd
+// timeout. The untracked Pod must not occupy its ordinal; the next sync
+// recreates the same ServingGroup and completes its missing members.
+func TestScaleUpServingGroupsRepairsCreateErrorAfterPersist(t *testing.T) {
+	ms := createStandardModelServing("persisted-create-error", 1, 1)
+	ms.UID = "persisted-create-error-uid"
+	ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate}
+	ms.Spec.Template.Roles[0].WorkerReplicas = 2
+	ms.Spec.Template.Roles[0].WorkerTemplate = ms.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+	c := newRevisionTestController(t, ms)
+	c.initialSync.Store(true)
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	injected := false
+	client.PrependReactor("create", "pods", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		if injected {
+			return false, nil, nil
+		}
+		injected = true
+		pod := action.(kubetesting.CreateAction).GetObject().(*corev1.Pod)
+		require.NoError(t, client.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"), pod.DeepCopy(), pod.Namespace))
+		return true, nil, fmt.Errorf("etcdserver: request timed out")
+	})
+	key := utils.GetNamespaceName(ms).String()
+
+	require.ErrorContains(t, c.syncModelServing(context.Background(), key), "request timed out")
+	pods, err := client.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 1)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(&pods.Items[0]))
+
+	require.NoError(t, c.syncModelServing(context.Background(), key))
+	pods, err = client.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, pods.Items, 3, "entry and both workers of the persisted ServingGroup")
+	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	assert.Len(t, groups, 1)
+}
+
 // TestScaleUpRoles tests the scaleUpRoles function with various scenarios
 func TestScaleUpRoles(t *testing.T) {
 	tests := []struct {
@@ -8138,6 +8178,18 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
 	}
 
+	// The informer is not running; deliver the created Pods, including their
+	// surge markers, before each reconcile step.
+	observePods := func() {
+		pods, err := controller.kubeClientSet.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+		require.NoError(t, err)
+		objects := make([]interface{}, 0, len(pods.Items))
+		for i := range pods.Items {
+			objects = append(objects, &pods.Items[i])
+		}
+		require.NoError(t, controller.podsInformer.GetIndexer().Replace(objects, ""))
+	}
+
 	groups, err := controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
 	require.NoError(t, controller.manageRollingUpdateWithPolicy(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
@@ -8154,12 +8206,14 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 
 	// An unready surge consumes its slot but cannot authorize deletion when
 	// maxUnavailable is zero.
+	observePods()
 	require.NoError(t, controller.manageRollingUpdateWithPolicy(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 	for ordinal := 0; ordinal < 2; ordinal++ {
 		assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal)))
 	}
 
 	require.NoError(t, controller.store.UpdateServingGroupStatus(key, surgeName, datastore.ServingGroupRunning))
+	observePods()
 	require.NoError(t, controller.manageRollingUpdateWithPolicy(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 
 	// The highest outdated group is replaced first while the temporary capacity
@@ -8168,23 +8222,32 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, groups, 2)
 	assert.Equal(t, surgeName, groups[1].Name)
+	observePods()
 	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
 	require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 1), datastore.ServingGroupRunning))
 
+	observePods()
 	require.NoError(t, controller.manageRollingUpdateWithPolicy(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 
-	// Once all remaining groups use the new revision, replica synchronization
-	// derives the normal desired count. The high ordinal remains a normal replica
-	// rather than being identified and removed as a surge group.
+	// SG contract 0.6/C14: the temporary high ordinal cannot replace missing
+	// formal slot0. Refill slot0, then retire surge only after it is Ready.
+	observePods()
 	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
 	groups, err = controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
-	require.Len(t, groups, 2)
-	for _, group := range groups {
-		assert.Equal(t, "new-revision", group.Revision)
+	require.Len(t, groups, 3)
+	assert.Equal(t, "surge-test-0", groups[0].Name)
+	require.NoError(t, controller.store.UpdateServingGroupStatus(key, "surge-test-0", datastore.ServingGroupRunning))
+	observePods()
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
+	assert.Equal(t, datastore.ServingGroupDeleting, controller.store.GetServingGroupStatus(key, surgeName))
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		name := utils.GenerateServingGroupName(ms.Name, ordinal)
+		assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, name))
+		revision, found := controller.store.GetServingGroupRevision(key, name)
+		assert.True(t, found)
+		assert.Equal(t, "new-revision", revision)
 	}
-	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 1), groups[0].Name)
-	assert.Equal(t, surgeName, groups[1].Name)
 }
 
 func TestManageRollingUpdateIncludesSurgeStatusInMaxScaleDown(t *testing.T) {
