@@ -298,6 +298,50 @@ func TestReplacementPodIsPreservedAndDiagnosedDuringCleanupRetry(t *testing.T) {
 	}
 }
 
+// A worker sync can observe a deleted Pod live and recreate it while the
+// informer callback is still handling that deletion. The recreated Pod must be
+// part of the recovery instead of a replacement that leaves the unit Deleting.
+func TestPodDeletionRecoveryIncludesPodRecreatedByInFlightSync(t *testing.T) {
+	for _, policy := range []workload.RecoveryPolicy{workload.RoleRecreate, workload.ServingGroupRecreate} {
+		t.Run(string(policy), func(t *testing.T) {
+			c, client, ms, svc := auxiliaryFixture(t)
+			ms.Spec.RecoveryPolicy = policy
+			nsn := utils.GetNamespaceName(ms)
+			c.store.AddRole(nsn, "cleanup-0", "infer", "infer-0", "v1", "hash")
+			deleted := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "member", Namespace: ms.Namespace, UID: "deleted", Labels: svc.Labels, OwnerReferences: svc.OwnerReferences}}
+			recreated := deleted.DeepCopy()
+			recreated.UID = "recreated"
+			syncCreated := false
+			createBySync := func() {
+				syncCreated = true
+				require.NoError(t, client.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"), recreated.DeepCopy(), ms.Namespace))
+				require.NoError(t, c.podsInformer.GetIndexer().Add(recreated))
+			}
+			// Land the in-flight create right after the first deletion snapshot.
+			client.PrependReactor("list", "pods", func(a kt.Action) (bool, runtime.Object, error) {
+				if syncCreated {
+					return false, nil, nil
+				}
+				handled, list, err := kt.ObjectReaction(client.Tracker())(a)
+				createBySync()
+				return handled, list, err
+			})
+
+			require.NoError(t, c.handleDeletedPod(ms, "cleanup-0", deleted))
+			if !syncCreated {
+				createBySync()
+			}
+			require.NoError(t, c.finishPendingDeletions(context.Background(), ms))
+			_, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), recreated.Name, metav1.GetOptions{})
+			require.True(t, apierrors.IsNotFound(err), "the Pod recreated by the in-flight sync must be recovered with its unit")
+
+			require.NoError(t, c.podsInformer.GetIndexer().Delete(recreated))
+			require.NoError(t, c.finishPendingDeletions(context.Background(), ms))
+			require.Equal(t, datastore.RoleNotFound, c.store.GetRoleStatus(nsn, "cleanup-0", "infer", "infer-0"))
+		})
+	}
+}
+
 func TestSparseOrphanCleanupRequiresStableSurvivingCapacity(t *testing.T) {
 	for _, layer := range []string{"group", "role"} {
 		for _, state := range []string{"stable", "deficient", "creating", "deleting", "pod-missing", "worker-missing", "terminating", "not-ready", "in-place", "foreign-pod", "target-creating", "target-pod"} {

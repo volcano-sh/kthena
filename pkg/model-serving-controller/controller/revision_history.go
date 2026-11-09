@@ -492,7 +492,7 @@ func (c *ModelServingController) compareRoleTemplate(
 	if desired == nil {
 		return templateDifferent
 	}
-	if roleCoordination(ms) != nil && ms.ResourceVersion != "" {
+	if ms.ResourceVersion != "" && isRoleRollingUpdate(ms) {
 		live, pod, err := c.coordinatedLiveRole(ctx, ms, servingGroup.Name, roleName, observed)
 		if err != nil || pod == nil || pod.DeletionTimestamp != nil {
 			return templateUnknown

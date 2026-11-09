@@ -30,6 +30,7 @@ import (
 
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -62,9 +63,10 @@ func (c *ModelServingController) coordinatedLiveRole(ctx context.Context, ms *ap
 }
 
 func (c *ModelServingController) refreshCoordinatedAvailabilityInRound(ctx context.Context, ms *api.ModelServing) error {
-	if roleCoordination(ms) == nil || ms.ResourceVersion == "" {
+	if ms.ResourceVersion == "" || !isRoleRollingUpdate(ms) {
 		return nil
 	}
+	ctx = ensureObservationRound(ctx, ms)
 	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err == datastore.ErrServingGroupNotFound {
 		return nil
@@ -87,7 +89,12 @@ func (c *ModelServingController) refreshCoordinatedAvailabilityInRound(ctx conte
 				}
 				ready, err := c.checkRoleReadyInRound(ctx, ms, group.Name, name, instance.Name)
 				if err != nil {
-					return err
+					if roleCoordination(ms) != nil || !onlyRevisionErrors(err) {
+						return err
+					}
+					// An independent unit's unknown history must not block explicit
+					// shrink or other Roles. Retain its unavailable state and retry.
+					c.revisionHistory(ctx, ms).recordComparisonError(group.Name+"/"+instance.Name, err)
 				}
 				status := datastore.RoleCreating
 				if ready {
@@ -100,6 +107,10 @@ func (c *ModelServingController) refreshCoordinatedAvailabilityInRound(ctx conte
 				}
 				if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), group.Name, name, instance.Name, status); err != nil {
 					return err
+				}
+				if instance.Status != status {
+					message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now %s", name, instance.Name, group.Name, status)
+					c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "Role"+string(status), message)
 				}
 			}
 		}
@@ -125,6 +136,75 @@ func (b *rolloutBudget) take(ready bool) bool {
 	}
 	return true
 }
+
+// observeServingGroups replaces cached ServingGroup states with one physical
+// observation, because the datastore can lag a readiness change or a
+// replacement incarnation. A group whose Pods are terminating or updating in
+// place is reported as Deleting: it occupies capacity but is not a candidate.
+func (c *ModelServingController) observeServingGroups(ctx context.Context, ms *api.ModelServing, groups []datastore.ServingGroup) ([]datastore.ServingGroup, error) {
+	var pods []*corev1.Pod
+	if ms.ResourceVersion != "" {
+		ctx = ensureObservationRound(ctx, ms)
+		var err error
+		if pods, err = c.coordinatedPods(ctx, ms, labels.Everything()); err != nil {
+			return nil, err
+		}
+	}
+	observed := slices.Clone(groups)
+	for i := range observed {
+		group := &observed[i]
+		if group.Status == datastore.ServingGroupDeleting || c.rolloutDeletionPending(ms, group.Name, "", "") {
+			group.Status = datastore.ServingGroupDeleting
+			continue
+		}
+		if ms.ResourceVersion == "" {
+			continue
+		}
+		for _, pod := range pods {
+			if pod.Labels[api.GroupNameLabelKey] != group.Name {
+				continue
+			}
+			if pod.DeletionTimestamp != nil || inplace.StateOf(pod).InProgress() {
+				group.Status = datastore.ServingGroupDeleting
+			}
+			if utils.ObjectRevision(pod) != group.Revision {
+				// A cached old revision never authorizes deleting a replacement.
+				group.Revision = ""
+			}
+		}
+		if group.Status == datastore.ServingGroupDeleting {
+			continue
+		}
+		ready, err := c.checkServingGroupReadyWithContext(ctx, ms, group.Name)
+		group.Status = datastore.ServingGroupCreating
+		if ready && err == nil && group.Revision != "" {
+			group.Status = datastore.ServingGroupRunning
+		}
+	}
+	return observed, nil
+}
+
+// servingGroupRolloutBudget counts every group, including partition-protected
+// groups and surge. A committed deletion still occupies capacity and its
+// allowance until it disappears.
+func (c *ModelServingController) servingGroupRolloutBudget(ctx context.Context, ms *api.ModelServing, groups []datastore.ServingGroup, revision string) (rolloutBudget, error) {
+	u, err := utils.GetMaxUnavailable(ms)
+	if err != nil {
+		return rolloutBudget{}, err
+	}
+	ready, unavailable := 0, 0
+	for _, group := range groups {
+		if group.Status == datastore.ServingGroupDeleting {
+			unavailable++
+		} else if group.Status == datastore.ServingGroupRunning {
+			ready++
+		} else if c.compareServingGroupTemplate(ctx, ms, group, revision) != templateDifferent {
+			unavailable++
+		}
+	}
+	return newRolloutBudget(modelServingReplicas(ms), u, len(groups), ready, unavailable), nil
+}
+
 func roleRolloutBudget(role api.Role, instances []datastore.Role, unavailable int) (rolloutBudget, error) {
 	u, configured, err := utils.GetMaxUnavailableForRole(role)
 	if err != nil {
@@ -159,7 +239,11 @@ func (c *ModelServingController) rolloutDeletionPending(ms *api.ModelServing, gr
 	if c.podsInformer == nil {
 		return false
 	}
-	pods, err := c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, role, instance))
+	index, key := GroupNameKey, ms.Namespace+"/"+group
+	if role != "" {
+		index, key = RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, role, instance)
+	}
+	pods, err := c.getPodsByIndex(index, key)
 	if err != nil {
 		return true
 	}

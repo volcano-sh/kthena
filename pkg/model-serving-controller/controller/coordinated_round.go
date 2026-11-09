@@ -32,8 +32,8 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
-// A round belongs to one sync and one owner, never to the controller or its
-// event handlers. Read errors are retained only until that sync ends.
+// A round belongs to one observation and one owner, never to the controller.
+// Read errors are retained only until that observation ends.
 type coordinatedRound struct {
 	history    *revisionHistory
 	owner      types.UID
@@ -60,6 +60,15 @@ func withCoordinatedRound(ctx context.Context, ms *api.ModelServing) context.Con
 	if roleCoordination(ms) == nil || ms.ResourceVersion == "" {
 		return ctx
 	}
+	return withObservationRound(ctx, ms)
+}
+
+// An observation is local to one readiness check or planning/action round.
+// Callers start a fresh round before using later live facts.
+func withObservationRound(ctx context.Context, ms *api.ModelServing) context.Context {
+	if ms.ResourceVersion == "" {
+		return ctx
+	}
 	return context.WithValue(ctx, coordinatedRoundKey{}, &coordinatedRound{owner: ms.UID, revisions: make(map[string]coordinatedRevision), snapshots: make(map[string]controllerRevisionObservation)})
 }
 
@@ -77,6 +86,15 @@ func (c *ModelServingController) controllerRevisionInRound(ctx context.Context, 
 		round.snapshots[revision] = controllerRevisionObservation{revision: cr, err: err}
 	}
 	return cr, err
+}
+
+// ensureObservationRound reuses the caller's round or starts one, so that the
+// reads of a single check share one Pod list.
+func ensureObservationRound(ctx context.Context, ms *api.ModelServing) context.Context {
+	if coordinatedRoundOf(ctx, ms) != nil {
+		return ctx
+	}
+	return withObservationRound(ctx, ms)
 }
 
 func coordinatedRoundOf(ctx context.Context, ms *api.ModelServing) *coordinatedRound {
