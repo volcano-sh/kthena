@@ -117,6 +117,7 @@ type ModelServingController struct {
 	recorder        record.EventRecorder
 	podDeletions    sync.Map // key: auxiliaryCleanupKey; value: *podDeletionTargets
 	roleCleanups    sync.Map // key: auxiliaryCleanupKey; value: *plugins.RoleCleanup
+	rolloutFailures rolloutFailureRecorder
 }
 
 func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
@@ -621,6 +622,10 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		// explicit replica decrease is safe without a new template, so retain that
 		// path and return the revision error to keep workqueue retries active.
 		return errors.Join(fmt.Errorf("resolve desired revision: %w", err), c.scaleDownOnRevisionError(ctx, ms))
+	}
+	// A recorded rollback rewrites the spec; the resulting update event drives the rollout back.
+	if applied, err := c.applyPendingRollback(ctx, ms, revision); err != nil || applied {
+		return err
 	}
 	if err := c.persistCoordinatedRoleRevision(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to persist coordinated Role revision: %v", err)
@@ -1687,6 +1692,11 @@ func (c *ModelServingController) manageRollingUpdateWithPolicy(
 			return err
 		}
 	}
+	// A failed rollout must not replace more healthy outdated units with the failed revision.
+	if rolloutHalted(ms, revision) {
+		klog.V(4).Infof("Rollout of ModelServing %s/%s to revision %s is halted after a failure", ms.Namespace, ms.Name, revision)
+		return nil
+	}
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
@@ -2148,6 +2158,7 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 	// None: leave a restarted, still-alive pod to the kubelet (do not delete it),
 	// but mark it unavailable. A terminal PodFailed pod falls through to deletion.
 	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy && inplace.UnexpectedRestart(errPod) && !utils.IsPodFailed(errPod) {
+		c.recordRolloutFailure(ms, errPod)
 		if err := c.markPodUnavailable(ms, servingGroupName, errPod); err != nil {
 			klog.Warningf("mark pod %s unavailable: %v", errPod.Name, err)
 		}
@@ -2162,6 +2173,7 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 		klog.V(4).Infof("Pod %v already in grace period", key)
 		return nil
 	}
+	c.recordRolloutFailure(ms, errPod)
 	if err := c.markPodUnavailable(ms, servingGroupName, errPod); err != nil {
 		c.graceMap.Delete(key)
 		return err
@@ -2620,6 +2632,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			return fmt.Errorf("failed to resolve rollout partition: %v", partitionErr)
 		}
 		available, updated := 0, 0
+		var readyUpdated int32
 		progressingGroups, updatedGroups, currentGroups := []int{}, []int{}, []int{}
 		// Track revision counts to determine the most common non-updated revision (CurrentRevision)
 		revisionCount := make(map[string]int)
@@ -2652,8 +2665,10 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 				continue
 			}
 
+			groupAvailable := false
 			if group.Status == datastore.ServingGroupRunning && roleCoordination(latestMS) == nil {
 				available = available + 1
+				groupAvailable = true
 			} else if ok, err := c.checkServingGroupReadyWithContext(ctx, latestMS, group.Name); ok && err == nil {
 				// some scenarios, pod events may not trigger group status updates, such as role scaling down.
 				err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(latestMS), group.Name, datastore.ServingGroupRunning)
@@ -2661,6 +2676,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 					return fmt.Errorf("failed to set servingGroup %s status: %v", group.Name, err)
 				}
 				available = available + 1
+				groupAvailable = true
 				klog.V(2).Infof("Update servingGroup %s status to Running", group.Name)
 			} else {
 				if roleCoordination(latestMS) != nil && group.Status == datastore.ServingGroupRunning {
@@ -2674,6 +2690,9 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			if c.compareServingGroupTemplate(ctx, latestMS, group, revision) == templateEquivalent {
 				updated = updated + 1
 				updatedGroups = append(updatedGroups, ordinal)
+				if groupAvailable {
+					readyUpdated++
+				}
 			} else {
 				currentGroups = append(currentGroups, ordinal)
 				// Count revisions for non-updated groups to find the most common one
@@ -2803,11 +2822,19 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			copy.Status.LabelSelector = selector
 		}
 
+		units := rolloutUnits{target: int32(updated), ready: readyUpdated}
+		if rolloutFailurePolicy(latestMS) != nil && latestMS.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate {
+			units = c.countRoleRolloutUnits(ctx, latestMS, groups)
+		}
+		rolloutEval := c.evaluateRollout(ctx, latestMS, copy, revision, units, rolloutComplete)
+		shouldUpdate = shouldUpdate || rolloutEval.changed
+
 		if shouldUpdate {
 			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
 			if err != nil {
 				return err
 			}
+			c.finishRolloutEvaluation(latestMS, rolloutEval, true)
 			if coordinationConditionChanged && coordinationCondition != nil {
 				eventType := corev1.EventTypeNormal
 				if coordinationCondition.Status == metav1.ConditionTrue {
@@ -2821,6 +2848,8 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 					klog.Warningf("Failed to cleanup old ControllerRevisions after updating revision status for ModelServing %s/%s: %v", copy.Namespace, copy.Name, cleanupErr)
 				}
 			}
+		} else {
+			c.finishRolloutEvaluation(latestMS, rolloutEval, false)
 		}
 
 		return nil

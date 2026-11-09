@@ -438,6 +438,29 @@ spec:
 A ModelServing with a single `ServingGroup` and a single Role replica (`replicas: 1` and the Role's `replicas: 1`) is also supported. An in-place update takes that `ServingGroup` out of service, so the service is unavailable until it is Ready on the new image. If this interruption is not acceptable, set `maxUnavailable: 0` and `maxSurge: 1` so that the `ServingGroup` is recreated next to a surge `ServingGroup` instead, or run more than one `ServingGroup`.
 :::
 
+### Rollout Failure Handling
+
+By default, a rollout whose new revision never becomes Ready waits indefinitely. Set `failurePolicy` to detect a stalled rollout and act on it:
+
+```yaml
+spec:
+  rolloutStrategy:
+    type: ServingGroupRollingUpdate
+    progressDeadlineSeconds: 1800
+    failurePolicy:
+      action: Rollback   # or Halt
+```
+
+- A rollout fails when no `ServingGroup`, or Role instance under `RoleRollingUpdate`, is created or becomes Ready on the new revision for `progressDeadlineSeconds` while one of them has not been Ready yet. Recreating a crashed unit does not count as progress, and a unit that was Ready and then fails is left to `recoveryPolicy`.
+- The controller then decides who is to blame. Crashes, image pull and container config errors, failed Pods, and Pods that run but never become Ready point to the new revision (`WorkloadFailure`). Unschedulable Pods, evictions and missing revision history point to the environment (`InfrastructureBlocked`).
+- `Halt` reports the failure in the `RolloutFailed` condition and stops replacing healthy outdated units with the failed revision. Recovery and scaling continue. The halt lifts once a new unit becomes Ready or the spec changes.
+- `Rollback` also restores the Role templates of `status.currentRevision`, the last revision whose rollout completed, but only for a `WorkloadFailure`. Replicas, rollout settings, plugins and metadata are kept, and the restored spec rolls out with your rollout strategy. A failed revision is rolled back at most once until another rollout completes, and a rollback that stalls itself halts with reason `RollbackFailed`.
+- `status.rolloutProgress` and `status.lastRollback` record the tracked rollout and the most recent rollback, and each transition emits an event.
+
+:::note
+`Rollback` writes the ModelServing spec with the field manager `kthena-rollback`. If a GitOps tool manages the ModelServing, it may re-apply the failed revision. That revision then halts on its next failure instead of rolling back again. Use `Halt` if Git must stay the only writer.
+:::
+
 ## Gang Scheduling and Network Topology
 
 Gang scheduling is a feature that allows pods to be scheduled together. This is useful when you have a set of pods that need to be scheduled together. For example, you may have a set of pods that need to be scheduled together because they are pods of the same model.
