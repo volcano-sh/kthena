@@ -30,15 +30,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
-const (
-	defaultDrainTimeout = 5 * time.Minute
-	// defaultHandlerExitTimeout bounds how long Run waits for request handlers
-	// to return after the listeners have stopped. Handlers of connections that
-	// were force-closed at the drain timeout still have to run their cleanup,
-	// such as releasing the pod's on-flight count in Redis, before the process
-	// exits.
-	defaultHandlerExitTimeout = 5 * time.Second
-)
+const defaultDrainTimeout = 5 * time.Minute
 
 // Configuration sources the router can read ModelRoute, ModelServer and
 // ExternalModelProvider objects from.
@@ -78,10 +70,6 @@ type Server struct {
 	RouterConfigFile string
 	// drainTimeout is HTTP server shutdown grace; not datastore state.
 	drainTimeout time.Duration
-	// handlerExitTimeout bounds the wait for request handlers once the
-	// listeners have stopped. NewServer sets it to defaultHandlerExitTimeout;
-	// it is a field only so that tests can shorten it.
-	handlerExitTimeout time.Duration
 	// listeners tracks the inference listeners so Run can wait for them to drain.
 	listeners drainGroup
 	// requests tracks the requests the inference listeners serve, so Run can
@@ -105,7 +93,6 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 		KubeAPIBurst:                       kubeAPIBurst,
 		ConfigSource:                       ConfigSourceKubernetes,
 		drainTimeout:                       parseDrainTimeout(),
-		handlerExitTimeout:                 defaultHandlerExitTimeout,
 	}
 }
 
@@ -155,40 +142,33 @@ func (s *Server) Run(ctx context.Context) {
 		klog.Fatalf("Failed to sync controllers")
 	}
 	klog.Infof("Controllers have synced, starting store periodic update loop")
-	// drainCtx is cancelled only after the inference listeners have drained.
-	// The store's background loops, such as the request queue dispatch, and the
-	// management servers run on it, so requests queued at shutdown are still
-	// admitted and the drain stays observable.
-	drainCtx, stopAfterDrain := context.WithCancel(context.Background())
-	defer stopAfterDrain()
-	store.Run(drainCtx)
+	// The store's loops, such as the dispatch of the fairness and session-boost
+	// queues, run until Run returns, so that requests still queued at shutdown
+	// are admitted while the listeners drain.
+	storeCtx, stopStore := context.WithCancel(context.Background())
+	defer stopStore()
+	store.Run(storeCtx)
 	// start router
-	s.startRouter(ctx, drainCtx, r, store)
+	s.startRouter(ctx, r, store)
 
 	// Block until context is cancelled to keep the process running
 	klog.Info("Router server started, waiting for shutdown signal...")
 	<-ctx.Done()
 	klog.Info("Router server shutting down...")
-	s.shutdown(stopAfterDrain)
+	s.shutdown()
 }
 
 // shutdown returns once the inference listeners have drained, or have been
-// force-closed after the drain timeout, and their request handlers have
-// returned or handlerExitTimeout has passed. Only then does it stop what runs on
-// drainCtx. main() exits as soon as Run returns, so in-flight requests must be
-// finished by then.
-func (s *Server) shutdown(stopAfterDrain context.CancelFunc) {
-	s.listeners.closeAndWait(context.Background())
+// force-closed at the drain timeout, and every request handler has returned.
+// main() exits as soon as Run returns.
+func (s *Server) shutdown() {
+	// A listener has drained once its connections are closed, which happens
+	// only after their responses have been completely written.
+	s.listeners.closeAndWait()
 	// http.Server.Close does not wait for handlers to return. Handlers of
 	// connections force-closed at the drain timeout still run their cleanup,
 	// such as releasing the pod's on-flight count in Redis.
-	ctx, cancel := context.WithTimeout(context.Background(), s.handlerExitTimeout)
-	defer cancel()
-	if !s.requests.closeAndWait(ctx) {
-		klog.Warningf("Request handlers still running %v after the listeners stopped, exiting anyway",
-			s.handlerExitTimeout)
-	}
-	stopAfterDrain()
+	s.requests.closeAndWait()
 	klog.Info("Router server stopped")
 }
 

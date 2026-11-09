@@ -22,7 +22,7 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.accessLog.format | string | `"text"` | Access-log format. Supported values are `text` and `json`. |
 | networking.kthenaRouter.accessLog.output | string | `"stdout"` | Access-log destination: `stdout`, `stderr`, or a file path. |
 | networking.kthenaRouter.debugPort | int | `15000` | Debug server port for Kthena Router (localhost only). |
-| networking.kthenaRouter.drainTimeout | string | `"5m"` | Keep it more than 5s below terminationGracePeriodSeconds: after the drain timeout, the router can take up to 5s more to clean up the requests it force-closed. |
+| networking.kthenaRouter.drainTimeout | string | `"5m"` | This should be less than terminationGracePeriodSeconds. |
 | networking.kthenaRouter.enabled | bool | `true` | Enable Kthena Router. |
 | networking.kthenaRouter.fairness.enabled | bool | `false` | Enable user-fairness scheduling. Mutually exclusive with sessionBoost. |
 | networking.kthenaRouter.fairness.inputTokenWeight | float | `1` | User-fairness strategy: weight multiplier for input tokens. |
