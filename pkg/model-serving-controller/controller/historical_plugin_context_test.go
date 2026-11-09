@@ -557,6 +557,9 @@ func TestCurrentV1CreationKeepsPodAndStoreHashAligned(t *testing.T) {
 			outdated, _ := c.outdatedRoles(ms, sg, ms.Spec.Template.Roles[0], roles)
 			require.Empty(t, outdated)
 			require.Empty(t, c.findOutdatedRolesInServingGroups(ms, []datastore.ServingGroup{sg}, revision))
+			pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+			_, err = client.CoreV1().Pods(ms.Namespace).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+			require.NoError(t, err)
 			require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
 			require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), sg.Name, "infer", "infer-0", datastore.RoleRunning))
 			require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), sg.Name, datastore.ServingGroupRunning))

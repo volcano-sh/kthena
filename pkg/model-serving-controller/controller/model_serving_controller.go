@@ -2676,6 +2676,62 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 	return c.updateModelServingStatus(ms, revision, rolloutPolicy)
 }
 
+// rolloutCompleted reobserves every physical member before promoting an
+// otherwise complete, nonempty rollout to the new historical baseline.
+func (c *ModelServingController) rolloutCompleted(ctx context.Context, ms *workloadv1alpha1.ModelServing, groups []datastore.ServingGroup) (bool, error) {
+	// The status projection may contain observations from different ages.
+	ctx = withObservationRound(ctx, ms)
+	pods, err := c.coordinatedPods(ctx, ms, labels.Everything())
+	if err != nil {
+		return false, err
+	}
+	for _, pod := range pods {
+		if utils.HasDeletionScope(pod) {
+			return false, nil
+		}
+		scope := pod.Annotations[surgeAnnotation]
+		if scope != surgeRole && scope != surgeServingGroup {
+			continue
+		}
+		name, desired := pod.Labels[workloadv1alpha1.GroupNameLabelKey], modelServingReplicas(ms)
+		if scope == surgeRole {
+			name, desired = utils.GetRoleID(pod), 0
+			for _, role := range ms.Spec.Template.Roles {
+				if role.Name == utils.GetRoleName(pod) {
+					desired = roleReplicas(role)
+				}
+			}
+		}
+		if _, ordinal := utils.GetParentNameAndOrdinal(name); ordinal >= desired {
+			return false, nil
+		}
+	}
+	expectedPods := 0
+	for _, group := range groups {
+		for _, desired := range ms.Spec.Template.Roles {
+			instances, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group.Name, desired.Name)
+			if err != nil || len(instances) != roleReplicas(desired) {
+				return false, nil
+			}
+			for _, instance := range instances {
+				if ms.ResourceVersion != "" {
+					observed, entry, err := c.coordinatedLiveRole(ctx, ms, group.Name, desired.Name, instance)
+					if err != nil || entry == nil {
+						return false, nil
+					}
+					instance = observed
+				}
+				applied, revision, _, err := c.appliedRoleTemplate(ctx, ms, group.Name, desired.Name, instance)
+				if err != nil || instance.Status == datastore.RoleDeleting || !rolePodsComplete(ms, group.Name, instance.Name, applied, revision, pods, true) {
+					return false, nil
+				}
+				expectedPods += 1 + int(applied.WorkerReplicas)
+			}
+		}
+	}
+	return expectedPods == len(pods), nil
+}
+
 func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
 	revision string,
@@ -2690,46 +2746,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 
 		// Calculate status based on latestMS
 		groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(latestMS))
-		if err != nil || (len(groups) == 0 && roleCoordination(latestMS) != nil && modelServingReplicas(latestMS) == 0) {
-			// If no groups exist, handle gracefully by setting revisions to the new revision
-			if err == nil || errors.Is(err, datastore.ErrServingGroupNotFound) {
-				copy := latestMS.DeepCopy()
-				selectorSet := labels.Set{
-					workloadv1alpha1.ModelServingNameLabelKey: latestMS.Name,
-					workloadv1alpha1.EntryLabelKey:            utils.Entry,
-				}
-				if len(latestMS.Spec.Template.Roles) > 0 {
-					roleName := latestMS.Spec.Template.Roles[0].Name
-					selectorSet[workloadv1alpha1.RoleLabelKey] = roleName
-					selectorSet[workloadv1alpha1.RoleIDKey] = utils.GenerateRoleID(roleName, 0)
-				}
-				selector := selectorSet.String()
-				conditionChanged, _ := rolloutPolicy.setCondition(copy)
-				currentRevision := revision
-				if roleCoordination(latestMS) != nil && modelServingReplicas(latestMS) == 0 {
-					// Removing all groups supplies no evidence that an unfinished
-					// target template completed. Retain the last completed baseline.
-					currentRevision = copy.Status.CurrentRevision
-				}
-				needsUpdate := copy.Status.CurrentRevision != currentRevision || copy.Status.UpdateRevision != revision || copy.Status.LabelSelector != selector || conditionChanged
-				if roleCoordination(latestMS) != nil && modelServingReplicas(latestMS) == 0 {
-					needsUpdate = needsUpdate || copy.Status.Replicas != 0 || copy.Status.AvailableReplicas != 0 || copy.Status.CurrentReplicas != 0 || copy.Status.UpdatedReplicas != 0 || copy.Status.ObservedGeneration != latestMS.Generation
-					copy.Status.Replicas, copy.Status.AvailableReplicas = 0, 0
-					copy.Status.CurrentReplicas, copy.Status.UpdatedReplicas = 0, 0
-					copy.Status.ObservedGeneration = latestMS.Generation
-				}
-				if c.revisionHistory(ctx, ms).copyCollisionCount(copy) {
-					needsUpdate = true
-				}
-				if needsUpdate {
-					copy.Status.CurrentRevision = currentRevision
-					copy.Status.UpdateRevision = revision
-					copy.Status.LabelSelector = selector
-					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
-					return updateErr
-				}
-				return nil
-			}
+		if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 			return err
 		}
 
@@ -2743,7 +2760,6 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 		// Track revision counts to determine the most common non-updated revision (CurrentRevision)
 		revisionCount := make(map[string]int)
 		referencedRevisions := make([]string, 0, len(groups))
-		roleCountsComplete := true
 		rolloutActive := c.hasUpdateableOutdatedServingGroup(ctx, latestMS, groups, revision, partition)
 		for index := range groups {
 			group := groups[index]
@@ -2755,11 +2771,6 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			roles, err := c.store.GetRolesByGroup(utils.GetNamespaceName(latestMS), group.Name)
 			if err != nil {
 				return fmt.Errorf("collect Role revision references for %s: %w", group.Name, err)
-			}
-			for _, desired := range latestMS.Spec.Template.Roles {
-				if len(roles[desired.Name]) != roleReplicas(desired) {
-					roleCountsComplete = false
-				}
 			}
 			for _, instances := range roles {
 				for _, role := range instances {
@@ -2817,35 +2828,26 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 		coordinationConditionChanged, coordinationCondition := rolloutPolicy.setCondition(copy)
 		shouldUpdate = shouldUpdate || coordinationConditionChanged
 
-		// A replacement gap must not discard the baseline used by protected slots.
+		// Keep the established baseline through replacement gaps and unready
+		// targets. Only a complete nonempty rollout promotes it.
 		updateRevision := revision
-		var currentRevision string
-		rolloutComplete := roleCountsComplete && updated == replicas && available == replicas && len(groups) == replicas
-
-		if copy.Status.CurrentRevision != "" {
-			currentRevision = copy.Status.CurrentRevision
-			if rolloutComplete {
-				currentRevision = updateRevision
+		currentRevision := copy.Status.CurrentRevision
+		rolloutComplete := replicas > 0 && updated == replicas && available == replicas && len(groups) == replicas
+		if rolloutComplete && currentRevision != updateRevision {
+			rolloutComplete, err = c.rolloutCompleted(ctx, latestMS, groups)
+			if err != nil {
+				return err
 			}
 		}
-
-		// If CurrentRevision is absent, compute it from current groups.
-		if currentRevision == "" {
-			if rolloutComplete || len(revisionCount) == 0 {
-				// All groups are updated or no groups exist
-				currentRevision = updateRevision
-			} else {
-				// Find the revision with the highest count among non-updated groups
-				maxCount := 0
-				for rev, count := range revisionCount {
-					if count > maxCount {
-						maxCount = count
-						currentRevision = rev
-					}
-				}
-				// If no current revision found (shouldn't happen), fallback to updateRevision
-				if currentRevision == "" {
-					currentRevision = updateRevision
+		if rolloutComplete {
+			currentRevision = updateRevision
+		} else if currentRevision == "" {
+			// Recover an absent status baseline from observed old groups, without
+			// interpreting the disappearance of the last old group as completion.
+			maxCount := 0
+			for rev, count := range revisionCount {
+				if count > maxCount {
+					maxCount, currentRevision = count, rev
 				}
 			}
 		}
@@ -2871,17 +2873,6 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			revisionUpdated = true
 			copy.Status.CurrentRevision = currentRevision
 			copy.Status.UpdateRevision = updateRevision
-		}
-
-		if copy.Spec.RolloutStrategy == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition == nil {
-			// if not set spec.RolloutStrategy.RollingUpdateConfiguration.Partition,
-			// should set currentReplicas = updatedReplicas when rolling update is over.
-			if copy.Status.UpdatedReplicas == *copy.Spec.Replicas &&
-				copy.Status.AvailableReplicas == *copy.Spec.Replicas &&
-				copy.Status.Replicas == *copy.Spec.Replicas {
-				shouldUpdate = true
-				copy.Status.CurrentReplicas = copy.Status.UpdatedReplicas
-			}
 		}
 
 		if copy.Status.ObservedGeneration != latestMS.Generation {

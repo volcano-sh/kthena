@@ -57,6 +57,70 @@ func appliedHistoryWorkload(strategy workloadv1alpha1.RolloutStrategyType, image
 	return ms
 }
 
+func TestBaselinePromotionAnchorsStaleRoleHistoryToLiveEntry(t *testing.T) {
+	for _, mode := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
+		for _, member := range []string{"complete", "worker missing", "worker NotReady", "foreign worker"} {
+			t.Run(string(mode)+"/"+member, func(t *testing.T) {
+				ctx := context.Background()
+				old := mergeReadyModelServing("status-live-revision", 1, 1)
+				old.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: mode}
+				for i := range old.Spec.Template.Roles {
+					role := &old.Spec.Template.Roles[i]
+					role.WorkerReplicas = 1
+					role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+				}
+				current := old.DeepCopy()
+				current.Generation++
+				current.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "target-image"
+				current.Spec.Template.Roles[0].WorkerTemplate.Spec.Containers[0].Image = "target-image"
+				oldRevision, target := utils.ModelServingRevision(old), utils.ModelServingRevision(current)
+				current.Status.CurrentRevision, current.Status.UpdateRevision = oldRevision, target
+				c := newRevisionTestController(t, current)
+				recordTestRevision(t, c.kubeClientSet, old, oldRevision)
+				key, group := utils.GetNamespaceName(current), current.Name+"-0"
+				c.store.AddServingGroup(key, 0, target)
+				var worker *corev1.Pod
+				for i, role := range current.Spec.Template.Roles {
+					cachedRevision := target
+					if i == 1 {
+						cachedRevision = oldRevision // The unchanged Role's last Pod event has not arrived.
+					}
+					pods := addMergeReadyInstance(t, c, current, group, role, 0, target, cachedRevision, utils.CalRoleTemplateHash(role))
+					worker = pods[1]
+				}
+				require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+				switch member {
+				case "worker missing":
+					require.NoError(t, c.kubeClientSet.CoreV1().Pods(current.Namespace).Delete(ctx, worker.Name, metav1.DeleteOptions{}))
+				case "worker NotReady", "foreign worker":
+					changed := worker.DeepCopy()
+					if member == "worker NotReady" {
+						changed.Status.Conditions[0].Status = corev1.ConditionFalse
+					} else {
+						changed.OwnerReferences[0].UID = "another-modelserving"
+					}
+					_, err := c.kubeClientSet.CoreV1().Pods(current.Namespace).Update(ctx, changed, metav1.UpdateOptions{})
+					require.NoError(t, err)
+				}
+				// Keep informer/store observations stale. Completion must anchor the
+				// Role history and all required members to the current owned live Pods.
+				require.NoError(t, c.UpdateModelServingStatus(current, target))
+				actual, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(current.Namespace).Get(ctx, current.Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				want := oldRevision
+				if member == "complete" {
+					want = target
+				}
+				require.Equal(t, want, actual.Status.CurrentRevision)
+				require.Equal(t, target, actual.Status.UpdateRevision)
+				instances, err := c.store.GetRoleList(key, group, current.Spec.Template.Roles[1].Name)
+				require.NoError(t, err)
+				require.Equal(t, oldRevision, instances[0].Revision, "status completion must not require an informer update to the unchanged Role")
+			})
+		}
+	}
+}
+
 func TestIndependentRoleScaleDownUsesLiveHealthAndRevision(t *testing.T) {
 	for _, scenario := range []string{"all Ready", "worker NotReady", "unknown history scale to zero"} {
 		t.Run(scenario, func(t *testing.T) {

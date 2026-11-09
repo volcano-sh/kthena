@@ -30,6 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -4520,9 +4521,9 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 			existingGroups:          map[int]string{},
 			statusCurrentRevision:   "",
 			newRevision:             "revision-v1",
-			expectedCurrentRevision: "revision-v1", // Should equal UpdateRevision
+			expectedCurrentRevision: "", // No completed capacity establishes a baseline.
 			expectedUpdateRevision:  "revision-v1",
-			description:             "When no groups exist, CurrentRevision should equal UpdateRevision",
+			description:             "Missing groups do not establish a completed template baseline",
 		},
 	}
 
@@ -8136,6 +8137,38 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 	}
 }
 
+func TestZeroRoleReplicasCompleteRollout(t *testing.T) {
+	ctx := context.Background()
+	previous := createStandardModelServing("zero-roles", 2, 0)
+	previous.UID = "zero-roles-owner"
+	previous.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "image:previous"
+	ms := previous.DeepCopy()
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "image:target"
+	baseline, target := utils.ModelServingRevision(previous), utils.ModelServingRevision(ms)
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = baseline, baseline
+	c := newRevisionTestController(t, ms)
+	_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, previous, baseline, previous.Spec.Template.Roles)
+	require.NoError(t, err)
+	key := utils.GetNamespaceName(ms)
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		c.store.AddServingGroup(key, ordinal, baseline)
+		require.NoError(t, c.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
+	}
+
+	// Groups without Role instances follow the regular rollout and readiness rules.
+	for i := 0; i < 5; i++ {
+		require.NoError(t, c.syncModelServing(ctx, ms.Namespace+"/"+ms.Name))
+	}
+	actual, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, target, actual.Status.CurrentRevision)
+	require.Equal(t, target, actual.Status.UpdateRevision)
+	require.EqualValues(t, 2, actual.Status.Replicas)
+	require.EqualValues(t, 2, actual.Status.AvailableReplicas)
+	require.EqualValues(t, 2, actual.Status.UpdatedReplicas)
+	require.True(t, meta.IsStatusConditionTrue(actual.Status.Conditions, string(workloadv1alpha1.ModelServingAvailable)))
+}
+
 func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 	controller, err := NewModelServingController(
 		kubefake.NewSimpleClientset(),
@@ -9855,6 +9888,8 @@ func TestStatusGCPreservesUnchangedRoleHistory(t *testing.T) {
 				{Name: "prefill", Replicas: ptr.To[int32](1), EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v1"}}}}},
 				{Name: "decode", Replicas: ptr.To[int32](1), EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v1"}}}}},
 			}
+			old.Spec.Template.Roles[1].WorkerReplicas = 1
+			old.Spec.Template.Roles[1].WorkerTemplate = old.Spec.Template.Roles[1].EntryTemplate.DeepCopy()
 			current := old.DeepCopy()
 			current.Generation = 2
 			current.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "v2"
@@ -9885,10 +9920,7 @@ func TestStatusGCPreservesUnchangedRoleHistory(t *testing.T) {
 					c.store.AddRole(key, group, role.Name, id, revision, utils.CalRoleTemplateHash(role))
 					require.NoError(t, c.store.UpdateRoleStatus(key, group, role.Name, id, datastore.RoleRunning))
 					if livePods {
-						pod := utils.GenerateEntryPod(role, current, group, id, revision, utils.CalRoleTemplateHash(role))
-						pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(current, workloadv1alpha1.ModelServingKind)}
-						_, err := kube.CoreV1().Pods(current.Namespace).Create(ctx, pod, metav1.CreateOptions{})
-						require.NoError(t, err)
+						addMergeReadyInstance(t, c, current, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))
 					}
 				}
 				require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
@@ -9896,7 +9928,11 @@ func TestStatusGCPreservesUnchangedRoleHistory(t *testing.T) {
 			require.NoError(t, c.UpdateModelServingStatus(current, target))
 			actual, err := client.WorkloadV1alpha1().ModelServings(current.Namespace).Get(ctx, current.Name, metav1.GetOptions{})
 			require.NoError(t, err)
-			require.Equal(t, target, actual.Status.CurrentRevision)
+			if livePods {
+				require.Equal(t, target, actual.Status.CurrentRevision, "an unchanged Role may complete on its older global revision, including its worker")
+			} else {
+				require.Equal(t, oldRevision, actual.Status.CurrentRevision, "store-only Ready cannot establish complete live target capacity")
+			}
 			require.Equal(t, int32(2), actual.Status.AvailableReplicas)
 			historical, err := c.modelServingForRevision(ctx, current, oldRevision)
 			require.NoError(t, err, "unchanged decode must remain resolvable after status-driven GC")
@@ -10000,4 +10036,241 @@ func TestRoleTargetRejectsForeignSnapshotReuseRace(t *testing.T) {
 	actual, err := kube.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, foreign.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	require.Equal(t, foreign, actual)
+}
+
+func TestStatusRetainsBaselineUntilTargetCapacityConverges(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		desired    int32
+		groups     int
+		ready      bool
+		deleting   bool
+		surgeScope string
+		emptyStore bool
+		wantTarget bool
+	}{
+		{name: "zero ServingGroups", desired: 0},
+		{name: "replacement gap before any group observation", desired: 1},
+		{name: "replacement gap after last group deletion", desired: 1, emptyStore: true},
+		{name: "last target not Ready", desired: 1, groups: 1},
+		{name: "target Ready but surge remains", desired: 1, groups: 2, ready: true},
+		{name: "temporary group occupies the formal count", desired: 1, groups: 1, ready: true, surgeScope: "serving-group"},
+		{name: "temporary Role occupies the formal count", desired: 1, groups: 1, ready: true, surgeScope: surgeRole},
+		{name: "target is still deleting", desired: 1, groups: 1, ready: true, deleting: true},
+		{name: "all target Ready and count converged", desired: 1, groups: 1, ready: true, wantTarget: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := context.Background()
+			previous := createStandardModelServing("status-baseline", scenario.desired, 1)
+			previous.UID = "status-baseline-owner"
+			previous.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "image:previous"
+			ms := previous.DeepCopy()
+			ms.Generation = 2
+			ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "image:target"
+			baseline, target := utils.ModelServingRevision(previous), utils.ModelServingRevision(ms)
+			ms.Status.CurrentRevision, ms.Status.UpdateRevision = baseline, baseline
+			c := newRevisionTestController(t, ms)
+			_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, previous, baseline, previous.Spec.Template.Roles)
+			require.NoError(t, err)
+			key := utils.GetNamespaceName(ms)
+			if scenario.emptyStore {
+				c.store.AddServingGroup(key, 0, baseline)
+				c.store.DeleteServingGroup(key, ms.Name+"-0")
+			}
+			for ordinal := 0; ordinal < scenario.groups; ordinal++ {
+				groupOrdinal, roleOrdinal := ordinal, 0
+				if scenario.surgeScope == "serving-group" {
+					groupOrdinal = 7
+				} else if scenario.surgeScope == surgeRole {
+					roleOrdinal = 7
+				}
+				group := utils.GenerateServingGroupName(ms.Name, groupOrdinal)
+				c.store.AddServingGroup(key, groupOrdinal, target)
+				role := ms.Spec.Template.Roles[0]
+				pod := addMergeReadyInstance(t, c, ms, group, role, roleOrdinal, target, target, utils.CalRoleTemplateHash(role))[0]
+				if scenario.surgeScope != "" {
+					setSurgeScope(pod, scenario.surgeScope)
+					_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+					require.NoError(t, err)
+					require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+				}
+				state := datastore.ServingGroupRunning
+				if !scenario.ready {
+					pod.Status.Conditions[0].Status = corev1.ConditionFalse
+					require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+					state = datastore.ServingGroupCreating
+				}
+				if scenario.deleting {
+					state = datastore.ServingGroupDeleting
+				}
+				require.NoError(t, c.store.UpdateServingGroupStatus(key, group, state))
+			}
+			if scenario.groups == 1 && !scenario.ready {
+				require.NoError(t, c.syncModelServing(ctx, ms.Namespace+"/"+ms.Name))
+			} else {
+				require.NoError(t, c.UpdateModelServingStatus(ms, target))
+			}
+			actual, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			wantRevision := baseline
+			if scenario.wantTarget {
+				wantRevision = target
+			}
+			require.Equal(t, wantRevision, actual.Status.CurrentRevision)
+			require.Equal(t, target, actual.Status.UpdateRevision)
+			require.Equal(t, ms.Generation, actual.Status.ObservedGeneration)
+			_, err = utils.GetControllerRevision(ctx, c.kubeClientSet, ms, baseline)
+			require.NoError(t, err, "the last complete history must remain available for protected refill")
+
+			require.NoError(t, c.modelServingsInformer.GetIndexer().Update(actual))
+			client := c.modelServingClient.(*kthenafake.Clientset)
+			client.ClearActions()
+			require.NoError(t, c.UpdateModelServingStatus(actual, target))
+			for _, action := range client.Actions() {
+				require.False(t, action.GetVerb() == "update" && action.GetSubresource() == "status", "stable status must not be rewritten")
+			}
+		})
+	}
+}
+
+func TestZeroRoleStatusWaitsForPhysicalPodsAndNonzeroRoles(t *testing.T) {
+	for _, terminating := range []bool{false, true} {
+		t.Run(fmt.Sprint("terminating=", terminating), func(t *testing.T) {
+			ms := createStandardModelServing("zero-role-boundary", 2, 0)
+			ms.UID = "zero-role-owner"
+			ms.Status.CurrentRevision = "previous-complete"
+			c := newRevisionTestController(t, ms)
+			target := utils.ModelServingRevision(ms)
+			if terminating {
+				pod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, ms.Name+"-3", "prefill-0", target, "hash")
+				pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)}
+				pod.DeletionTimestamp = ptr.To(metav1.Now())
+				pod.Finalizers = []string{"test/hold"}
+				_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+				require.NoError(t, err)
+				c.store.AddServingGroup(utils.GetNamespaceName(ms), 3, target)
+				require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), ms.Name+"-3", datastore.ServingGroupDeleting))
+			} else {
+				ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, workloadv1alpha1.Role{Name: "decode", Replicas: ptr.To[int32](1)})
+				require.NoError(t, c.modelServingsInformer.GetIndexer().Update(ms))
+			}
+			require.NoError(t, c.UpdateModelServingStatus(ms, target))
+			actual, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(context.Background(), ms.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Zero(t, actual.Status.AvailableReplicas, "neither terminating physical capacity nor missing nonzero Roles are virtual Ready capacity")
+			require.Equal(t, ms.Status.CurrentRevision, actual.Status.CurrentRevision)
+			if terminating {
+				require.EqualValues(t, 1, actual.Status.Replicas)
+				require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), ms.Name+"-3"))
+			}
+		})
+	}
+}
+
+func TestBaselinePromotionRequiresLiveCompleteTarget(t *testing.T) {
+	for _, mode := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
+		for _, scenario := range []struct {
+			name       string
+			entry      bool
+			wantTarget bool
+		}{
+			{name: "all target entry and worker Ready", wantTarget: true},
+			{name: "entry NotReady", entry: true},
+			{name: "worker NotReady"},
+			{name: "worker missing"},
+			{name: "worker on old revision"},
+			{name: "worker owned by another ModelServing UID"},
+			{name: "same-name replacement worker NotReady"},
+			{name: "same-name replacement worker Ready", wantTarget: true},
+			{name: "worker Terminating"},
+			{name: "Role deletion marker"},
+			{name: "ServingGroup deletion marker"},
+			{name: "unrecognized deletion marker", wantTarget: true},
+			{name: "extra physical worker"},
+		} {
+			t.Run(string(mode)+"/"+scenario.name, func(t *testing.T) {
+				ctx := context.Background()
+				ms := createStandardModelServing("live-completion", 2, 1)
+				ms.UID, ms.ResourceVersion = "live-completion-owner", "1"
+				ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: mode}
+				ms.Spec.Template.Roles[0].WorkerReplicas = 1
+				ms.Spec.Template.Roles[0].WorkerTemplate = ms.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+				ms.Status.CurrentRevision = "previous-complete-template"
+				c := newRevisionTestController(t, ms)
+				recordDifferentRevision(t, c, ms, ms.Status.CurrentRevision)
+				key, target := utils.GetNamespaceName(ms), utils.ModelServingRevision(ms)
+				for ordinal := 0; ordinal < 2; ordinal++ {
+					group := utils.GenerateServingGroupName(ms.Name, ordinal)
+					c.store.AddServingGroup(key, ordinal, target)
+					role := ms.Spec.Template.Roles[0]
+					pods := addMergeReadyInstance(t, c, ms, group, role, 0, target, target, utils.CalRoleTemplateHash(role))
+					require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+					if ordinal != 0 {
+						continue // This last target has just become Ready.
+					}
+					pod := pods[1].DeepCopy()
+					if scenario.entry {
+						pod = pods[0].DeepCopy()
+					}
+					switch scenario.name {
+					case "entry NotReady", "worker NotReady":
+						pod.Status.Conditions[0].Status = corev1.ConditionFalse
+					case "worker missing":
+						require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
+						continue
+					case "worker on old revision":
+						pod.Labels[workloadv1alpha1.RevisionLabelKey] = ms.Status.CurrentRevision
+					case "worker owned by another ModelServing UID":
+						pod.OwnerReferences[0].UID = "another-owner"
+					case "same-name replacement worker NotReady", "same-name replacement worker Ready":
+						require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
+						pod.UID = "replacement-worker-uid"
+						if !scenario.wantTarget {
+							pod.Status.Conditions[0].Status = corev1.ConditionFalse
+						}
+						_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+						require.NoError(t, err)
+						continue
+					case "worker Terminating":
+						pod.DeletionTimestamp = ptr.To(metav1.Now())
+						pod.Finalizers = []string{"test/hold"}
+					case "Role deletion marker", "ServingGroup deletion marker", "unrecognized deletion marker":
+						scope := strings.TrimSuffix(scenario.name, " deletion marker")
+						pod.Annotations = map[string]string{"workload.kthena.io/deletion-scope": scope}
+					case "extra physical worker":
+						pod.Name = utils.GeneratePodName(group, "prefill-0", 2)
+						pod.UID = "extra-worker-uid"
+						_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+						require.NoError(t, err)
+						continue
+					}
+					_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+					require.NoError(t, err)
+					// Keep the earlier Ready cache observation unchanged. Only the
+					// API now reveals that the first target is no longer complete.
+				}
+				syncErr := c.syncModelServing(ctx, ms.Namespace+"/"+ms.Name)
+				if mode == workloadv1alpha1.ServingGroupRollingUpdate && scenario.name == "worker on old revision" {
+					// The availability ledger also rejects a mixed live revision
+					// as a deletion identity. It reports a revision wait after the
+					// status reconciliation; that wait cannot promote the baseline.
+					require.Error(t, syncErr)
+					require.True(t, onlyRevisionErrors(syncErr))
+					for _, action := range c.kubeClientSet.(*kubefake.Clientset).Actions() {
+						require.False(t, action.Matches("delete", "pods"), "an uncertain live target cannot authorize deletion")
+					}
+				} else {
+					require.NoError(t, syncErr)
+				}
+				actual, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				want := ms.Status.CurrentRevision
+				if scenario.wantTarget {
+					want = target
+				}
+				require.Equal(t, want, actual.Status.CurrentRevision, "only current complete target capacity establishes a new baseline")
+				require.Equal(t, target, actual.Status.UpdateRevision)
+			})
+		}
+	}
 }
