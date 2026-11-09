@@ -4531,6 +4531,115 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 	}
 }
 
+func TestUpdateModelServingStatusPromotesCurrentRevisionOnlyOnCompletion(t *testing.T) {
+	const (
+		revA = "revision-a"
+		revB = "revision-b"
+	)
+	running, creating := datastore.ServingGroupRunning, datastore.ServingGroupCreating
+
+	tests := []struct {
+		name          string
+		replicas      int32
+		groups        map[int]datastore.ServingGroupStatus
+		wantPromoted  bool
+		wantCollected bool
+	}{
+		{
+			name:     "single group replaced by an unready target",
+			replicas: 1,
+			groups:   map[int]datastore.ServingGroupStatus{0: creating},
+		},
+		{
+			name:     "all groups replaced with only some ready",
+			replicas: 3,
+			groups:   map[int]datastore.ServingGroupStatus{0: running, 1: creating, 2: creating},
+		},
+		{
+			name:     "all groups ready but still scaling up",
+			replicas: 3,
+			groups:   map[int]datastore.ServingGroupStatus{0: running, 1: running},
+		},
+		{
+			name:     "temporary capacity draining with desired replicas unready",
+			replicas: 2,
+			groups:   map[int]datastore.ServingGroupStatus{0: running, 1: creating, 2: creating},
+		},
+		{
+			name:     "ready surge does not stand in for an unready desired replica",
+			replicas: 2,
+			groups:   map[int]datastore.ServingGroupStatus{0: creating, 1: running, 2: running},
+		},
+		{
+			name:     "sparse high ordinals delay promotion while capacity drains",
+			replicas: 2,
+			groups:   map[int]datastore.ServingGroupStatus{1: running, 2: running, 3: running},
+		},
+		{
+			name:          "sparse ordinals promote once the count converges",
+			replicas:      2,
+			groups:        map[int]datastore.ServingGroupStatus{1: running, 3: running},
+			wantPromoted:  true,
+			wantCollected: true,
+		},
+		{
+			name:         "temporary capacity draining with desired replicas ready",
+			replicas:     2,
+			groups:       map[int]datastore.ServingGroupStatus{0: running, 1: running, 2: creating},
+			wantPromoted: true,
+		},
+		{
+			name:          "all groups updated and ready",
+			replicas:      2,
+			groups:        map[int]datastore.ServingGroupStatus{0: running, 1: running},
+			wantPromoted:  true,
+			wantCollected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			ms := createStandardModelServing("promotion", tt.replicas, 1)
+			ms.UID = "promotion-uid"
+			ms.Status.CurrentRevision = revA
+			ms.Status.UpdateRevision = revB
+
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset(ms)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+			require.NoError(t, err)
+			require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(ms))
+
+			for _, revision := range []string{revA, revB} {
+				_, err := utils.CreateControllerRevision(ctx, kubeClient, ms, revision, ms.Spec.Template.Roles)
+				require.NoError(t, err)
+			}
+
+			key := utils.GetNamespaceName(ms)
+			for ordinal, status := range tt.groups {
+				controller.store.AddServingGroup(key, ordinal, revB)
+				require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), status))
+			}
+
+			require.NoError(t, controller.UpdateModelServingStatus(ms, revB))
+
+			got, err := kthenaClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			wantCurrent := revA
+			if tt.wantPromoted {
+				wantCurrent = revB
+			}
+			assert.Equal(t, wantCurrent, got.Status.CurrentRevision)
+			assert.Equal(t, revB, got.Status.UpdateRevision)
+
+			history, err := utils.GetControllerRevision(ctx, kubeClient, ms, revA)
+			require.NoError(t, err)
+			assert.Equal(t, !tt.wantCollected, history != nil, "history of revision A")
+		})
+	}
+}
+
 // TestScaleDownRoles tests the scaleDownRoles function with various scenarios
 func TestScaleDownRoles(t *testing.T) {
 	tests := []struct {
