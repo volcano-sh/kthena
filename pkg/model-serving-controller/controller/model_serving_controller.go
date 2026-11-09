@@ -1429,7 +1429,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			c.revisionHistory(ctx, ms).recordComparisonError(groupName+"/"+roleObj.Name, err)
 			historyErrors = append(historyErrors, err)
 			if roleObj.Status == datastore.RoleRunning {
-				if statusErr := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleObj.Name, datastore.RoleCreating); statusErr != nil {
+				if _, statusErr := c.markRoleStatus(ms, groupName, targetRole.Name, roleObj.Name, datastore.RoleCreating); statusErr != nil {
 					klog.Warningf("cannot invalidate readiness of Role %s/%s: %v", targetRole.Name, roleObj.Name, statusErr)
 				}
 			}
@@ -1477,15 +1477,19 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 		if err != nil {
 			return err
 		}
-		status := datastore.RoleCreating
-		if rolePodsComplete(ms, groupName, roleObj.Name, roleToApply, revisionToUse, pods, true) {
-			status = datastore.RoleRunning
+		ready := rolePodsComplete(ms, groupName, roleObj.Name, roleToApply, revisionToUse, pods, true)
+		// roleObj is a copy read before the Pods were listed. Compare against it, not the
+		// live status, so a Role that a Pod handler marked Running after the list was taken
+		// is not moved back to Creating from this older Pod list.
+		var statusErr error
+		if ready && roleObj.Status != datastore.RoleRunning {
+			_, statusErr = c.markRoleStatus(ms, groupName, targetRole.Name, roleObj.Name, datastore.RoleRunning)
+		} else if !ready && roleObj.Status == datastore.RoleRunning {
+			_, statusErr = c.markRoleStatus(ms, groupName, targetRole.Name, roleObj.Name, datastore.RoleCreating)
 		}
-		if roleObj.Status != status {
-			if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleObj.Name, status); err != nil {
-				klog.Warningf("cannot update readiness of Role %s/%s: %v", targetRole.Name, roleObj.Name, err)
-				continue
-			}
+		if statusErr != nil {
+			klog.Warningf("cannot update readiness of Role %s/%s: %v", targetRole.Name, roleObj.Name, statusErr)
+			continue
 		}
 		expectedPods := 1 + int(roleToApply.WorkerReplicas)
 		if !rolePodsComplete(ms, groupName, roleObj.Name, roleToApply, revisionToUse, pods, false) {
@@ -1576,6 +1580,23 @@ func (c *ModelServingController) emitRoleStatusEvent(
 		return
 	}
 	c.recorder.Event(ms, eventType, reason, message)
+}
+
+// markRoleStatus moves a role to Running or Creating and, only if this call made the
+// change, sends the RoleRunning or RoleCreating Event, so the Pod handlers, the sync
+// loop and the coordinated availability refresh send one Event per change between
+// them. It never requeues: the sync and the refresh run inside a sync whose later
+// steps already see the change, and a later step can move the role back, as an
+// in-place update does, so a requeue there would restart the sync again and again.
+func (c *ModelServingController) markRoleStatus(ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string, status datastore.RoleStatus) (bool, error) {
+	changed, err := c.store.TransitionRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, status)
+	if err != nil || !changed {
+		return false, err
+	}
+	klog.V(2).Infof("Update role %s/%s status to %s", roleName, roleID, status)
+	message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now %s", roleName, roleID, groupName, status)
+	c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "Role"+string(status), message)
+	return true, nil
 }
 
 func (c *ModelServingController) getModelServingAndResourceDetails(resource metav1.Object) (*workloadv1alpha1.ModelServing, string, string, string) {
@@ -2095,27 +2116,18 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	}, servingGroupName, newPod.Name, utils.ObjectRevision(newPod), roleTemplateHash, roleName, roleID)
 
 	// Check and update role status to Running when all pods in the role are ready
-	roleBecameRunning := false
 	roleReady, err := c.checkRoleReady(ms, servingGroupName, roleName, roleID)
 	if err != nil {
 		klog.Warningf("failed to check role %s/%s readiness, skipping role status update: %v", roleName, roleID, err)
 	} else if roleReady {
-		currentRoleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
-		if currentRoleStatus != datastore.RoleRunning && currentRoleStatus != datastore.RoleDeleting {
-			if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, datastore.RoleRunning); err != nil {
-				klog.Warningf("failed to update role %s/%s status to Running: %v", roleName, roleID, err)
-			} else {
-				roleBecameRunning = true
-				klog.V(2).Infof("Update role %s/%s status to Running", roleName, roleID)
-				// Emit event for role transitioning to Running
-				message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Running", roleName, roleID, servingGroupName)
-				c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleRunning", message)
-				// A single Role becoming Ready may release proportional or dependency
-				// budget before the whole ServingGroup is Ready.
-				if isCoordinatedRole(ms, roleName) {
-					c.enqueueModelServing(ms)
-				}
-			}
+		changed, err := c.markRoleStatus(ms, servingGroupName, roleName, roleID, datastore.RoleRunning)
+		if err != nil {
+			klog.Warningf("failed to update role %s/%s status to Running: %v", roleName, roleID, err)
+		} else if changed {
+			// A Role that becomes Running can release coordination or RoleRollingUpdate
+			// budget before its ServingGroup is Running, for example a Role maxSurge
+			// replica. Reconcile so that budget is spent.
+			c.enqueueModelServing(ms)
 		}
 	}
 
@@ -2134,12 +2146,6 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 		c.enqueueModelServing(ms)
 	} else {
 		klog.V(4).Infof("ServingGroup %s still creating", servingGroupName)
-		// A Role maxSurge replica makes the Role ready before the ServingGroup
-		// replica count contracts to its declared size. Reconcile immediately so
-		// RoleRollingUpdate can spend the newly available deletion budget.
-		if roleBecameRunning {
-			c.enqueueModelServing(ms)
-		}
 	}
 	return revisionErr
 }
@@ -2185,15 +2191,8 @@ func (c *ModelServingController) markPodUnavailable(ms *workloadv1alpha1.ModelSe
 	roleName := utils.GetRoleName(errPod)
 	roleID := utils.GetRoleID(errPod)
 	// Update role status back to Creating when pod fails
-	if roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID); roleStatus == datastore.RoleRunning {
-		if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, datastore.RoleCreating); err != nil {
-			klog.Warningf("failed to update role %s/%s status to Creating: %v", roleName, roleID, err)
-		} else {
-			klog.V(2).Infof("update role %s/%s to Creating when pod fails", roleName, roleID)
-			// Emit event for role re-entering Creating state due to failure
-			message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", roleName, roleID, servingGroupName)
-			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)
-		}
+	if _, err := c.markRoleStatus(ms, servingGroupName, roleName, roleID, datastore.RoleCreating); err != nil {
+		klog.Warningf("failed to update role %s/%s status to Creating: %v", roleName, roleID, err)
 	}
 
 	// If the ServingGroup status is already running, the status needs to be updated

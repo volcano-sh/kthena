@@ -39,6 +39,9 @@ type Store interface {
 	GetRolesByGroup(modelServingName types.NamespacedName, groupName string) (map[string]map[string]*Role, error)
 	GetRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string) RoleStatus
 	UpdateRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string, status RoleStatus) error
+	// TransitionRoleStatus sets the role to status unless it already has that status or
+	// is Deleting, and reports whether it changed the status.
+	TransitionRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string, status RoleStatus) (bool, error)
 	DeleteRole(modelServingName types.NamespacedName, groupName, roleName, roleID string)
 	DeleteModelServing(modelServingName types.NamespacedName)
 	DeleteServingGroup(modelServingName types.NamespacedName, groupName string)
@@ -196,28 +199,55 @@ func (s *store) UpdateRoleStatus(modelServingName types.NamespacedName, groupNam
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	role, err := s.findRoleLocked(modelServingName, groupName, roleName, roleID)
+	if err != nil {
+		return err
+	}
+	role.Status = status
+	return nil
+}
+
+// TransitionRoleStatus sets the role to status unless it already has that status or
+// is Deleting. The check and the write happen under one lock, so when several callers
+// see the same change, only one of them gets true. A Deleting role is left alone, so a
+// caller that read the role before its deletion started cannot undo the deletion.
+func (s *store) TransitionRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string, status RoleStatus) (bool, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	role, err := s.findRoleLocked(modelServingName, groupName, roleName, roleID)
+	if err != nil {
+		return false, err
+	}
+	if role.Status == status || role.Status == RoleDeleting {
+		return false, nil
+	}
+	role.Status = status
+	return true, nil
+}
+
+// findRoleLocked returns the stored role. The caller must hold s.mutex.
+func (s *store) findRoleLocked(modelServingName types.NamespacedName, groupName, roleName, roleID string) (*Role, error) {
 	servingGroups, ok := s.servingGroup[modelServingName]
 	if !ok {
-		return fmt.Errorf("cannot find modelServing %s", modelServingName.Name)
+		return nil, fmt.Errorf("cannot find modelServing %s", modelServingName.Name)
 	}
 
 	servingGroup, ok := servingGroups[groupName]
 	if !ok {
-		return ErrServingGroupNotFound
+		return nil, ErrServingGroupNotFound
 	}
 
 	roleMap, ok := servingGroup.roles[roleName]
 	if !ok {
-		return fmt.Errorf("roleName %s not found in group %s", roleName, groupName)
+		return nil, fmt.Errorf("roleName %s not found in group %s", roleName, groupName)
 	}
 
 	role, ok := roleMap[roleID]
 	if !ok {
-		return fmt.Errorf("role %s not found in roleName %s of group %s", roleID, roleName, groupName)
+		return nil, fmt.Errorf("role %s not found in roleName %s of group %s", roleID, roleName, groupName)
 	}
-
-	role.Status = status
-	return nil
+	return role, nil
 }
 
 // GetRoleStatus returns the status of a specific role
