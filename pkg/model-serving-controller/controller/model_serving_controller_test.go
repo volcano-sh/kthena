@@ -6322,6 +6322,7 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6418,6 +6419,7 @@ func TestSyncAllWithContainerRestartedPods(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6513,6 +6515,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6545,6 +6548,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6571,6 +6575,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6676,8 +6681,8 @@ func TestRecoveryUsesCurrentPolicyAndGrace(t *testing.T) {
 			ms := createStandardModelServing("recovery", 1, 1)
 			ms.UID = "original-owner"
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ms.Namespace, Name: "recovery-0-prefill-0-0", UID: "original-pod",
-				Labels:          map[string]string{workloadv1alpha1.ModelServingNameLabelKey: ms.Name, workloadv1alpha1.GroupNameLabelKey: "recovery-0"},
-				OwnerReferences: []metav1.OwnerReference{{APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: "ModelServing", Name: ms.Name, UID: ms.UID}}}, Status: corev1.PodStatus{Phase: corev1.PodFailed}}
+				Labels:          map[string]string{workloadv1alpha1.ModelServingNameLabelKey: ms.Name, workloadv1alpha1.GroupNameLabelKey: "recovery-0", workloadv1alpha1.RoleLabelKey: "prefill", workloadv1alpha1.RoleIDKey: "prefill-0"},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)}}, Status: corev1.PodStatus{Phase: corev1.PodFailed}}
 			if tc.mutate != nil {
 				tc.mutate(ms, pod)
 			}
@@ -6825,6 +6830,7 @@ func newGracePeriodTestController(t *testing.T, pod *corev1.Pod, ms *workloadv1a
 	c, err := NewModelServingController(kube, kthenafake.NewSimpleClientset(ms), nil, apiextfake.NewSimpleClientset())
 	require.NoError(t, err)
 	require.NoError(t, c.podsInformer.GetIndexer().Add(pod.DeepCopy()))
+	c.store.AddServingGroupAndRole(utils.GetNamespaceName(ms), pod.Labels[workloadv1alpha1.GroupNameLabelKey], utils.ObjectRevision(pod), "", utils.GetRoleName(pod), utils.GetRoleID(pod))
 	t.Cleanup(c.workqueue.ShutDown)
 	return c, kube
 }
@@ -6896,6 +6902,7 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},

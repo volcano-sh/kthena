@@ -305,7 +305,16 @@ func TestDesiredRevisionFailureStillBoundsReplicaDecrease(t *testing.T) {
 					if action.GetResource().Resource != "pods" {
 						continue
 					}
-					require.NotContains(t, []string{"create", "update", "patch"}, action.GetVerb())
+					if action.GetVerb() == "patch" {
+						scope := utils.DeletionScopeRole
+						if strategy == api.ServingGroupRollingUpdate {
+							scope = utils.DeletionScopeServingGroup
+						}
+						patch := action.(kt.PatchAction)
+						assertDeletionScopePatch(t, action, scope, originalUIDs[patch.GetName()])
+						continue
+					}
+					require.NotContains(t, []string{"create", "update"}, action.GetVerb())
 					if deletion, ok := action.(kt.DeleteAction); ok {
 						deletions++
 						require.Equal(t, originalUIDs[deletion.GetName()], *deletion.GetDeleteOptions().Preconditions.UID)

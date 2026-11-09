@@ -351,7 +351,6 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 		return
 	}
 	klog.V(4).Infof("updatePod: %s/%s, %v", newPod.Namespace, newPod.Name, newPod.Status.Phase)
-
 	ms, servingGroupName, err := c.getModelServingByChildResource(newPod)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -361,8 +360,9 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 		}
 		return
 	}
-	if newPod.DeletionTimestamp != nil {
-		// Terminating members still occupy capacity but no longer supply Ready.
+	if newPod.DeletionTimestamp != nil || utils.HasDeletionScope(newPod) {
+		// Terminating or marked members still occupy capacity but no longer
+		// supply Ready, and their faults belong to the committed deletion.
 		c.enqueueModelServing(ms)
 		return
 	}
@@ -454,7 +454,6 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		klog.Warningf("ModelServing of deleted pod: %s not found, might be already deleted", pod.Name)
 		return
 	}
-
 	// Remove the pod from running pods in the store
 	c.store.DeleteRunningPodFromServingGroup(utils.GetNamespaceName(ms), servingGroupName, pod.Name)
 
@@ -463,6 +462,12 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		return
 	}
 
+	// A marked Pod belongs to a deletion committed before a restart; its
+	// event must not start a new recovery of the surviving scope.
+	if utils.HasDeletionScope(pod) {
+		c.enqueueModelServing(ms)
+		return
+	}
 	if c.handleDeletionInProgress(ms, servingGroupName, roleName, roleID) {
 		return
 	}
@@ -1580,7 +1585,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		return deleteErr
 	}
 	podTargets, _ := c.podDeletions.LoadOrStore(auxiliaryCleanupKey{ms.UID, groupName, roleName, roleID}, &podDeletionTargets{})
-	deleteErr = podTargets.(*podDeletionTargets).Delete(ctx, c.kubeClientSet, ms, selector)
+	deleteErr = podTargets.(*podDeletionTargets).Delete(ctx, c.kubeClientSet, ms, selector, utils.DeletionScopeRole)
 	if deleteErr != nil {
 		klog.Errorf("failed to delete pods of role %s/%s: %v", groupName, roleID, deleteErr)
 		return deleteErr
@@ -2069,6 +2074,7 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 }
 
 func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, errPod *corev1.Pod) error {
+	c.addServingGroupAndRoleFromPod(ms, servingGroupName, errPod)
 	if err := c.markPodUnavailable(ms, servingGroupName, errPod); err != nil {
 		return err
 	}
@@ -2182,14 +2188,21 @@ func (c *ModelServingController) syncPodRecovery(ctx context.Context, ms *worklo
 	return nil
 }
 
-// recoverPod deletes exactly the observed Pod; the delete event then applies
-// the recovery scope.
+// recoverPod applies the recovery scope of a faulty Pod. The deletion paths
+// record that scope before deleting the first Pod, so healthy partners are
+// still removed if the controller restarts before their delete events.
 func (c *ModelServingController) recoverPod(ctx context.Context, ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) error {
-	err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(pod.UID)))
+	group := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
+	var err error
+	if ms.Spec.RecoveryPolicy == workloadv1alpha1.ServingGroupRecreate {
+		err = c.deleteServingGroup(ctx, ms, group)
+	} else {
+		err = c.DeleteRole(ctx, ms, group, utils.GetRoleName(pod), utils.GetRoleID(pod))
+	}
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
-	klog.V(2).Infof("Deleted Pod %s/%s of ModelServing %s for recovery", pod.Namespace, pod.Name, ms.Name)
+	klog.V(2).Infof("Recovering Pod %s/%s of ModelServing %s with policy %s", pod.Namespace, pod.Name, ms.Name, ms.Spec.RecoveryPolicy)
 	return nil
 }
 
@@ -3084,6 +3097,7 @@ func (c *ModelServingController) createPod(
 		}
 	}
 
+	delete(pod.Annotations, utils.DeletionScopeAnnotation)
 	if roleCoordination(ms) != nil {
 		delete(pod.Annotations, surgeAnnotation)
 		temporary, _ := ctx.Value(coordinatedSurgeKey{}).(bool)
@@ -3191,7 +3205,7 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 		workloadv1alpha1.GroupNameLabelKey: servingGroupName,
 	})
 	podTargets, _ := c.podDeletions.LoadOrStore(auxiliaryCleanupKey{uid: ms.UID, group: servingGroupName}, &podDeletionTargets{})
-	err = podTargets.(*podDeletionTargets).Delete(ctx, c.kubeClientSet, ms, selector)
+	err = podTargets.(*podDeletionTargets).Delete(ctx, c.kubeClientSet, ms, selector, utils.DeletionScopeServingGroup)
 	if err != nil {
 		return fmt.Errorf("failed to delete pods of ServingGroup %s: %v", servingGroupName, err)
 	}

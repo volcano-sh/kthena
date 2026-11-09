@@ -118,6 +118,7 @@ func newInPlaceFixture(t *testing.T, newMutate func(*workloadv1alpha1.ModelServi
 				Kind:       workloadv1alpha1.ModelServingKind.Kind,
 				Name:       "ms",
 				UID:        oldMS.UID,
+				Controller: ptr.To(true),
 			}},
 		},
 		Spec: corev1.PodSpec{
@@ -246,9 +247,11 @@ func TestUpdateServingGroupInPlaceOrRecreate(t *testing.T) {
 
 			status := f.controller.store.GetServingGroupStatus(utils.GetNamespaceName(f.newMS), inPlaceTestGroup)
 			pod, err := f.kubeClient.CoreV1().Pods("default").Get(context.Background(), "ms-0-prefill-0-0", metav1.GetOptions{})
-			require.NoError(t, err)
-
 			assert.Equal(t, tt.wantRecreated, status == datastore.ServingGroupDeleting)
+			if tt.wantRecreated && apierrors.IsNotFound(err) {
+				return
+			}
+			require.NoError(t, err)
 			if !tt.wantInPlace {
 				assert.Equal(t, "img:v1", pod.Spec.Containers[0].Image)
 				assert.Nil(t, inplace.StateOf(pod))
@@ -477,8 +480,12 @@ func TestUpdateRoleInPlaceOrRecreate(t *testing.T) {
 			require.NoError(t, f.controller.updateRole(context.Background(), f.newMS, inPlaceTestGroup, "prefill", "prefill-0", f.newRev))
 
 			pod, err := f.kubeClient.CoreV1().Pods("default").Get(context.Background(), "ms-0-prefill-0-0", metav1.GetOptions{})
-			require.NoError(t, err)
 			assert.Equal(t, tt.wantRecreated, f.roleStatus() == datastore.RoleDeleting)
+			if tt.wantRecreated {
+				require.True(t, apierrors.IsNotFound(err))
+				return
+			}
+			require.NoError(t, err)
 			if !tt.wantInPlace {
 				assert.Equal(t, "img:v1", pod.Spec.Containers[0].Image)
 				assert.Nil(t, inplace.StateOf(pod))
@@ -959,7 +966,13 @@ func TestImageRewrittenAfterCreationIsRecreated(t *testing.T) {
 	require.NoError(t, f.controller.updateServingGroup(context.Background(), f.newMS, sg, f.newRev))
 
 	assert.Equal(t, datastore.ServingGroupDeleting, f.controller.store.GetServingGroupStatus(utils.GetNamespaceName(f.newMS), inPlaceTestGroup))
-	assert.Nil(t, inplace.StateOf(f.syncPodFromAPI(t)))
+	_, err := f.kubeClient.CoreV1().Pods("default").Get(context.Background(), "ms-0-prefill-0-0", metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+	for _, action := range f.kubeClient.Actions() {
+		if action.Matches("patch", "pods") {
+			assertDeletionScopePatch(t, action, utils.DeletionScopeServingGroup, "pod-uid")
+		}
+	}
 }
 
 func TestHalfPatchedUnitHitsDeadline(t *testing.T) {

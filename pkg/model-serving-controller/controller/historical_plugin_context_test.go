@@ -31,6 +31,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -53,6 +54,26 @@ func historicalPluginFixture(t *testing.T) (*ModelServingController, *kubefake.C
 	c, err := NewModelServingController(client, kthenafake.NewSimpleClientset(ms), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
 	require.NoError(t, err)
 	return c, client, ms
+}
+
+func TestPodCreateStripsDeletionMarkerAfterPluginHooks(t *testing.T) {
+	c, client, ms := historicalPluginFixture(t)
+	ms.Spec.Plugins = []workload.PluginSpec{{Name: plugins.DemoPluginName, Config: &apiextensionsv1.JSON{Raw: []byte(`{"annotations":{"workload.kthena.io/deletion-scope":"ServingGroup","example.com/plugin":"kept"}}`)}}}
+	role := ms.Spec.Template.Roles[0]
+	role.WorkerReplicas = 1
+	role.EntryTemplate.Metadata = &workload.Metadata{Annotations: map[string]string{utils.DeletionScopeAnnotation: utils.DeletionScopeRole, "example.com/template": "kept"}}
+	role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+	ms.Spec.Template.Roles[0] = role
+	_, err := c.createPodsByRole(context.Background(), role, ms, 0, 0, utils.ModelServingRevision(ms), "hash")
+	require.NoError(t, err)
+	pods, err := client.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 2)
+	for _, pod := range pods.Items {
+		require.NotContains(t, pod.Annotations, utils.DeletionScopeAnnotation)
+		require.Equal(t, "kept", pod.Annotations["example.com/template"])
+		require.Equal(t, "kept", pod.Annotations["example.com/plugin"])
+	}
 }
 
 func TestCoordinatedHistoryFormatsAndOwnerIdentity(t *testing.T) {
