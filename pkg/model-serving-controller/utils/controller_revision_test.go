@@ -24,9 +24,12 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
@@ -118,6 +121,37 @@ func TestGetControllerRevision(t *testing.T) {
 	assert.NotNil(t, cr)
 	assert.Equal(t, "test-ms-revision-v2", cr.Name)
 	assert.Equal(t, "revision-v2", cr.Labels[ControllerRevisionRevisionLabelKey])
+
+	// A complete, owned suffix object is not a substitute for a missing source.
+	alias := cr.DeepCopy()
+	alias.Name += "-baseline"
+	alias.Annotations = map[string]string{
+		ControllerRevisionDataVersionAnnotation:          ControllerRevisionDataVersionV1,
+		"modelserving.volcano.sh/legacy-revision-source": cr.Name,
+	}
+	data, err := BuildRevisionData(ms)
+	require.NoError(t, err)
+	alias.Data.Raw = data
+	_, err = client.AppsV1().ControllerRevisions(ms.Namespace).Create(ctx, alias, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, cr.Name, metav1.DeleteOptions{}))
+	client.ClearActions()
+	missing, err := GetControllerRevision(ctx, client, ms, "revision-v2")
+	require.NoError(t, err)
+	require.Nil(t, missing)
+	require.Len(t, client.Actions(), 1, "missing history must not probe a suffix alias")
+	require.Equal(t, cr.Name, client.Actions()[0].(clienttesting.GetAction).GetName())
+
+	wantErr := apierrors.NewServiceUnavailable("injected primary read failure")
+	client.PrependReactor("get", "controllerrevisions", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if action.(clienttesting.GetAction).GetName() == cr.Name {
+			return true, nil, wantErr
+		}
+		return false, nil, nil
+	})
+	missing, err = GetControllerRevision(ctx, client, ms, "revision-v2")
+	require.ErrorIs(t, err, wantErr)
+	require.Nil(t, missing)
 }
 
 // TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions tests that

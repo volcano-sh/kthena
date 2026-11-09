@@ -414,16 +414,23 @@ func ModelServingForControllerRevision(ms *workloadv1alpha1.ModelServing, cr *ap
 	if cr == nil || len(cr.Data.Raw) == 0 {
 		return nil, fmt.Errorf("controller revision or its data is nil")
 	}
-	if cr.Annotations[ControllerRevisionDataVersionAnnotation] == ControllerRevisionDataVersionV1 {
+	version := cr.Annotations[ControllerRevisionDataVersionAnnotation]
+	if version == ControllerRevisionDataVersionV1 {
 		return ApplyRevision(ms, cr)
 	}
 	if !controlledByModelServing(cr, ms) {
 		return nil, fmt.Errorf("controller revision %q is not controlled by ModelServing %s/%s", cr.Name, ms.Namespace, ms.Name)
 	}
+	if version != "" {
+		return nil, fmt.Errorf("unsupported revision data version %q", version)
+	}
 
 	roles, err := decodeLegacyRevisionRoles(cr.Data.Raw)
 	if err != nil {
 		return nil, err
+	}
+	if len(roles) == 0 {
+		return nil, fmt.Errorf("controller revision %q has no Role templates", cr.Name)
 	}
 	result := ms.DeepCopy()
 	result.Spec.Template.Roles = mergeRevisionRoles(ms.Spec.Template.Roles, roles)

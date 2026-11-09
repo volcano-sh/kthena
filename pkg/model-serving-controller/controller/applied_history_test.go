@@ -248,7 +248,7 @@ func TestAppliedHistoryReadinessRequiresActualMembers(t *testing.T) {
 	}
 }
 
-func TestAppliedHistoryMainPartitionPrefixAndRefill(t *testing.T) {
+func TestAppliedHistorySparsePartitionAndRefill(t *testing.T) {
 	for _, strategy := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
 		t.Run(string(strategy), func(t *testing.T) {
 			c := newAppliedHistoryController(t)
@@ -276,13 +276,13 @@ func TestAppliedHistoryMainPartitionPrefixAndRefill(t *testing.T) {
 			if strategy == workloadv1alpha1.ServingGroupRollingUpdate {
 				groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(current))
 				require.NoError(t, err)
-				require.False(t, c.hasUpdateableOutdatedServingGroup(ctx, current, groups, "new", 2), "main protects the first two existing records")
+				require.True(t, c.hasUpdateableOutdatedServingGroup(ctx, current, groups, "new", 2), "absolute ordinal 2 remains updateable despite being the second existing record")
 				require.NoError(t, c.scaleUpServingGroups(ctx, current, groups, 3, "new"))
 			} else {
 				group := utils.GenerateServingGroupName(current.Name, 0)
 				instances, err := c.store.GetRoleList(utils.GetNamespaceName(current), group, "decode")
 				require.NoError(t, err)
-				require.False(t, c.hasUpdateableOutdatedRoleInRound(ctx, current, group, current.Spec.Template.Roles[0], instances), "main protects the first two existing records")
+				require.True(t, c.hasUpdateableOutdatedRoleInRound(ctx, current, group, current.Spec.Template.Roles[0], instances), "absolute ordinal 2 remains updateable despite being the second existing record")
 				c.scaleUpRoles(ctx, current, group, current.Spec.Template.Roles[0], instances, 3, 0, "new", true)
 			}
 			groupOrdinal, roleOrdinal := 1, 0
@@ -294,6 +294,28 @@ func TestAppliedHistoryMainPartitionPrefixAndRefill(t *testing.T) {
 			require.Equal(t, "old", utils.ObjectRevision(pod), "the newly filled absolute ordinal 1 is protected")
 			require.Equal(t, "image:v1", pod.Spec.Containers[0].Image)
 		})
+	}
+}
+
+func TestRoleRolloutIgnoresInactiveServingGroupPartition(t *testing.T) {
+	c := newAppliedHistoryController(t)
+	old := appliedHistoryWorkload(workloadv1alpha1.RoleRollingUpdate, "image:v1", 0)
+	current := appliedHistoryWorkload(workloadv1alpha1.RoleRollingUpdate, "image:v2", 0)
+	old.Spec.Replicas, current.Spec.Replicas = ptr.To[int32](2), ptr.To[int32](2)
+	current.Spec.RolloutStrategy.RollingUpdateConfiguration = &workloadv1alpha1.RollingUpdateConfiguration{Partition: ptr.To(intstr.FromInt(2))}
+	recordTestRevision(t, c.kubeClientSet, old, "old")
+	recordTestRevision(t, c.kubeClientSet, current, "new")
+	key := utils.GetNamespaceName(current)
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		group := utils.GenerateServingGroupName(current.Name, ordinal)
+		seedAppliedRole(t, c, old, old.Spec.Template.Roles[0], ordinal, 0, "old", -1)
+		require.NoError(t, c.store.UpdateRoleStatus(key, group, "decode", "decode-0", datastore.RoleRunning))
+		require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+	}
+	require.NoError(t, c.manageRollingUpdate(context.Background(), current, "new"))
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		group := utils.GenerateServingGroupName(current.Name, ordinal)
+		require.Equal(t, datastore.RoleDeleting, c.store.GetRoleStatus(key, group, "decode", "decode-0"), "inactive top-level partition must not block either group's Role rollout")
 	}
 }
 

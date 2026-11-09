@@ -807,9 +807,8 @@ func (c *ModelServingController) hasUpdateableOutdatedServingGroup(
 	revision string,
 	partition int,
 ) bool {
-	// Preserve main's partition-protected prefix of existing groups.
-	for index, group := range groups {
-		if index >= partition && c.compareServingGroupTemplate(ctx, ms, group, revision) == templateDifferent {
+	for _, group := range groups {
+		if !partitionProtected(group.Name, partition) && c.compareServingGroupTemplate(ctx, ms, group, revision) == templateDifferent {
 			return true
 		}
 	}
@@ -864,14 +863,14 @@ func (c *ModelServingController) scaleDownOnRevisionError(ctx context.Context, m
 		errs = append(errs, partitionErr)
 		partition = 0
 	}
-	for index, group := range groups {
+	for _, group := range groups {
 		status := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), group.Name)
 		if status == datastore.ServingGroupDeleting || status == datastore.ServingGroupNotFound {
 			continue
 		}
 
 		rolesToScale := ms.Spec.Template.Roles
-		if index < partition {
+		if partitionProtected(group.Name, partition) {
 			historical, historyErr := c.revisionHistory(ctx, ms).roles(ctx, group.Revision)
 			if historyErr != nil {
 				errs = append(errs, fmt.Errorf("resolve protected ServingGroup %s: %w", group.Name, historyErr))
@@ -963,7 +962,7 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 		return err
 	}
 	var errs []error
-	for index, group := range groups {
+	for _, group := range groups {
 		if group.Status == datastore.ServingGroupDeleting {
 			continue
 		}
@@ -983,7 +982,7 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 				// Keep the existing safe nested count-decrease path. Role surge is
 				// inactive in SG mode; do not reclaim whole-group surge on this error.
 				partition, _, partitionErr := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
-				if partitionErr == nil && index >= partition {
+				if partitionErr == nil && ordinal >= partition {
 					for _, role := range ms.Spec.Template.Roles {
 						instances, listErr := c.store.GetRoleList(utils.GetNamespaceName(ms), group.Name, role.Name)
 						if listErr == nil && len(instances) > roleReplicas(role) {
@@ -1057,8 +1056,7 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 // scaleDownRoles handles Role scaling down with two-level priority-based selection:
 // 1. Primary: Not-ready roles (Creating, NotFound) are deleted first
 // 2. Secondary: Among roles with same status, lower deletion cost = delete first
-// When partition is set, the first N replicas (where N = partition) are protected.
-// Non-protected replicas (after the first N) are deleted first, then protected replicas if needed.
+// Partition protects templates, not explicit replica-count decreases.
 func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int) error {
 	// Calculate priority information for all Roles
 	allScores := make([]RoleWithScore, 0, len(roleList))
@@ -1076,35 +1074,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 		return nil
 	}
 
-	partition, _, partitionErr := c.getPartition(rolePartition(ms, targetRole), roleReplicas(targetRole))
-	if partitionErr != nil {
-		klog.Errorf("scaleDownRoles: failed to parse partition for role %s: %v", targetRole.Name, partitionErr)
-		partition = 0
-	}
-
-	// Partition protects the first N records in the ordinal-sorted roleList.
-	protectedRoleNames := sets.New[string]()
-	for i := 0; i < partition && i < len(roleList); i++ {
-		protectedRoleNames.Insert(roleList[i].Name)
-	}
-
-	var protectedScores []RoleWithScore
-	var nonProtectedScores []RoleWithScore
-	if partition > 0 {
-		protectedScores = make([]RoleWithScore, 0, len(allScores))
-		nonProtectedScores = make([]RoleWithScore, 0, len(allScores))
-		for _, score := range allScores {
-			if protectedRoleNames.Has(score.Name) {
-				protectedScores = append(protectedScores, score)
-			} else {
-				nonProtectedScores = append(nonProtectedScores, score)
-			}
-		}
-	} else {
-		nonProtectedScores = allScores
-	}
-
-	// Sort both lists by priority tuple: (priority, deletionCost, index)
+	// Sort by priority tuple: (priority, deletionCost, index).
 	// Lower priority value = higher deletion priority (delete first)
 	// Lower deletion cost = higher deletion priority
 	// Higher index = higher deletion priority (backward compatibility)
@@ -1123,7 +1093,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 		return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
 	}
 
-	slices.SortFunc(nonProtectedScores, sortRoles)
+	slices.SortFunc(allScores, sortRoles)
 
 	totalToDelete := max(0, len(allScores)-expectedCount)
 
@@ -1135,32 +1105,15 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 		return err
 	}
 
-	// Delete non-protected roles first (replicas after the first partition replicas)
-	numNonProtectedToDelete := min(totalToDelete, len(nonProtectedScores))
-	for i := 0; i < numNonProtectedToDelete; i++ {
-		target := nonProtectedScores[i]
-		klog.V(2).Infof("Scaling down non-protected role %s (priority: %d, deletion cost: %d, index: %d)",
+	for i := 0; i < totalToDelete; i++ {
+		target := allScores[i]
+		klog.V(2).Infof("Scaling down role %s (priority: %d, deletion cost: %d, index: %d)",
 			target.Name, target.Priority, target.DeletionCost, target.Index)
 		if err := c.DeleteRole(ctx, ms, groupName, targetRole.Name, target.Name); err != nil {
 			return err
 		}
 	}
 
-	// After all non-protected roles are deleted, proceed to delete protected roles if needed
-	remainingToDelete := totalToDelete - numNonProtectedToDelete
-	if remainingToDelete > 0 && partition > 0 {
-		// Sort protected scores only when we need to delete them
-		slices.SortFunc(protectedScores, sortRoles)
-		numProtectedToDelete := min(remainingToDelete, len(protectedScores))
-		for i := 0; i < numProtectedToDelete; i++ {
-			target := protectedScores[i]
-			klog.V(2).Infof("Scaling down protected role %s (priority: %d, deletion cost: %d, index: %d, partition=%d)",
-				target.Name, target.Priority, target.DeletionCost, target.Index, partition)
-			if err := c.DeleteRole(ctx, ms, groupName, targetRole.Name, target.Name); err != nil {
-				return err
-			}
-		}
-	}
 	return nil
 }
 
@@ -1300,8 +1253,8 @@ func (c *ModelServingController) scaleUpRoles(
 			// Observed protected replicas can still pin an older revision. Never
 			// guess by taking an arbitrary item from retained history.
 			if revisionToUse == newRevision {
-				for index, observed := range roleList {
-					if index < partition && observed.Revision != "" && observed.Revision != newRevision {
+				for _, observed := range roleList {
+					if partitionProtected(observed.Name, partition) && observed.Revision != "" && observed.Revision != newRevision {
 						if revisionToUse != newRevision && revisionToUse != observed.Revision {
 							c.revisionHistory(ctx, ms).recordComparisonError(groupName+"/"+targetRole.Name,
 								fmt.Errorf("ambiguous historical revision for missing protected Role ordinal %d", ordinal))
@@ -1527,7 +1480,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 }
 
 // hasUpdateableOutdatedRole reports whether a Role has an outdated replica
-// outside its partition-protected prefix. maxSurge changes only the temporary
+// outside its absolute partition boundary. maxSurge changes only the temporary
 // expected replica count; individual replicas are not classified as surge by
 // ordinal because binpack scale-down may leave sparse or high ordinals.
 func (c *ModelServingController) hasUpdateableOutdatedRoleInRound(ctx context.Context,
@@ -1541,13 +1494,8 @@ func (c *ModelServingController) hasUpdateableOutdatedRoleInRound(ctx context.Co
 		klog.Errorf("hasUpdateableOutdatedRole: failed to calculate partition for role %s in ServingGroup %s: %v", targetRole.Name, groupName, err)
 		return false
 	}
-	for index, role := range roleList {
-		protected := index < partition
-		if roleCoordination(ms) != nil {
-			_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
-			protected = ordinal < 0 || ordinal < partition
-		}
-		if protected || role.Status == datastore.RoleDeleting {
+	for _, role := range roleList {
+		if partitionProtected(role.Name, partition) || role.Status == datastore.RoleDeleting {
 			continue
 		}
 		if roleCoordination(ms) != nil {
@@ -1699,8 +1647,8 @@ func (c *ModelServingController) manageRollingUpdateWithPolicy(
 	var runningOutdatedGroups []datastore.ServingGroup
 	var groupsAfterPartition []datastore.ServingGroup
 	newServingGroupUnavailableCount := 0
-	for index, group := range servingGroupList {
-		if index >= partition {
+	for _, group := range servingGroupList {
+		if !partitionProtected(group.Name, partition) {
 			groupsAfterPartition = append(groupsAfterPartition, group)
 		} else if (ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate) &&
 			group.Status != datastore.ServingGroupRunning && c.compareServingGroupTemplate(ctx, ms, group, revision) == templateUnknown {
@@ -1919,25 +1867,14 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdateInRound(ctx co
 			}
 		}
 		outdatedRoles, newUnavailable := c.outdatedRolesInRound(ctx, ms, sg, roleSpec, roleList)
-		partition, partitionConfigured, partitionErr := c.getPartition(rolePartition(ms, roleSpec), roleReplicas(roleSpec))
+		partition, _, partitionErr := c.getPartition(rolePartition(ms, roleSpec), roleReplicas(roleSpec))
 		if partitionErr != nil {
 			return nil, false, fmt.Errorf("failed to parse partition for role %s: %v", roleSpec.Name, partitionErr)
 		}
-		coordinated := roleCoordination(ms) != nil
 		protected := sets.New[string]()
-		if partitionConfigured && partition > 0 {
-			if coordinated {
-				for _, role := range roleList {
-					_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
-					if ordinal >= 0 && ordinal < partition {
-						protected.Insert(role.Name)
-					}
-				}
-			} else {
-				// Preserve the existing independent Role rollout semantics.
-				for i := 0; i < partition && i < len(roleList); i++ {
-					protected.Insert(roleList[i].Name)
-				}
+		for _, role := range roleList {
+			if partitionProtected(role.Name, partition) {
+				protected.Insert(role.Name)
 			}
 		}
 		if len(protected) > 0 && len(outdatedRoles) > 0 {
@@ -2404,7 +2341,8 @@ func (c *ModelServingController) getModelServingByChildResource(resource metav1.
 	return ms, servingGroupName, nil
 }
 
-// shouldSkipHandling checks if a pod should be skipped based on owner mismatch or revision mismatch
+// shouldSkipHandling checks if an object should be skipped because it is not
+// owned by the ModelServing or does not carry a controller-generated identity.
 func (c *ModelServingController) shouldSkipHandling(ms *workloadv1alpha1.ModelServing, servingGroupName string, obj metav1.Object) bool {
 	if !utils.IsOwnedByModelServingWithUID(obj, ms.UID) {
 		// If the pod is not owned by the ModelServing, we do not need to handle it.
@@ -2412,7 +2350,26 @@ func (c *ModelServingController) shouldSkipHandling(ms *workloadv1alpha1.ModelSe
 			obj.GetNamespace(), obj.GetName(), ms.Namespace, ms.Name)
 		return true
 	}
+	if !hasGeneratedIdentity(ms, servingGroupName, obj.GetLabels()) {
+		klog.Warningf("object %s/%s has a ServingGroup or Role identity not generated for ModelServing %s/%s, skip handling",
+			obj.GetNamespace(), obj.GetName(), ms.Namespace, ms.Name)
+		return true
+	}
 	return false
+}
+
+// hasGeneratedIdentity reports whether the ServingGroup and optional Role ID
+// have the "<parent>-<ordinal>" form generated by the controller.
+func hasGeneratedIdentity(ms *workloadv1alpha1.ModelServing, servingGroupName string, labels map[string]string) bool {
+	if parent, ordinal := utils.GetParentNameAndOrdinal(servingGroupName); parent != ms.Name || ordinal < 0 {
+		return false
+	}
+	roleID, ok := labels[workloadv1alpha1.RoleIDKey]
+	if !ok {
+		return true
+	}
+	parent, ordinal := utils.GetParentNameAndOrdinal(roleID)
+	return parent == labels[workloadv1alpha1.RoleLabelKey] && ordinal >= 0
 }
 
 func getMetaObject(obj interface{}) metav1.Object {
@@ -2624,6 +2581,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 		// Track revision counts to determine the most common non-updated revision (CurrentRevision)
 		revisionCount := make(map[string]int)
 		referencedRevisions := make([]string, 0, len(groups))
+		roleCountsComplete := true
 		rolloutActive := c.hasUpdateableOutdatedServingGroup(ctx, latestMS, groups, revision, partition)
 		for index := range groups {
 			group := groups[index]
@@ -2635,6 +2593,11 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			roles, err := c.store.GetRolesByGroup(utils.GetNamespaceName(latestMS), group.Name)
 			if err != nil {
 				return fmt.Errorf("collect Role revision references for %s: %w", group.Name, err)
+			}
+			for _, desired := range latestMS.Spec.Template.Roles {
+				if len(roles[desired.Name]) != roleReplicas(desired) {
+					roleCountsComplete = false
+				}
 			}
 			for _, instances := range roles {
 				for _, role := range instances {
@@ -2692,37 +2655,19 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 		coordinationConditionChanged, coordinationCondition := rolloutPolicy.setCondition(copy)
 		shouldUpdate = shouldUpdate || coordinationConditionChanged
 
-		// Update revision fields following StatefulSet's logic:
-		// 1. UpdateRevision is always the new revision being applied
-		// 2. CurrentRevision is read from Status.CurrentRevision if it exists and is still valid
-		// 3. If Status.CurrentRevision doesn't exist or is invalid, compute from current groups
-		// 4. When all groups are updated, CurrentRevision = UpdateRevision
+		// A replacement gap must not discard the baseline used by protected slots.
 		updateRevision := revision
 		var currentRevision string
-		rolloutComplete := updated == replicas && available == replicas && len(groups) == replicas
+		rolloutComplete := roleCountsComplete && updated == replicas && available == replicas && len(groups) == replicas
 
-		// First, try to use existing CurrentRevision from status if it's still valid
 		if copy.Status.CurrentRevision != "" {
-			// Check if CurrentRevision is still valid (exists in non-updated groups)
-			if len(revisionCount) > 0 {
-				// Check if the existing CurrentRevision is still used by some groups
-				if count, exists := revisionCount[copy.Status.CurrentRevision]; exists && count > 0 {
-					currentRevision = copy.Status.CurrentRevision
-				}
-			}
-			// Promote only after every desired ServingGroup is updated and ready
-			// and temporary capacity has been fully removed.
+			currentRevision = copy.Status.CurrentRevision
 			if rolloutComplete {
 				currentRevision = updateRevision
-			} else if currentRevision == "" && rolloutActive {
-				// Desired replicas may all be updated while temporary capacity is
-				// still draining. Keep the previous CurrentRevision until the total
-				// ServingGroup count has converged.
-				currentRevision = copy.Status.CurrentRevision
 			}
 		}
 
-		// If CurrentRevision is not set (either not in status or invalid), compute it from current groups
+		// If CurrentRevision is absent, compute it from current groups.
 		if currentRevision == "" {
 			if rolloutComplete || len(revisionCount) == 0 {
 				// All groups are updated or no groups exist
@@ -2857,8 +2802,15 @@ func (c *ModelServingController) getPartition(partitionConfig *intstr.IntOrStrin
 	return partition, true, nil
 }
 
+// partitionProtected reports whether an instance's absolute ordinal is below
+// partition. Unparsable ordinals are filtered when objects are observed.
+func partitionProtected(name string, partition int) bool {
+	_, ordinal := utils.GetParentNameAndOrdinal(name)
+	return ordinal < partition
+}
+
 func modelServingPartition(ms *workloadv1alpha1.ModelServing) *intstr.IntOrString {
-	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.RollingUpdateConfiguration == nil {
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate || ms.Spec.RolloutStrategy.RollingUpdateConfiguration == nil {
 		return nil
 	}
 	return ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition
@@ -2916,37 +2868,19 @@ func forEachMissingOrdinal(expectedCount int, existingOrdinals []int, limit int,
 // scaleDownServingGroups scales down the ServingGroups to the expected count with two-level priority-based selection:
 // 1. Primary: Not-ready groups (Creating, NotFound) are deleted first
 // 2. Secondary: Among groups with same status, lower deletion cost = delete first
-// When partition is set, the first N existing replicas are protected.
-// Non-protected replicas are deleted first, then protected replicas if needed.
+// Partition protects templates, not explicit replica-count decreases.
 func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {
-	partition, _, _ := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
-
-	// Partition protects the first N existing groups in ordinal order. The
-	// datastore returns servingGroupList in that order, including when binpack
-	// scale-down has left sparse ordinals.
-	protectedGroupNames := sets.New[string]()
-	for index := 0; index < partition && index < len(servingGroupList); index++ {
-		protectedGroupNames.Insert(servingGroupList[index].Name)
-	}
-
 	// Calculate scores for all servingGroups first
 	allScores := make([]ServingGroupWithScore, 0, len(servingGroupList))
 	for _, group := range servingGroupList {
+		if group.Status == datastore.ServingGroupDeleting {
+			continue
+		}
 		scoreInfo := c.calculateServingGroupScore(ms, group.Name)
 		allScores = append(allScores, scoreInfo)
 	}
 
-	var protectedScores []ServingGroupWithScore
-	var nonProtectedScores []ServingGroupWithScore
-	for _, score := range allScores {
-		if protectedGroupNames.Has(score.Name) {
-			protectedScores = append(protectedScores, score)
-		} else {
-			nonProtectedScores = append(nonProtectedScores, score)
-		}
-	}
-
-	// Sort both lists by priority tuple: (priority, deletionCost, index)
+	// Sort by priority tuple: (priority, deletionCost, index).
 	// Lower priority value = higher deletion priority (delete first)
 	// Lower deletion cost = higher deletion priority
 	// Higher index = higher deletion priority (backward compatibility)
@@ -2965,37 +2899,17 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 		return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
 	}
 
-	slices.SortFunc(nonProtectedScores, sortGroups)
+	slices.SortFunc(allScores, sortGroups)
 
-	totalToDelete := max(0, len(servingGroupList)-expectedCount)
+	totalToDelete := max(0, len(allScores)-expectedCount)
 
 	var err []error
-	// Delete non-protected groups first (replicas after the first partition replicas)
-	numNonProtectedToDelete := min(totalToDelete, len(nonProtectedScores))
-
-	for i := 0; i < numNonProtectedToDelete; i++ {
-		targetGroup := nonProtectedScores[i]
-		klog.V(2).Infof("Scaling down non-protected serving group %s (priority: %d, deletion cost: %d, index: %d)",
+	for i := 0; i < totalToDelete; i++ {
+		targetGroup := allScores[i]
+		klog.V(2).Infof("Scaling down serving group %s (priority: %d, deletion cost: %d, index: %d)",
 			targetGroup.Name, targetGroup.Priority, targetGroup.DeletionCost, targetGroup.Index)
 		if e := c.deleteServingGroup(ctx, ms, targetGroup.Name); e != nil {
 			err = append(err, e)
-		}
-	}
-
-	// After all non-protected groups are deleted, proceed to delete protected groups if needed
-	remainingToDelete := totalToDelete - numNonProtectedToDelete
-	if remainingToDelete > 0 && partition > 0 {
-		// Sort protected scores only when we need to delete them
-		slices.SortFunc(protectedScores, sortGroups)
-		numProtectedToDelete := min(remainingToDelete, len(protectedScores))
-
-		for i := 0; i < numProtectedToDelete; i++ {
-			targetGroup := protectedScores[i]
-			klog.V(2).Infof("Scaling down protected serving group %s (priority: %d, deletion cost: %d, index: %d, partition=%d)",
-				targetGroup.Name, targetGroup.Priority, targetGroup.DeletionCost, targetGroup.Index, partition)
-			if e := c.deleteServingGroup(ctx, ms, targetGroup.Name); e != nil {
-				err = append(err, e)
-			}
 		}
 	}
 
@@ -3376,10 +3290,6 @@ func (c *ModelServingController) resolveRoleTemplateHashFromRevision(ms *workloa
 		return "", false
 	}
 
-	cr, err = utils.EnsureRevisionBaseline(ctx, c.kubeClientSet, ms, cr)
-	if err != nil {
-		return "", false
-	}
 	workload, err := utils.ModelServingForControllerRevision(ms, cr)
 	if err != nil {
 		klog.Warningf("failed to parse roles from ControllerRevision %s for ModelServing %s/%s: %v", revision, ms.Namespace, ms.Name, err)
