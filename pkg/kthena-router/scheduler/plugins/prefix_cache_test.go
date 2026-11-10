@@ -24,6 +24,8 @@ import (
 	"testing"
 
 	"github.com/cespare/xxhash"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -488,6 +490,101 @@ func BenchmarkHashPrompt(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				_ = p.hashPrompt("bench-model", prompt)
+			}
+		})
+	}
+}
+
+func TestPrefixCachePostSchedule(t *testing.T) {
+	pod1 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "default"}}}
+	pod2 := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2", Namespace: "default"}}}
+	hashes := []uint64{1001, 1002, 1003}
+
+	newTestPlugin := func() *PrefixCache {
+		mockDS := datastore.New()
+		return &PrefixCache{
+			name:             PrefixCachePluginName,
+			blockSizeToHash:  64,
+			maxBlocksToMatch: 128,
+			store:            cache.NewModelPrefixStore(mockDS, 100, 5),
+		}
+	}
+
+	tests := []struct {
+		name          string
+		plugin        *PrefixCache
+		ctx           *framework.Context
+		index         int
+		checkExpected func(t *testing.T, p *PrefixCache)
+	}{
+		{
+			name:   "empty hashes does not store or allocate model cache in aggregated path",
+			plugin: newTestPlugin(),
+			ctx: &framework.Context{
+				Model:    "test-model",
+				Hashes:   []uint64{},
+				BestPods: []*datastore.PodInfo{pod1},
+			},
+			index: 0,
+			checkExpected: func(t *testing.T, p *PrefixCache) {
+				assert.Equal(t, float64(0), p.store.EntryCount())
+				assert.Nil(t, p.store.FindTopMatches("test-model", hashes, []*datastore.PodInfo{pod1}))
+			},
+		},
+		{
+			name:   "valid BestPods stores pod in cache",
+			plugin: newTestPlugin(),
+			ctx: &framework.Context{
+				Model:    "test-model",
+				Hashes:   hashes,
+				BestPods: []*datastore.PodInfo{pod1},
+			},
+			index: 0,
+			checkExpected: func(t *testing.T, p *PrefixCache) {
+				matches := p.store.FindTopMatches("test-model", hashes, []*datastore.PodInfo{pod1})
+				assert.Equal(t, len(hashes), matches[pod1.GetPodNamespacedName()])
+			},
+		},
+		{
+			name:   "empty hashes does not store or allocate model cache in disaggregated path",
+			plugin: newTestPlugin(),
+			ctx: &framework.Context{
+				Model:       "test-model",
+				Hashes:      []uint64{},
+				DecodePods:  []*datastore.PodInfo{pod1},
+				PrefillPods: []*datastore.PodInfo{pod2},
+			},
+			index: 0,
+			checkExpected: func(t *testing.T, p *PrefixCache) {
+				assert.Equal(t, float64(0), p.store.EntryCount())
+				assert.Nil(t, p.store.FindTopMatches("test-model", hashes, []*datastore.PodInfo{pod1, pod2}))
+			},
+		},
+		{
+			name:   "PD disaggregated path stores both decode and prefill pods",
+			plugin: newTestPlugin(),
+			ctx: &framework.Context{
+				Model:       "test-model",
+				Hashes:      hashes,
+				DecodePods:  []*datastore.PodInfo{pod1},
+				PrefillPods: []*datastore.PodInfo{pod2},
+			},
+			index: 0,
+			checkExpected: func(t *testing.T, p *PrefixCache) {
+				matches := p.store.FindTopMatches("test-model", hashes, []*datastore.PodInfo{pod1, pod2})
+				assert.Equal(t, len(hashes), matches[pod1.GetPodNamespacedName()])
+				assert.Equal(t, len(hashes), matches[pod2.GetPodNamespacedName()])
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				tt.plugin.PostSchedule(tt.ctx, tt.index)
+			})
+			if tt.checkExpected != nil {
+				tt.checkExpected(t, tt.plugin)
 			}
 		})
 	}
