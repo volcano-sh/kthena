@@ -45,6 +45,7 @@ func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	// Create a ModelServing with 4 replicas and maxUnavailable set to 2
 	replicas := int32(4)
 	modelServing := createBasicModelServing("test-rolling-update-maxunavailable", replicas, replicas)
+	modelServing.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable = ptr.To(intstr.FromInt(2))
 	t.Log("Creating ModelServing with 4 replicas and maxUnavailable=2")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
 
@@ -381,6 +382,7 @@ func TestModelServingRollingUpdateMaxUnavailableWithBadImage(t *testing.T) {
 	// Create a ModelServing with 6 replicas and maxUnavailable set to 2
 	replicas := int32(6)
 	modelServing := createBasicModelServing("test-rolling-update-bad-image", replicas, 0)
+	modelServing.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable = ptr.To(intstr.FromInt(2))
 	t.Log("Creating ModelServing with 6 replicas and maxUnavailable=2")
 	_, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelServing")
@@ -707,6 +709,7 @@ func TestModelServingPartitionScaleDown(t *testing.T) {
 	// Update the ModelServing to scale down
 	updateModelServingWithRetry(t, ctx, kthenaClient, modelServing.Name, func(ms *workload.ModelServing) {
 		ms.Spec.Replicas = ptr.To(scaledReplicas)
+		ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable = ptr.To(intstr.FromInt32(scaledReplicas))
 	})
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
