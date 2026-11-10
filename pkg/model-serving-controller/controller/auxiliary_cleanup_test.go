@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 
@@ -294,6 +295,125 @@ func TestReplacementPodIsPreservedAndDiagnosedDuringCleanupRetry(t *testing.T) {
 				}
 			}
 			require.True(t, diagnosed, "safe waiting must be diagnosed instead of silently stuck or deleting the replacement")
+		})
+	}
+}
+
+// A worker sync can observe a deleted Pod live and recreate it while the
+// informer callback is still handling that deletion. The recreated Pod must be
+// part of the recovery instead of a replacement that leaves the unit Deleting.
+func TestPodDeletionRecoveryIncludesPodRecreatedByInFlightSync(t *testing.T) {
+	for _, policy := range []workload.RecoveryPolicy{workload.RoleRecreate, workload.ServingGroupRecreate} {
+		t.Run(string(policy), func(t *testing.T) {
+			c, client, ms, svc := auxiliaryFixture(t)
+			ms.Spec.RecoveryPolicy = policy
+			nsn := utils.GetNamespaceName(ms)
+			c.store.AddRole(nsn, "cleanup-0", "infer", "infer-0", "v1", "hash")
+			deleted := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "member", Namespace: ms.Namespace, UID: "deleted", Labels: svc.Labels, OwnerReferences: svc.OwnerReferences}}
+			recreated := deleted.DeepCopy()
+			recreated.UID = "recreated"
+			syncCreated := false
+			createBySync := func() {
+				syncCreated = true
+				require.NoError(t, client.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"), recreated.DeepCopy(), ms.Namespace))
+				require.NoError(t, c.podsInformer.GetIndexer().Add(recreated))
+			}
+			// Land the in-flight create right after the first deletion snapshot.
+			client.PrependReactor("list", "pods", func(a kt.Action) (bool, runtime.Object, error) {
+				if syncCreated {
+					return false, nil, nil
+				}
+				handled, list, err := kt.ObjectReaction(client.Tracker())(a)
+				createBySync()
+				return handled, list, err
+			})
+
+			require.NoError(t, c.handleDeletedPod(ms, "cleanup-0", deleted))
+			if !syncCreated {
+				createBySync()
+			}
+			require.NoError(t, c.finishPendingDeletions(context.Background(), ms))
+			_, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), recreated.Name, metav1.GetOptions{})
+			require.True(t, apierrors.IsNotFound(err), "the Pod recreated by the in-flight sync must be recovered with its unit")
+
+			require.NoError(t, c.podsInformer.GetIndexer().Delete(recreated))
+			require.NoError(t, c.finishPendingDeletions(context.Background(), ms))
+			require.Equal(t, datastore.RoleNotFound, c.store.GetRoleStatus(nsn, "cleanup-0", "infer", "infer-0"))
+		})
+	}
+}
+
+// A committed deletion must finish after a controller restart without turning
+// the late delete events of its own Pods into a new recovery. Regression: with
+// ServingGroupRecreate, scaling down one Role restarted the whole ServingGroup.
+func TestMarkedDeletionResumesAfterRestartWithoutWideningScope(t *testing.T) {
+	for _, groupScope := range []bool{false, true} {
+		t.Run(fmt.Sprintf("group=%t", groupScope), func(t *testing.T) {
+			ctx := context.Background()
+			c, client, ms, service := auxiliaryFixture(t)
+			ms.Spec.RecoveryPolicy = workload.ServingGroupRecreate
+			key := utils.GetNamespaceName(ms)
+			newPod := func(name, group, roleID string) *corev1.Pod {
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ms.Namespace, UID: types.UID(name + "-uid"), Labels: maps.Clone(service.Labels), OwnerReferences: service.OwnerReferences}}
+				pod.Labels[workload.GroupNameLabelKey], pod.Labels[workload.RoleIDKey] = group, roleID
+				_, err := client.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+				require.NoError(t, err)
+				return pod
+			}
+			entry, worker := newPod("entry", "cleanup-0", "infer-0"), newPod("worker", "cleanup-0", "infer-0")
+			survivorGroup, survivorRole := "cleanup-0", "infer-1"
+			if groupScope {
+				survivorGroup, survivorRole = "cleanup-1", "infer-0"
+			}
+			survivor := newPod("survivor", survivorGroup, survivorRole)
+			c.store.AddRole(key, "cleanup-0", "infer", "infer-0", "v1", "hash")
+			denied := true
+			client.PrependReactor("delete", "pods", func(action kt.Action) (bool, runtime.Object, error) {
+				if denied && action.(kt.DeleteAction).GetName() == worker.Name {
+					return true, nil, fmt.Errorf("worker delete denied")
+				}
+				return false, nil, nil
+			})
+			scope := utils.DeletionScopeRole
+			if groupScope {
+				scope = utils.DeletionScopeServingGroup
+				require.ErrorContains(t, c.deleteServingGroup(ctx, ms, "cleanup-0"), "worker delete denied")
+			} else {
+				require.ErrorContains(t, c.DeleteRole(ctx, ms, "cleanup-0", "infer", "infer-0"), "worker delete denied")
+			}
+			marked, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, worker.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, scope, marked.Annotations[utils.DeletionScopeAnnotation])
+
+			restarted, err := NewModelServingController(client, kthenafake.NewSimpleClientset(ms), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+			require.NoError(t, err)
+			require.NoError(t, restarted.modelServingsInformer.GetIndexer().Add(ms))
+			require.NoError(t, restarted.podsInformer.GetIndexer().Add(marked))
+			require.NoError(t, restarted.podsInformer.GetIndexer().Add(survivor))
+			restarted.store.AddRole(key, "cleanup-0", "infer", "infer-0", "v1", "hash")
+			restarted.store.AddRole(key, survivorGroup, "infer", survivorRole, "v1", "hash")
+			// The entry's delete event arrives only after the restart.
+			lateEntry := entry.DeepCopy()
+			lateEntry.Annotations = map[string]string{utils.DeletionScopeAnnotation: scope}
+			restarted.deletePod(lateEntry)
+
+			denied = false
+			client.ClearActions()
+			require.NoError(t, restarted.finishPendingDeletions(ctx, ms))
+			var deleted []string
+			for _, action := range client.Actions() {
+				if action.Matches("delete", "pods") {
+					del := action.(kt.DeleteAction)
+					deleted = append(deleted, del.GetName())
+					require.Equal(t, worker.UID, *del.GetDeleteOptions().Preconditions.UID)
+				}
+			}
+			require.Equal(t, []string{worker.Name}, deleted)
+			actual, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, survivor.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, survivor.UID, actual.UID)
+			require.NotEqual(t, datastore.ServingGroupDeleting, restarted.store.GetServingGroupStatus(key, survivorGroup))
+			require.NotEqual(t, datastore.RoleDeleting, restarted.store.GetRoleStatus(key, survivorGroup, "infer", survivorRole))
 		})
 	}
 }

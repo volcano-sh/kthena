@@ -1161,42 +1161,7 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 	t.Logf("Waiting for %v before restarting controller-manager", randomWait)
 	time.Sleep(randomWait)
 
-	// Find and delete controller-manager pods
-	t.Logf("Finding controller-manager pods in namespace %s", kthenaNamespace)
-
-	// Use label selector to find controller-manager pods
-	labelSelector := "app.kubernetes.io/component=kthena-controller-manager"
-	controllerPods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
-	require.NoError(t, err, "Failed to list controller-manager pods")
-	require.NotEmpty(t, controllerPods.Items, "No controller-manager pods found")
-
-	// Delete all controller-manager pods
-	for _, pod := range controllerPods.Items {
-		t.Logf("Deleting controller-manager pod: %s", pod.Name)
-		err := kubeClient.CoreV1().Pods(kthenaNamespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
-		require.NoError(t, err, "Failed to delete controller-manager pod %s", pod.Name)
-	}
-
-	// Wait for controller-manager pods to restart and become ready
-	t.Log("Waiting for controller-manager to restart...")
-	require.Eventually(t, func() bool {
-		pods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			return false
-		}
-		// Check that at least one controller-manager pod is running and ready
-		for _, pod := range pods.Items {
-			if utils.IsPodReady(pod) {
-				t.Logf("Controller-manager pod is ready: %s", pod.Name)
-				return true
-			}
-		}
-		return false
-	}, 3*time.Minute, 5*time.Second, "Controller-manager did not restart and become ready")
+	restartControllerManager(t, ctx, kubeClient)
 
 	// Wait for ModelServing to be ready
 	t.Log("Waiting for ModelServing to be ready after controller-manager restart...")
@@ -1236,6 +1201,112 @@ func TestModelServingControllerManagerRestart(t *testing.T) {
 // TestModelServingRolePartitionScaleUp verifies that when a partition-protected role replica is
 // deleted under RoleRecreate, scale-up recreates the missing protected ordinal with the historical
 // TestModelServingRolePartitionScaleDown verifies that scaling down a role while partition is active
+// restartControllerManager deletes the controller-manager Pods and waits for a
+// new incarnation to become Ready.
+func restartControllerManager(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset) {
+	t.Helper()
+	labelSelector := "app.kubernetes.io/component=kthena-controller-manager"
+	controllerPods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	require.NoError(t, err, "Failed to list controller-manager pods")
+	require.NotEmpty(t, controllerPods.Items, "No controller-manager pods found")
+	previous := make(map[types.UID]bool, len(controllerPods.Items))
+	for _, pod := range controllerPods.Items {
+		previous[pod.UID] = true
+		t.Logf("Deleting controller-manager pod: %s", pod.Name)
+		err := kubeClient.CoreV1().Pods(kthenaNamespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+		require.NoError(t, err, "Failed to delete controller-manager pod %s", pod.Name)
+	}
+
+	t.Log("Waiting for controller-manager to restart...")
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(kthenaNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if !previous[pod.UID] && pod.DeletionTimestamp == nil && utils.IsPodReady(pod) {
+				t.Logf("Controller-manager pod is ready: %s", pod.Name)
+				return true
+			}
+		}
+		return false
+	}, 3*time.Minute, 5*time.Second, "Controller-manager did not restart and become ready")
+}
+
+// TestModelServingRoleScaleDownAcrossControllerRestart verifies that scaling
+// down a Role under ServingGroupRecreate deletes only the selected instance,
+// even when the controller restarts before the deletion finishes.
+func TestModelServingRoleScaleDownAcrossControllerRestart(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	prefillRole := createRole("prefill", 2, 0)
+	// Keep the removed Pod Terminating long enough to restart the controller.
+	prefillRole.EntryTemplate.Spec.TerminationGracePeriodSeconds = ptr.To[int64](60)
+	prefillRole.EntryTemplate.Spec.Containers[0].Lifecycle = &corev1.Lifecycle{
+		PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"sleep", "30"}}},
+	}
+	decodeRole := createRole("decode", 1, 0)
+	modelServing := createBasicModelServing("test-role-scale-down-restart", 1, 0, prefillRole, decodeRole)
+	modelServing.Spec.RecoveryPolicy = workload.ServingGroupRecreate
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	require.NoError(t, err)
+	require.Len(t, podList.Items, 3, "Expected 2 prefill and 1 decode Pods")
+	var removed string
+	survivors := make(map[string]types.UID)
+	for _, pod := range podList.Items {
+		if pod.Labels[workload.RoleIDKey] == "prefill-1" {
+			removed = pod.Name
+			continue
+		}
+		survivors[pod.Name] = pod.UID
+	}
+	require.NotEmpty(t, removed, "Expected a prefill-1 Pod")
+
+	t.Log("Scaling prefill from 2 to 1")
+	updateModelServingWithRetry(t, ctx, kthenaClient, modelServing.Name, func(ms *workload.ModelServing) {
+		ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](1)
+	})
+	require.Eventually(t, func() bool {
+		pod, err := kubeClient.CoreV1().Pods(testNamespace).Get(ctx, removed, metav1.GetOptions{})
+		return err == nil && pod.DeletionTimestamp != nil
+	}, time.Minute, time.Second, "Pod %s did not start terminating", removed)
+
+	restartControllerManager(t, ctx, kubeClient)
+	require.Eventually(t, func() bool {
+		_, err := kubeClient.CoreV1().Pods(testNamespace).Get(ctx, removed, metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}, 2*time.Minute, 2*time.Second, "Pod %s was not deleted", removed)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	// The rest of the ServingGroup must not be recreated.
+	require.Never(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+		if err != nil {
+			return false
+		}
+		current := make(map[string]types.UID, len(pods.Items))
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp == nil {
+				current[pod.Name] = pod.UID
+			}
+		}
+		if len(current) != len(survivors) {
+			t.Logf("Pods changed: %v", current)
+			return true
+		}
+		for name, uid := range survivors {
+			if current[name] != uid {
+				t.Logf("Pod %s was replaced", name)
+				return true
+			}
+		}
+		return false
+	}, 20*time.Second, 2*time.Second, "Role scale-down restarted the ServingGroup")
+}
+
 // TestModelServingBinPackScaleDownServingGroup tests bin pack scale down at ServingGroup level
 func TestModelServingBinPackScaleDownServingGroup(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)

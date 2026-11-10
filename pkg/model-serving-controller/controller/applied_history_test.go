@@ -57,6 +57,108 @@ func appliedHistoryWorkload(strategy workloadv1alpha1.RolloutStrategyType, image
 	return ms
 }
 
+func TestIndependentRoleScaleDownUsesLiveHealthAndRevision(t *testing.T) {
+	for _, scenario := range []string{"all Ready", "worker NotReady", "unknown history scale to zero"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			current := appliedHistoryWorkload(workloadv1alpha1.RoleRollingUpdate, "target-image", 1)
+			current.ResourceVersion = "1"
+			current.Spec.Template.Roles[0].Replicas = ptr.To[int32](5)
+			current.Spec.Template.Roles[0].Partition = ptr.To(intstr.FromInt(3))
+			current.Status.CurrentRevision = "old"
+			c := newRevisionTestController(t, current)
+			old := current.DeepCopy()
+			old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old-image"
+			old.Spec.Template.Roles[0].WorkerTemplate.Spec.Containers[0].Image = "old-image"
+			recordTestRevision(t, c.kubeClientSet, old, "old")
+			key, group, target := utils.GetNamespaceName(current), current.Name+"-0", utils.ModelServingRevision(current)
+			c.store.AddServingGroup(key, 0, "old")
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			originals := map[string]*corev1.Pod{}
+			for ordinal := 0; ordinal < 5; ordinal++ {
+				role, revision := old.Spec.Template.Roles[0], "old"
+				if ordinal >= 3 {
+					role, revision = current.Spec.Template.Roles[0], target
+				}
+				cachedRevision := revision
+				if ordinal == 3 {
+					cachedRevision = "old"
+					if scenario == "unknown history scale to zero" {
+						revision, cachedRevision = "missing-source", "missing-source"
+					}
+				}
+				pods := addMergeReadyInstance(t, c, current, group, role, ordinal, revision, cachedRevision, utils.CalRoleTemplateHash(role))
+				cost := ordinal
+				if ordinal >= 3 {
+					cost += 10000
+				}
+				pods[0].Annotations = map[string]string{corev1.PodDeletionCost: fmt.Sprint(cost)}
+				for member, pod := range pods {
+					if scenario == "worker NotReady" && ordinal == 4 && member == 1 {
+						pod.Status.Conditions[0].Status = corev1.ConditionFalse
+					}
+					_, err := client.CoreV1().Pods(current.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+					require.NoError(t, err)
+					require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+					originals[pod.Name] = pod.DeepCopy()
+				}
+			}
+			require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+			steadyErr := c.manageRoleReplicasPerGroup(ctx, current, group, current.Spec.Template.Roles[0], 0, target, true, nil)
+			// Retain the Creating projection produced by the previous buggy sync.
+			// The next full reconcile must refresh health before selecting victims.
+			require.NoError(t, c.store.UpdateRoleStatus(key, group, "decode", "decode-3", datastore.RoleCreating))
+			next := current.DeepCopy()
+			next.Generation++
+			next.Spec.Template.Roles[0].Replicas = ptr.To[int32](3)
+			want := []string{"decode-0", "decode-1"}
+			if scenario == "worker NotReady" {
+				want = []string{"decode-4", "decode-0"}
+			} else if scenario == "unknown history scale to zero" {
+				next.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+				next.Spec.Template.Roles[0].Partition = ptr.To(intstr.FromInt(0))
+				want = []string{"decode-3", "decode-0", "decode-1", "decode-2", "decode-4"}
+			}
+			require.NoError(t, c.modelServingsInformer.GetIndexer().Update(next))
+			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(next.Namespace).Update(ctx, next, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			client.ClearActions()
+			syncErr := c.syncModelServing(ctx, next.Namespace+"/"+next.Name)
+			deleted := []string{}
+			seen := map[string]bool{}
+			for _, action := range client.Actions() {
+				if deletion, ok := action.(kubetesting.DeleteAction); ok && action.GetResource().Resource == "pods" {
+					pod := originals[deletion.GetName()]
+					require.NotNil(t, pod)
+					require.Equal(t, pod.UID, *deletion.GetDeleteOptions().Preconditions.UID)
+					id := utils.GetRoleID(pod)
+					if !seen[id] {
+						deleted = append(deleted, id)
+						seen[id] = true
+					}
+				}
+			}
+			require.Equal(t, want, deleted, "full sync must not treat a live target as old or unhealthy because its cache revision lags")
+			if scenario == "unknown history scale to zero" {
+				require.Error(t, syncErr)
+				require.True(t, onlyRevisionErrors(syncErr), "unresolved history remains retryable after explicit scale-to-zero")
+			} else {
+				require.NoError(t, steadyErr, "an owned live target must not be repaired using its stale cached source")
+				require.NoError(t, syncErr)
+			}
+			remaining, err := client.CoreV1().Pods(current.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, remaining.Items, 2*int(*next.Spec.Template.Roles[0].Replicas))
+			for _, pod := range remaining.Items {
+				require.Equal(t, originals[pod.Name].UID, pod.UID)
+				require.Equal(t, originals[pod.Name].Spec, pod.Spec)
+				require.Equal(t, utils.ObjectRevision(originals[pod.Name]), utils.ObjectRevision(&pod))
+				require.True(t, utils.IsPodRunningAndReady(&pod))
+			}
+		})
+	}
+}
+
 // Seed actual rendered members, immutable history and datastore identities
 // separately, so tests can remove a required member without changing its history.
 func seedAppliedRole(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, role workloadv1alpha1.Role, groupOrdinal, roleOrdinal int, revision string, missingOrdinal int) map[string]types.UID {

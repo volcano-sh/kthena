@@ -23,8 +23,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -508,8 +506,8 @@ func (c *ModelServingController) reconcileInPlaceUnit(ctx context.Context, ms *w
 
 	if !retargeted && hasUnpatchedOutdatedPod(unit, revision) {
 		// A patch that keeps failing must not leave the unit half updated forever.
-		if deadline, remaining := inPlaceDeadline(ms, earliest); remaining <= 0 && ms.Spec.RecoveryPolicy != workloadv1alpha1.NoneRestartPolicy {
-			return c.handleInPlaceTimeout(ctx, ms, unit, revision, deadline)
+		if deadline, remaining := inPlaceDeadline(ms, earliest); remaining <= 0 && !recoverySuppressed(ms) {
+			return c.handleInPlaceTimeout(ctx, ms, unit, revision, deadline, earliest.Add(deadline))
 		} else if remaining > 0 {
 			c.enqueueModelServingAfter(ms, remaining)
 		}
@@ -638,7 +636,7 @@ func (c *ModelServingController) repairInPlaceRevision(ctx context.Context, ms *
 // podFinished tells whether the update of a Pod is done. With recoveryPolicy None a crash is
 // never recovered, so it must not keep a Pod that runs the target image from finishing.
 func podFinished(ms *workloadv1alpha1.ModelServing, state *inplace.State, pod *corev1.Pod) bool {
-	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy {
+	if recoverySuppressed(ms) {
 		return state.OnTarget(pod)
 	}
 	return state.Completed(pod)
@@ -720,35 +718,39 @@ func (c *ModelServingController) enforceInPlaceDeadline(ctx context.Context, ms 
 		c.enqueueModelServingAfter(ms, remaining)
 		return nil
 	}
-	return c.handleInPlaceTimeout(ctx, ms, unit, revision, deadline)
+	return c.handleInPlaceTimeout(ctx, ms, unit, revision, deadline, startedAt.Add(deadline))
 }
 
-// handleInPlaceTimeout treats the Pods that did not finish in time as error Pods, so the
-// recovery policy decides what happens: ServingGroupRecreate and RoleRecreate go through
-// handleErrorPod (grace period, deletion, then recreation of the Role or ServingGroup),
-// while None leaves the Pods alone like a plain Deployment would.
-// Pods of the unit that were never patched are deleted directly: they are healthy, so the
-// error path would keep them, and the unit cannot finish without them.
-func (c *ModelServingController) handleInPlaceTimeout(ctx context.Context, ms *workloadv1alpha1.ModelServing, unit *inPlaceUnit, revision string, deadline time.Duration) error {
-	c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "InPlaceUpdateTimeout",
-		fmt.Sprintf("In-place update of ServingGroup %s exceeded progress deadline %s, applying recovery policy %s", unit.groupName, deadline, ms.Spec.RecoveryPolicy))
-	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy {
+// handleInPlaceTimeout treats the Pods that did not finish in time as faulty, so the
+// recovery policy decides what happens after restartGracePeriodSeconds, counted
+// from the expired deadline. This includes healthy members left unpatched by a
+// partial update; they cannot finish the unit alone.
+func (c *ModelServingController) handleInPlaceTimeout(ctx context.Context, ms *workloadv1alpha1.ModelServing, unit *inPlaceUnit, revision string, deadline time.Duration, expiredAt time.Time) error {
+	if recoverySuppressed(ms) {
 		return nil
 	}
+	var timedOut []*corev1.Pod
 	for i, pod := range unit.pods {
 		if !unit.states[i].InProgress() {
-			if utils.ObjectRevision(pod) != revision && !utils.IsPodTerminating(pod) {
-				err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(pod.UID)))
-				if err != nil && !apierrors.IsNotFound(err) {
-					return err
-				}
+			if utils.ObjectRevision(pod) == revision || utils.IsPodTerminating(pod) {
+				continue
 			}
+		} else if podFinished(ms, unit.states[i], pod) {
 			continue
 		}
-		if podFinished(ms, unit.states[i], pod) {
-			continue
+		if err := c.markPodUnavailable(ms, unit.groupName, pod); err != nil {
+			return err
 		}
-		if err := c.handleErrorPod(ms, unit.groupName, pod); err != nil {
+		timedOut = append(timedOut, pod)
+	}
+	if remaining := restartGraceRemaining(ms, expiredAt); remaining > 0 {
+		c.enqueueModelServingAfter(ms, remaining)
+		return nil
+	}
+	c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "InPlaceUpdateTimeout",
+		fmt.Sprintf("In-place update of ServingGroup %s exceeded progress deadline %s, applying recovery policy %s", unit.groupName, deadline, ms.Spec.RecoveryPolicy))
+	for _, pod := range timedOut {
+		if err := c.recoverPod(ctx, ms, pod); err != nil {
 			return err
 		}
 	}

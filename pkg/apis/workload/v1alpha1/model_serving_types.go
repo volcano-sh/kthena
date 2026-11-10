@@ -59,7 +59,9 @@ type ModelServingSpec struct {
 	// +optional
 	RolloutStrategy *RolloutStrategy `json:"rolloutStrategy,omitempty"`
 
-	// RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt
+	// RecoveryPolicy selects the replacement scope for a failed or unexpectedly
+	// restarted Pod after its grace period. None disables active fault recovery;
+	// missing Pods are still replenished and normal template rollout continues.
 	// +kubebuilder:default=RoleRecreate
 	// +kubebuilder:validation:Enum={ServingGroupRecreate,RoleRecreate,None}
 	// +optional
