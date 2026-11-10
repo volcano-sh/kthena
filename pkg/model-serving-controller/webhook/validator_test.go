@@ -613,6 +613,25 @@ func TestRolloutBudgetAdmission(t *testing.T) {
 	}
 }
 
+func TestRestartGracePeriodAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		grace   int64
+		allowed bool
+	}{
+		{name: "disabled recovery", grace: -1, allowed: true},
+		{name: "immediate recovery", grace: 0, allowed: true},
+		{name: "below disabled", grace: -2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := immutableAdmissionModelServing(workloadv1alpha1.ServingGroupRollingUpdate)
+			ms.Spec.Template.RestartGracePeriodSeconds = ptr.To(tc.grace)
+			response := immutableAdmissionResponse(t, nil, ms, admissionv1.Create)
+			assert.Equal(t, tc.allowed, response.Allowed, "%v", response.Result)
+		})
+	}
+}
+
 func TestValidateMaxUnavailableForRoles(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -104,8 +104,10 @@ spec:
                 type: array
               recoveryPolicy:
                 default: RoleRecreate
-                description: RecoveryPolicy defines the recovery policy for the failed
-                  Pod to be rebuilt
+                description: |-
+                  RecoveryPolicy selects the replacement scope for a failed or unexpectedly
+                  restarted Pod after its grace period. None disables active fault recovery;
+                  missing Pods are still replenished and normal template rollout continues.
                 enum:
                 - ServingGroupRecreate
                 - RoleRecreate
@@ -400,9 +402,17 @@ spec:
                   restartGracePeriodSeconds:
                     default: 0
                     description: |-
-                      RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs
-                      Defaults to 0 (ServingGroup will be rebuilt immediately after an error)
+                      RestartGracePeriodSeconds is the time to tolerate a recoverable Pod fault
+                      before applying recoveryPolicy. Defaults to 0, which recovers immediately.
+                      -1 disables proactive recovery: the controller never deletes a faulty Pod,
+                      including one that misses an in-place update deadline, but a Pod deleted by
+                      others is still recreated according to recoveryPolicy.
+                      Ignored when recoveryPolicy is None.
+                      Finite grace uses the first fault observation in the current controller
+                      process and the latest configured value. Becoming Ready ends that observation.
+                      For an in-place update that misses its progress deadline, grace starts at the deadline.
                     format: int64
+                    minimum: -1
                     type: integer
                   roles:
                     items:

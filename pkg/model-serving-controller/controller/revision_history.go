@@ -394,7 +394,8 @@ func (c *ModelServingController) compareServingGroupTemplate(
 	group datastore.ServingGroup,
 	targetRevision string,
 ) templateComparison {
-	roleMode := ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate
+	ctx = ensureObservationRound(ctx, ms)
+	roleMode := isRoleRollingUpdate(ms)
 	if (roleMode && c.store != nil) || group.Revision == targetRevision {
 		// A ServingGroup revision alone cannot describe a partially updated
 		// RoleRollingUpdate. Continue with the observed Role identities below.
@@ -492,7 +493,7 @@ func (c *ModelServingController) compareRoleTemplate(
 	if desired == nil {
 		return templateDifferent
 	}
-	if roleCoordination(ms) != nil && ms.ResourceVersion != "" {
+	if ms.ResourceVersion != "" && isRoleRollingUpdate(ms) {
 		live, pod, err := c.coordinatedLiveRole(ctx, ms, servingGroup.Name, roleName, observed)
 		if err != nil || pod == nil || pod.DeletionTimestamp != nil {
 			return templateUnknown

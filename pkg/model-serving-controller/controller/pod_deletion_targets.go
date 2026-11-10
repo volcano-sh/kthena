@@ -18,11 +18,13 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sync"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,10 +45,12 @@ type podDeletionTargets struct {
 	ownerUID  types.UID
 }
 
-// Delete snapshots current owned Pods once, then submits named, UID-fenced
-// deletions. API acceptance completes each target here; callers separately
-// observe Pod disappearance before releasing workload capacity.
-func (d *podDeletionTargets) Delete(ctx context.Context, client kubernetes.Interface, ms *workload.ModelServing, selector labels.Selector) error {
+// Delete snapshots current owned Pods once, marks each with scope, then
+// submits named, UID-fenced deletions. Every target is marked before the first
+// DELETE so a restarted controller still finishes the whole scope. API
+// acceptance completes each target here; callers separately observe Pod
+// disappearance before releasing workload capacity.
+func (d *podDeletionTargets) Delete(ctx context.Context, client kubernetes.Interface, ms *workload.ModelServing, selector labels.Selector, scope string) error {
 	if client == nil || ms == nil || selector == nil {
 		return fmt.Errorf("Pod deletion requires Kubernetes client, ModelServing and selector")
 	}
@@ -78,6 +82,18 @@ func (d *podDeletionTargets) Delete(ctx context.Context, client kubernetes.Inter
 		if d.done[name] {
 			continue
 		}
+		live, err := markDeletionScope(ctx, client, ms, name, d.targets[name], scope)
+		if err != nil {
+			return fmt.Errorf("mark original Pod %s/%s for %s deletion: %w", ms.Namespace, name, scope, err)
+		}
+		if !live {
+			d.done[name] = true
+		}
+	}
+	for _, name := range names {
+		if d.done[name] {
+			continue
+		}
 		uid := d.targets[name]
 		pod, err := pods.Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
@@ -98,6 +114,38 @@ func (d *podDeletionTargets) Delete(ctx context.Context, client kubernetes.Inter
 		d.done[name] = true
 	}
 	return nil
+}
+
+// markDeletionScope records scope on the original Pod with uid and reports
+// whether that Pod still exists. A ServingGroup scope already covers its Roles
+// and is never narrowed.
+func markDeletionScope(ctx context.Context, client kubernetes.Interface, ms *workload.ModelServing, name string, uid types.UID, scope string) (bool, error) {
+	pod, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if pod.UID != uid || !podOwnedForDeletion(pod, ms) {
+		return false, nil
+	}
+	if current := pod.Annotations[utils.DeletionScopeAnnotation]; current == scope || current == utils.DeletionScopeServingGroup {
+		return true, nil
+	}
+	// metadata.uid makes the patch fail instead of marking a replacement.
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{
+		"uid":         uid,
+		"annotations": map[string]string{utils.DeletionScopeAnnotation: scope},
+	}})
+	if err != nil {
+		return false, err
+	}
+	_, err = client.CoreV1().Pods(ms.Namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+	if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func podOwnedForDeletion(pod *corev1.Pod, ms *workload.ModelServing) bool {

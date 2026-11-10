@@ -57,6 +57,21 @@ func TestDeleteModelServing(t *testing.T) {
 	assert.False(t, exists, "key2 should be deleted after repeated deletes")
 }
 
+func TestServingGroupDeletionRemainsCommitted(t *testing.T) {
+	s := New()
+	key := types.NamespacedName{Namespace: "default", Name: "committed"}
+	s.AddServingGroup(key, 0, "old")
+	assert.NoError(t, s.UpdateServingGroupStatus(key, "committed-0", ServingGroupDeleting))
+	for _, status := range []ServingGroupStatus{ServingGroupRunning, ServingGroupCreating, ServingGroupScaling} {
+		assert.NoError(t, s.UpdateServingGroupStatus(key, "committed-0", status))
+		assert.Equal(t, ServingGroupDeleting, s.GetServingGroupStatus(key, "committed-0"))
+	}
+	s.DeleteServingGroup(key, "committed-0")
+	s.AddServingGroup(key, 0, "target")
+	assert.NoError(t, s.UpdateServingGroupStatus(key, "committed-0", ServingGroupRunning))
+	assert.Equal(t, ServingGroupRunning, s.GetServingGroupStatus(key, "committed-0"))
+}
+
 func TestDeleteServingGroup(t *testing.T) {
 	key1 := types.NamespacedName{Namespace: "ns1", Name: "model1"}
 	key2 := types.NamespacedName{Namespace: "ns2", Name: "model2"}

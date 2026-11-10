@@ -39,7 +39,12 @@ import (
 )
 
 const (
-	Entry = "true"
+	// DeletionScopeAnnotation persists a committed Role or ServingGroup
+	// deletion on each original Pod so it survives a controller restart.
+	DeletionScopeAnnotation   = "workload.kthena.io/deletion-scope"
+	DeletionScopeRole         = "Role"
+	DeletionScopeServingGroup = "ServingGroup"
+	Entry                     = "true"
 
 	// condition status of ModelServingStatus
 	AllGroupsIsReady         = "All Serving groups are ready"
@@ -649,4 +654,10 @@ func roleReplicas(role workloadv1alpha1.Role) int {
 		return 1
 	}
 	return int(*role.Replicas)
+}
+
+// HasDeletionScope reports whether the Pod belongs to a committed deletion.
+func HasDeletionScope(pod *corev1.Pod) bool {
+	scope := pod.Annotations[DeletionScopeAnnotation]
+	return scope == DeletionScopeRole || scope == DeletionScopeServingGroup
 }

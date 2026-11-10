@@ -39,7 +39,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	kubetesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
@@ -2492,6 +2491,46 @@ func TestScaleUpServingGroupsStopsWhenControllerRevisionCreationFails(t *testing
 	pods, listErr := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, listErr)
 	assert.Empty(t, pods.Items)
+}
+
+// TestScaleUpServingGroupsRepairsCreateErrorAfterPersist covers an API error
+// returned for an entry Pod that was nevertheless persisted, e.g. an etcd
+// timeout. The untracked Pod must not occupy its ordinal; the next sync
+// recreates the same ServingGroup and completes its missing members.
+func TestScaleUpServingGroupsRepairsCreateErrorAfterPersist(t *testing.T) {
+	ms := createStandardModelServing("persisted-create-error", 1, 1)
+	ms.UID = "persisted-create-error-uid"
+	ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate}
+	ms.Spec.Template.Roles[0].WorkerReplicas = 2
+	ms.Spec.Template.Roles[0].WorkerTemplate = ms.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+	c := newRevisionTestController(t, ms)
+	c.initialSync.Store(true)
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	injected := false
+	client.PrependReactor("create", "pods", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		if injected {
+			return false, nil, nil
+		}
+		injected = true
+		pod := action.(kubetesting.CreateAction).GetObject().(*corev1.Pod)
+		require.NoError(t, client.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"), pod.DeepCopy(), pod.Namespace))
+		return true, nil, fmt.Errorf("etcdserver: request timed out")
+	})
+	key := utils.GetNamespaceName(ms).String()
+
+	require.ErrorContains(t, c.syncModelServing(context.Background(), key), "request timed out")
+	pods, err := client.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 1)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(&pods.Items[0]))
+
+	require.NoError(t, c.syncModelServing(context.Background(), key))
+	pods, err = client.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, pods.Items, 3, "entry and both workers of the persisted ServingGroup")
+	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	assert.Len(t, groups, 1)
 }
 
 // TestScaleUpRoles tests the scaleUpRoles function with various scenarios
@@ -6323,6 +6362,7 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6345,7 +6385,10 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 	assert.False(t, controller.initialSync.Load(), "initialSync should be false before syncAll")
 
 	// Call syncAll - this should handle the failed pod properly after the fix
+	_, err = controller.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
 	controller.syncAll()
+	require.NoError(t, controller.syncPodRecovery(context.Background(), ms))
 
 	// Verify initialSync is true after syncAll
 	assert.True(t, controller.initialSync.Load(), "initialSync should be true after syncAll")
@@ -6416,6 +6459,7 @@ func TestSyncAllWithContainerRestartedPods(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6441,7 +6485,10 @@ func TestSyncAllWithContainerRestartedPods(t *testing.T) {
 	startActions := len(kubeClient.Actions())
 
 	// Call syncAll
+	_, err = controller.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
 	controller.syncAll()
+	require.NoError(t, controller.syncPodRecovery(context.Background(), ms))
 
 	assertPodDeleted(t, kubeClient, startActions, restartedPod.Name, "Pod with restarted container should be deleted after syncAll")
 }
@@ -6508,6 +6555,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6540,6 +6588,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6566,6 +6615,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6600,7 +6650,10 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 
 	recordTestRevision(t, kubeClient, ms, revision)
 	// Call syncAll
+	_, err = controller.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
 	controller.syncAll()
+	require.NoError(t, controller.syncPodRecovery(context.Background(), ms))
 
 	// Verify initialSync is true
 	assert.True(t, controller.initialSync.Load(), "initialSync should be true after syncAll")
@@ -6630,172 +6683,123 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 	assert.NotEmpty(t, servingGroups, "ServingGroups should exist in store")
 }
 
-func TestHandlePodAfterGraceTime(t *testing.T) {
-	const (
-		namespace = "default"
-		podName   = "test-model-0-prefill-0-0"
-	)
-	gracePeriod := int64(1)
-	failedPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      podName,
-			UID:       types.UID("failed-pod"),
-		},
-	}
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      "test-model",
-		},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
-				RestartGracePeriodSeconds: &gracePeriod,
-			},
-		},
-	}
-
-	tests := []struct {
-		name          string
-		currentPodUID types.UID
-		wantDeleted   bool
+func TestRecoveryUsesCurrentPolicyAndGrace(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		mutate     func(*workloadv1alpha1.ModelServing, *corev1.Pod)
+		elapsed    time.Duration
+		wantDelete bool
 	}{
-		{
-			name:          "deletes failed pod",
-			currentPodUID: failedPod.UID,
-			wantDeleted:   true,
-		},
-		{
-			name:          "keeps replacement pod",
-			currentPodUID: types.UID("replacement-pod"),
-			wantDeleted:   false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			currentPod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: namespace,
-					Name:      podName,
-					UID:       tt.currentPodUID,
-				},
-				Status: corev1.PodStatus{Phase: corev1.PodPending},
+		{name: "immediate failure", wantDelete: true},
+		{name: "None retains terminal failure", mutate: func(ms *workloadv1alpha1.ModelServing, _ *corev1.Pod) {
+			ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+		}},
+		{name: "minus one retains terminal failure", mutate: func(ms *workloadv1alpha1.ModelServing, _ *corev1.Pod) {
+			ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](-1)
+		}},
+		{name: "extended grace uses original observation", elapsed: 90 * time.Second, mutate: func(ms *workloadv1alpha1.ModelServing, _ *corev1.Pod) {
+			ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](120)
+		}},
+		{name: "shortened grace expires", elapsed: 90 * time.Second, wantDelete: true, mutate: func(ms *workloadv1alpha1.ModelServing, _ *corev1.Pod) {
+			ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](10)
+		}},
+		{name: "MaxInt64 grace cannot overflow", elapsed: time.Hour, mutate: func(ms *workloadv1alpha1.ModelServing, _ *corev1.Pod) {
+			ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](math.MaxInt64)
+		}},
+		{name: "foreign owner", mutate: func(_ *workloadv1alpha1.ModelServing, pod *corev1.Pod) { pod.OwnerReferences[0].UID = "foreign" }},
+		{name: "already terminating", mutate: func(_ *workloadv1alpha1.ModelServing, pod *corev1.Pod) { pod.DeletionTimestamp = ptr.To(metav1.Now()) }},
+		{name: "recovered Ready with historical restart", mutate: func(_ *workloadv1alpha1.ModelServing, pod *corev1.Pod) {
+			pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}, ContainerStatuses: []corev1.ContainerStatus{{RestartCount: 2}}}
+		}},
+		{name: "pure NotReady is not a fault", mutate: func(_ *workloadv1alpha1.ModelServing, pod *corev1.Pod) { pod.Status.Phase = corev1.PodRunning }},
+		{name: "init restart is a fault", wantDelete: true, mutate: func(_ *workloadv1alpha1.ModelServing, pod *corev1.Pod) {
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{RestartCount: 1}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := createStandardModelServing("recovery", 1, 1)
+			ms.UID = "original-owner"
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ms.Namespace, Name: "recovery-0-prefill-0-0", UID: "original-pod",
+				Labels:          map[string]string{workloadv1alpha1.ModelServingNameLabelKey: ms.Name, workloadv1alpha1.GroupNameLabelKey: "recovery-0", workloadv1alpha1.RoleLabelKey: "prefill", workloadv1alpha1.RoleIDKey: "prefill-0"},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)}}, Status: corev1.PodStatus{Phase: corev1.PodFailed}}
+			if tc.mutate != nil {
+				tc.mutate(ms, pod)
 			}
-			controller, kubeClient := newGracePeriodTestController(t, currentPod)
-
-			controller.handlePodAfterGraceTime(ms, failedPod)
-
-			_, err := kubeClient.CoreV1().Pods(namespace).Get(context.Background(), podName, metav1.GetOptions{})
-			if tt.wantDeleted {
-				assert.True(t, apierrors.IsNotFound(err))
-			} else {
-				require.NoError(t, err)
-			}
-
-			actions := kubeClient.Actions()
-			if !tt.wantDeleted {
-				for _, action := range actions {
-					assert.False(t, action.Matches("delete", "pods"))
+			c, kube := newGracePeriodTestController(t, pod, ms)
+			firstSeen := time.Now().Add(-tc.elapsed)
+			c.graceMap.Store(getPodGracePeriodKey(pod), firstSeen)
+			require.NoError(t, c.syncPodRecovery(context.Background(), ms))
+			deleted := false
+			for _, action := range kube.Actions() {
+				if action.Matches("delete", "pods") {
+					deleted = true
+					del := action.(kubetesting.DeleteAction)
+					require.Equal(t, pod.UID, *del.GetDeleteOptions().Preconditions.UID)
 				}
-				return
 			}
-			require.Len(t, actions, 2)
-			deleteAction, ok := actions[0].(kubetesting.DeleteAction)
-			require.True(t, ok)
-			require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions)
-			require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions.UID)
-			assert.Equal(t, failedPod.UID, *deleteAction.GetDeleteOptions().Preconditions.UID)
+			require.Equal(t, tc.wantDelete, deleted)
+			if observed, ok := c.graceMap.Load(getPodGracePeriodKey(pod)); ok {
+				require.Equal(t, firstSeen, observed, "finite grace changes retain the original observation")
+			}
 		})
 	}
 }
 
-func TestHandlePodWithoutGraceTimeUsesUIDPrecondition(t *testing.T) {
-	const (
-		namespace = "default"
-		podName   = "test-model-0-prefill-0-0"
-	)
-	podUID := types.UID("failed-pod")
-	failedPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      podName,
-			UID:       podUID,
-		},
+func TestRecoverySuppressionAndReadyStartNewObservation(t *testing.T) {
+	f := newInPlaceFixture(t, func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](60)
+	}, nil)
+	pod := f.syncPodFromAPI(t)
+	pod.Status.Phase = corev1.PodFailed
+	_, err := f.kubeClient.CoreV1().Pods(pod.Namespace).Update(context.Background(), pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	pod = f.syncPodFromAPI(t)
+	key := getPodGracePeriodKey(pod)
+	for _, suppress := range []string{"None", "minus one", "Ready"} {
+		t.Run(suppress, func(t *testing.T) {
+			f.controller.graceMap.Store(key, time.Now().Add(-time.Hour))
+			disabled := f.newMS.DeepCopy()
+			switch suppress {
+			case "None":
+				disabled.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+			case "minus one":
+				disabled.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](-1)
+			}
+			if suppress == "Ready" {
+				ready := pod.DeepCopy()
+				ready.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+				require.NoError(t, f.controller.handleReadyPod(f.newMS, inPlaceTestGroup, ready))
+			} else {
+				require.NoError(t, f.controller.syncPodRecovery(context.Background(), disabled))
+			}
+			_, exists := f.controller.graceMap.Load(key)
+			require.False(t, exists)
+			require.NoError(t, f.controller.syncPodRecovery(context.Background(), f.newMS))
+			observed, exists := f.controller.graceMap.Load(key)
+			require.True(t, exists)
+			require.Less(t, time.Since(observed.(time.Time)), time.Second)
+			require.False(t, podDeleted(f), "a cancelled observation must not authorize recovery")
+		})
 	}
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      "test-model",
-		},
-	}
-	controller, kubeClient := newGracePeriodTestController(t, failedPod)
-
-	controller.handlePodAfterGraceTime(ms, failedPod)
-
-	actions := kubeClient.Actions()
-	require.Len(t, actions, 1)
-	deleteAction, ok := actions[0].(kubetesting.DeleteAction)
-	require.True(t, ok)
-	require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions)
-	require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions.UID)
-	assert.Equal(t, podUID, *deleteAction.GetDeleteOptions().Preconditions.UID)
 }
 
-func TestHandleErrorPodTracksReplacementByUID(t *testing.T) {
-	const (
-		namespace = "default"
-		podName   = "test-model-0-prefill-0-0"
-	)
-	gracePeriod := int64(1)
-	failedPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      podName,
-			UID:       types.UID("failed-pod"),
-		},
-	}
-	replacementPod := failedPod.DeepCopy()
-	replacementPod.UID = types.UID("replacement-pod")
-	replacementPod.Status.Phase = corev1.PodPending
-
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      "test-model",
-		},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
-				RestartGracePeriodSeconds: &gracePeriod,
-			},
-		},
-	}
-	controller, kubeClient := newGracePeriodTestController(t, replacementPod)
-	controller.store = datastore.New()
-	controller.workqueue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()) //nolint:staticcheck
-	t.Cleanup(controller.workqueue.ShutDown)
-
-	require.NoError(t, controller.handleErrorPod(ms, "test-model-0", failedPod))
-	require.NoError(t, controller.handleErrorPod(ms, "test-model-0", replacementPod))
-
-	_, failedPodTracked := controller.graceMap.Load(getPodGracePeriodKey(failedPod))
-	_, replacementPodTracked := controller.graceMap.Load(getPodGracePeriodKey(replacementPod))
-	require.True(t, failedPodTracked)
-	require.True(t, replacementPodTracked)
-
-	require.Eventually(t, func() bool {
-		for _, action := range kubeClient.Actions() {
-			deleteAction, ok := action.(kubetesting.DeleteAction)
-			if !ok || !action.Matches("delete", "pods") {
-				continue
-			}
-			preconditions := deleteAction.GetDeleteOptions().Preconditions
-			if preconditions != nil && preconditions.UID != nil && *preconditions.UID == replacementPod.UID {
-				return true
-			}
-		}
-		return false
-	}, 2*time.Second, 10*time.Millisecond)
+func TestRecoveryDeleteFailureRetriesThroughQueue(t *testing.T) {
+	f := newInPlaceFixture(t, nil, func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed })
+	f.kubeClient.Lock()
+	f.kubeClient.PrependReactor("delete", "pods", func(kubetesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("delete unavailable")
+	})
+	f.kubeClient.Unlock()
+	pod := f.syncPodFromAPI(t)
+	require.ErrorContains(t, f.controller.syncPodRecovery(context.Background(), f.newMS), "delete unavailable")
+	_, exists := f.controller.graceMap.Load(getPodGracePeriodKey(pod))
+	require.True(t, exists)
+	f.kubeClient.Lock()
+	f.kubeClient.ReactionChain = f.kubeClient.ReactionChain[1:]
+	f.kubeClient.Unlock()
+	require.NoError(t, f.controller.syncPodRecovery(context.Background(), f.newMS))
+	require.True(t, podDeleted(f))
 }
 
 // TestHandleErrorPodNoneLeavesRestartedPod verifies that under RecoveryPolicy=None,
@@ -6833,7 +6837,7 @@ func TestHandleErrorPodNoneLeavesRestartedPod(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: msName},
 		Spec:       workloadv1alpha1.ModelServingSpec{RecoveryPolicy: workloadv1alpha1.NoneRestartPolicy},
 	}
-	controller, kubeClient := newGracePeriodTestController(t, restartedPod)
+	controller, kubeClient := newGracePeriodTestController(t, restartedPod, ms)
 
 	// Seed a Running serving group + role with the pod in the running set.
 	msKey := types.NamespacedName{Namespace: namespace, Name: msName}
@@ -6860,18 +6864,15 @@ func TestHandleErrorPodNoneLeavesRestartedPod(t *testing.T) {
 	assert.Equal(t, 0, running, "restarted pod must leave the running set")
 }
 
-func newGracePeriodTestController(t *testing.T, pod *corev1.Pod) (*ModelServingController, *kubefake.Clientset) {
+func newGracePeriodTestController(t *testing.T, pod *corev1.Pod, ms *workloadv1alpha1.ModelServing) (*ModelServingController, *kubefake.Clientset) {
 	t.Helper()
-
-	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	require.NoError(t, indexer.Add(pod.DeepCopy()))
-
-	kubeClient := kubefake.NewSimpleClientset(pod.DeepCopy())
-	controller := &ModelServingController{
-		kubeClientSet: kubeClient,
-		podsLister:    corelisters.NewPodLister(indexer),
-	}
-	return controller, kubeClient
+	kube := kubefake.NewSimpleClientset(pod.DeepCopy())
+	c, err := NewModelServingController(kube, kthenafake.NewSimpleClientset(ms), nil, apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(pod.DeepCopy()))
+	c.store.AddServingGroupAndRole(utils.GetNamespaceName(ms), pod.Labels[workloadv1alpha1.GroupNameLabelKey], utils.ObjectRevision(pod), "", utils.GetRoleName(pod), utils.GetRoleID(pod))
+	t.Cleanup(c.workqueue.ShutDown)
+	return c, kube
 }
 
 // TestSyncAllBeforeFixBehavior documents the previous buggy behavior where
@@ -6941,6 +6942,7 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 					Kind:       "ModelServing",
 					Name:       msName,
 					UID:        ms.UID,
+					Controller: ptr.To(true),
 				},
 			},
 		},
@@ -6967,7 +6969,10 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 	// After the fix, syncAll defers these pods and processes them correctly.
 
 	// Call syncAll which should now properly handle the failed pod
+	_, err = controller.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
 	controller.syncAll()
+	require.NoError(t, controller.syncPodRecovery(context.Background(), ms))
 
 	assertPodDeleted(t, kubeClient, startActions, failedPod.Name,
 		"After fix: Failed pod should be deleted. "+
@@ -8122,7 +8127,8 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 			}
 
 			groups := append(tt.runningOutdatedGroups, tt.notRunningOutdatedGroups...)
-			result, err := controller.deleteOutdatedServingGroups(context.Background(), ms, tt.maxScaleDown, groups, utils.ModelServingRevision(ms))
+			budget := rolloutBudget{total: tt.maxScaleDown, healthy: tt.maxScaleDown}
+			result, err := controller.deleteOutdatedServingGroups(context.Background(), ms, budget, groups, utils.ModelServingRevision(ms))
 
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedUpdateCount, result)
@@ -8172,6 +8178,18 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
 	}
 
+	// The informer is not running; deliver the created Pods, including their
+	// surge markers, before each reconcile step.
+	observePods := func() {
+		pods, err := controller.kubeClientSet.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+		require.NoError(t, err)
+		objects := make([]interface{}, 0, len(pods.Items))
+		for i := range pods.Items {
+			objects = append(objects, &pods.Items[i])
+		}
+		require.NoError(t, controller.podsInformer.GetIndexer().Replace(objects, ""))
+	}
+
 	groups, err := controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
 	require.NoError(t, controller.manageRollingUpdateWithPolicy(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
@@ -8188,12 +8206,14 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 
 	// An unready surge consumes its slot but cannot authorize deletion when
 	// maxUnavailable is zero.
+	observePods()
 	require.NoError(t, controller.manageRollingUpdateWithPolicy(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 	for ordinal := 0; ordinal < 2; ordinal++ {
 		assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal)))
 	}
 
 	require.NoError(t, controller.store.UpdateServingGroupStatus(key, surgeName, datastore.ServingGroupRunning))
+	observePods()
 	require.NoError(t, controller.manageRollingUpdateWithPolicy(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 
 	// The highest outdated group is replaced first while the temporary capacity
@@ -8202,23 +8222,32 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, groups, 2)
 	assert.Equal(t, surgeName, groups[1].Name)
+	observePods()
 	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
 	require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 1), datastore.ServingGroupRunning))
 
+	observePods()
 	require.NoError(t, controller.manageRollingUpdateWithPolicy(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 
-	// Once all remaining groups use the new revision, replica synchronization
-	// derives the normal desired count. The high ordinal remains a normal replica
-	// rather than being identified and removed as a surge group.
+	// SG contract 0.6/C14: the temporary high ordinal cannot replace missing
+	// formal slot0. Refill slot0, then retire surge only after it is Ready.
+	observePods()
 	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
 	groups, err = controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
-	require.Len(t, groups, 2)
-	for _, group := range groups {
-		assert.Equal(t, "new-revision", group.Revision)
+	require.Len(t, groups, 3)
+	assert.Equal(t, "surge-test-0", groups[0].Name)
+	require.NoError(t, controller.store.UpdateServingGroupStatus(key, "surge-test-0", datastore.ServingGroupRunning))
+	observePods()
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
+	assert.Equal(t, datastore.ServingGroupDeleting, controller.store.GetServingGroupStatus(key, surgeName))
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		name := utils.GenerateServingGroupName(ms.Name, ordinal)
+		assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, name))
+		revision, found := controller.store.GetServingGroupRevision(key, name)
+		assert.True(t, found)
+		assert.Equal(t, "new-revision", revision)
 	}
-	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 1), groups[0].Name)
-	assert.Equal(t, surgeName, groups[1].Name)
 }
 
 func TestManageRollingUpdateIncludesSurgeStatusInMaxScaleDown(t *testing.T) {
@@ -8513,7 +8542,7 @@ func TestServingGroupUpdateCreatesSurgeWithoutStoredPhase(t *testing.T) {
 	assert.Equal(t, "new", groups[2].Revision)
 }
 
-func TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups(t *testing.T) {
+func TestServingGroupRollingUpdateCountsUnavailableProtectedGroups(t *testing.T) {
 	controller, err := NewModelServingController(
 		kubefake.NewSimpleClientset(),
 		kthenafake.NewSimpleClientset(),
@@ -8555,7 +8584,58 @@ func TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups(t *testing.T
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, group.ordinal), group.status))
 	}
 	require.NoError(t, controller.manageRollingUpdateWithPolicy(context.Background(), ms, "new", &roleRolloutPolicy{}))
-	assert.Equal(t, datastore.ServingGroupNotFound, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 2)))
+	// API contract 2.3: protected faults consume actual healthy-delete credit;
+	// maxScaleDown alone is not permission to cross the Ready floor.
+	assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 2)))
+}
+
+func TestServingGroupRollingUpdateAvailabilityLedger(t *testing.T) {
+	// API v2.11 section 2.3: Q is total cleanup allowance, B is healthy deletion
+	// allowance; existing deletions spend Q exactly once and never supply Ready.
+	for _, tc := range []struct {
+		name      string
+		budget    int
+		partition int
+		statuses  []datastore.ServingGroupStatus
+		target    []int
+		deleted   []int
+	}{
+		{"protected fault leaves no healthy credit", 1, 1, []datastore.ServingGroupStatus{"Creating", "Running", "Running"}, nil, nil},
+		{"old low fault precedes healthy high candidate", 1, 0, []datastore.ServingGroupStatus{"Creating", "Running", "Running"}, nil, []int{0}},
+		{"current unready target holds its allowance", 1, 0, []datastore.ServingGroupStatus{"Creating", "Running", "Running"}, []int{0}, nil},
+		{"low deletion cannot be issued again to high faults", 2, 0, []datastore.ServingGroupStatus{"Running", "Running", "Deleting", "Creating", "Creating"}, nil, []int{4}},
+		{"all old faults recover within total allowance", 2, 0, []datastore.ServingGroupStatus{"Creating", "Creating", "Creating", "Creating", "Creating"}, nil, []int{3, 4}},
+		{"one target Ready releases one allowance without batch barrier", 2, 0, []datastore.ServingGroupStatus{"Running", "Running", "Running", "Creating", "Running"}, []int{3, 4}, []int{2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := semanticRevisionTestModelServing("availability", "target")
+			ms.Spec.Replicas = ptr.To(int32(len(tc.statuses)))
+			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					MaxUnavailable: ptr.To(intstr.FromInt(tc.budget)), Partition: ptr.To(intstr.FromInt(tc.partition)),
+				}}
+			c := newRevisionTestController(t, ms)
+			recordDifferentRevision(t, c, ms, "old")
+			revision, key := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms)
+			for ordinal, status := range tc.statuses {
+				applied := "old"
+				if slices.Contains(tc.target, ordinal) {
+					applied = revision
+				}
+				c.store.AddServingGroup(key, ordinal, applied)
+				require.NoError(t, c.store.UpdateServingGroupStatus(key, fmt.Sprintf("availability-%d", ordinal), status))
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				require.NoError(t, c.manageRollingUpdate(context.Background(), ms, revision))
+				for ordinal, status := range tc.statuses {
+					if slices.Contains(tc.deleted, ordinal) {
+						status = datastore.ServingGroupNotFound
+					}
+					require.Equal(t, status, c.store.GetServingGroupStatus(key, fmt.Sprintf("availability-%d", ordinal)), "ordinal %d, retry %d", ordinal, attempt)
+				}
+			}
+		})
+	}
 }
 
 func TestSyncServingGroupReplicasHonorsReducedMaxSurge(t *testing.T) {

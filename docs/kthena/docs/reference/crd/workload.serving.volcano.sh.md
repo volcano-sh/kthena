@@ -594,7 +594,7 @@ _Appears in:_
 | `plugins` _[PluginSpec](#pluginspec) array_ | Plugins defines optional plugins that customize serving pods or manage<br />auxiliary resources through controller lifecycle hooks. |  |  |
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
-| `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
+| `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy selects the replacement scope for a failed or unexpectedly<br />restarted Pod after its grace period. None disables active fault recovery;<br />missing Pods are still replenished and normal template rollout continues. | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
 | `revisionHistoryLimit` _integer_ | RevisionHistoryLimit is the maximum number of non-live revisions to retain.<br />Revisions still referenced by the ModelServing or its workloads do not count<br />toward this limit. | 10 | Minimum: 0 <br /> |
 
 
@@ -1123,7 +1123,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `restartGracePeriodSeconds` _integer_ | RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs<br />Defaults to 0 (ServingGroup will be rebuilt immediately after an error) | 0 |  |
+| `restartGracePeriodSeconds` _integer_ | RestartGracePeriodSeconds is the time to tolerate a recoverable Pod fault<br />before applying recoveryPolicy. Defaults to 0, which recovers immediately.<br />-1 disables proactive recovery: the controller never deletes a faulty Pod,<br />including one that misses an in-place update deadline, but a Pod deleted by<br />others is still recreated according to recoveryPolicy.<br />Ignored when recoveryPolicy is None.<br />Finite grace uses the first fault observation in the current controller<br />process and the latest configured value. Becoming Ready ends that observation.<br />For an in-place update that misses its progress deadline, grace starts at the deadline. | 0 | Minimum: -1 <br /> |
 | `gangPolicy` _[GangPolicy](#gangpolicy)_ | GangPolicy defines the gang scheduler config. |  |  |
 | `networkTopology` _[NetworkTopology](#networktopology)_ | NetworkTopology defines the network topology affinity scheduling policy for the roles of the `ServingGroup`,<br />it works only when the scheduler supports network topology-aware scheduling. |  |  |
 | `roles` _[Role](#role) array_ |  |  | MaxItems: 4 <br />MinItems: 1 <br /> |
