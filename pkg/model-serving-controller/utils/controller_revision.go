@@ -44,6 +44,9 @@ const (
 	ControllerRevisionDataVersionAnnotation = "modelserving.volcano.sh/revision-data-version"
 	// ControllerRevisionDataVersionV1 is the current revision data format.
 	ControllerRevisionDataVersionV1 = "v1"
+	// CoordinatedRoleReplicaBaselineAnnotation records the coordinator's old
+	// replica counts separately from immutable template data.
+	CoordinatedRoleReplicaBaselineAnnotation = "modelserving.volcano.sh/coordinated-role-replica-baseline"
 )
 
 // CreateControllerRevision maintains the legacy wrapped Role revision format
@@ -138,21 +141,7 @@ func GetControllerRevision(
 	cr, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			// A canonical migration baseline is a complete immutable snapshot.
-			// It remains usable if the redundant legacy Roles-only object is lost.
-			baseline, baselineErr := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName+"-baseline", metav1.GetOptions{})
-			if apierrors.IsNotFound(baselineErr) {
-				return nil, nil
-			}
-			if baselineErr != nil {
-				return nil, baselineErr
-			}
-			if !controlledByModelServing(baseline, ms) || baseline.Annotations[legacyRevisionSource] != controllerRevisionName ||
-				baseline.Annotations[ControllerRevisionDataVersionAnnotation] != ControllerRevisionDataVersionV1 ||
-				baseline.Labels[ControllerRevisionRevisionLabelKey] != revision {
-				return nil, fmt.Errorf("legacy baseline %s has conflicting identity", baseline.Name)
-			}
-			return baseline, nil
+			return nil, nil
 		}
 		return nil, err
 	}
@@ -286,11 +275,6 @@ func CleanupOldControllerRevisions(
 		if _, preserved := preservedRevisionNames[revision.Name]; preserved {
 			continue
 		}
-		identityName := GenerateControllerRevisionName(ms.Name, revision.Labels[ControllerRevisionRevisionLabelKey])
-		if _, preserved := preservedRevisionNames[identityName]; preserved {
-			continue
-		}
-
 		err := client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, revision.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &revision.UID}})
 		if err != nil && !apierrors.IsNotFound(err) {
 			klog.Warningf("Failed to delete old ControllerRevision %s/%s: %v", ms.Namespace, revision.Name, err)

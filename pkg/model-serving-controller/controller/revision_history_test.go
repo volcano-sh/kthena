@@ -107,7 +107,7 @@ func TestProtectedRecoveryIgnoresDesiredComparisonCache(t *testing.T) {
 	}
 }
 
-func TestLegacyPluginBaselinePreventsFirstRollButDetectsLaterChanges(t *testing.T) {
+func TestLegacyHistoryAvoidsFirstRollAndDetectsRoleChanges(t *testing.T) {
 	for _, strategy := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
 		t.Run(string(strategy), func(t *testing.T) {
 			ms := semanticRevisionTestModelServing("plugin-migration", "image:v1")
@@ -131,11 +131,10 @@ func TestLegacyPluginBaselinePreventsFirstRollButDetectsLaterChanges(t *testing.
 				require.Equal(t, templateEquivalent, c.compareRoleTemplate(ctx, ms, group, desired.Name,
 					datastore.Role{Revision: "legacy", RoleTemplateHash: "pre-upgrade-hash"}))
 			}
-			// A fresh cache models a controller restart: do not adopt the edit as
-			// another compatibility baseline.
+			// A fresh cache still detects a real Role change after a restart.
 			ms = ms.DeepCopy()
 			ms.Generation++
-			ms.Spec.Plugins[0] = testRevisionPlugin("changed")
+			ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "image:v2"
 			ctx = c.withRevisionHistory(context.Background(), ms)
 			revision, err = c.revisionHistory(ctx, ms).desiredRevision(ctx)
 			require.NoError(t, err)
@@ -145,7 +144,7 @@ func TestLegacyPluginBaselinePreventsFirstRollButDetectsLaterChanges(t *testing.
 			require.Equal(t, templateEquivalent, c.compareRoleTemplate(ctx, ms, group, ms.Spec.Template.Roles[1].Name, datastore.Role{Revision: "legacy"}))
 			unchanged, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, original.Name, metav1.GetOptions{})
 			require.NoError(t, err)
-			require.Equal(t, original.Data, unchanged.Data)
+			require.Equal(t, original, unchanged, "reading legacy history must not add migration metadata")
 		})
 	}
 }
@@ -275,13 +274,13 @@ func TestDesiredRevisionReusesSemanticHistoryAfterHashDrift(t *testing.T) {
 	require.Equal(t, legacyHash, got)
 	list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
-	require.Len(t, list.Items, 2, "migration adds one immutable baseline without changing the legacy identity")
+	require.Len(t, list.Items, 1, "semantic reuse must not create an auxiliary revision")
 	gotAgain, err := controller.revisionHistory(context.Background(), ms).desiredRevision(ctx)
 	require.NoError(t, err)
 	require.Equal(t, legacyHash, gotAgain)
 	listAgain, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
-	require.Len(t, listAgain.Items, 2, "subsequent reconciles must reuse the baseline")
+	require.Len(t, listAgain.Items, 1, "subsequent reconciles still use the original history")
 }
 
 func TestDesiredRevisionCreatesHistoryForRealTemplateChange(t *testing.T) {
@@ -303,7 +302,7 @@ func TestDesiredRevisionCreatesHistoryForRealTemplateChange(t *testing.T) {
 	require.NotEqual(t, "old-hash", got)
 	list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
-	require.Len(t, list.Items, 3, "legacy data, its baseline, and the genuinely changed revision")
+	require.Len(t, list.Items, 2, "only the original history and the genuinely changed revision are needed")
 }
 
 func TestRoleTemplateHashUsesSemanticHistoryFallback(t *testing.T) {

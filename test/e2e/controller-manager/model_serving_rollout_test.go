@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
@@ -1738,7 +1739,8 @@ func TestModelServingRolePartitionScaleUp(t *testing.T) {
 	t.Log("ModelServing role partition scale up test passed successfully")
 }
 
-// removes updated replicas first and leaves partition-protected replicas untouched.
+// TestModelServingRolePartitionScaleDown verifies deletion cost controls explicit
+// scale-down even when the lower-cost instances are protected from template updates.
 func TestModelServingRolePartitionScaleDown(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
@@ -1810,7 +1812,7 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 		}
 		imageByOrdinal := map[int32]string{}
 		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || len(pod.Spec.Containers) == 0 {
+			if pod.DeletionTimestamp != nil || !utils.IsPodReady(pod) || len(pod.Spec.Containers) == 0 {
 				continue
 			}
 			roleID := pod.Labels[workload.RoleIDKey]
@@ -1843,24 +1845,26 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 		return true
 	}, 3*time.Minute, 2*time.Second, "Role partition state did not converge before scale down")
 
-	// Make the scale-down decision sensitive to partition:
-	// - Assign LOWER deletionCost to protected ordinals [0, partition) so they would be deleted first without partition.
-	// - Assign HIGHER deletionCost to non-protected ordinals so they would be kept without partition.
-	// With partition enabled, the controller must still delete non-protected replicas first.
+	// Give protected instances the lowest deletion costs. Partition protects
+	// template updates, so explicit scale-down must still delete instances 0 and 1.
 	podsBeforeScaleDown, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	require.NoError(t, err)
+	beforeByOrdinal := map[int32]corev1.Pod{}
 	for _, pod := range podsBeforeScaleDown.Items {
 		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
 		roleID := pod.Labels[workload.RoleIDKey]
 		_, ordinal := controllerutils.GetParentNameAndOrdinal(roleID)
+		beforeByOrdinal[int32(ordinal)] = pod
 		if int32(ordinal) < partition {
-			patchPodDeletionCost(t, ctx, kubeClient, pod.Name, 0)
+			patchPodDeletionCost(t, ctx, kubeClient, pod.Name, ordinal)
 		} else {
 			patchPodDeletionCost(t, ctx, kubeClient, pod.Name, 10000+ordinal)
 		}
 	}
+	require.Len(t, beforeByOrdinal, int(initialRoleReplicas))
+	require.Equal(t, initialRevision, beforeByOrdinal[2].Labels[workload.RevisionLabelKey])
 
 	currentMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
 	require.NoError(t, err)
@@ -1885,6 +1889,7 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 
 		imageByOrdinal := map[int32]string{}
 		revisionByOrdinal := map[int32]string{}
+		uidByOrdinal := map[int32]types.UID{}
 		for _, pod := range pods.Items {
 			if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || len(pod.Spec.Containers) == 0 {
 				continue
@@ -1894,33 +1899,25 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 			ord := int32(ordinal)
 			imageByOrdinal[ord] = pod.Spec.Containers[0].Image
 			revisionByOrdinal[ord] = pod.Labels[workload.RevisionLabelKey]
+			uidByOrdinal[ord] = pod.UID
+			if !utils.IsPodReady(pod) {
+				return false
+			}
 		}
 		if len(imageByOrdinal) != int(scaledRoleReplicas) {
 			t.Logf("Observed ordinals=%d, expecting %d", len(imageByOrdinal), scaledRoleReplicas)
 			return false
 		}
-		for ord := int32(0); ord < scaledRoleReplicas; ord++ {
-			if imageByOrdinal[ord] != nginxImage {
-				t.Logf("Protected prefill-%d image=%s, expecting old image=%s", ord, imageByOrdinal[ord], nginxImage)
+		for _, ord := range []int32{2, 3, 4} {
+			original := beforeByOrdinal[ord]
+			if uidByOrdinal[ord] != original.UID || imageByOrdinal[ord] != original.Spec.Containers[0].Image ||
+				revisionByOrdinal[ord] != original.Labels[workload.RevisionLabelKey] {
+				t.Logf("Retained prefill-%d changed or is missing: uid=%s image=%s revision=%s", ord, uidByOrdinal[ord], imageByOrdinal[ord], revisionByOrdinal[ord])
 				return false
 			}
-			if revisionByOrdinal[ord] != initialRevision {
-				t.Logf("Protected prefill-%d revision=%s, expecting %s", ord, revisionByOrdinal[ord], initialRevision)
-				return false
-			}
-		}
-		updatedCorrect := 0
-		for ord := range imageByOrdinal {
-			if ord >= partition {
-				updatedCorrect++
-			}
-		}
-		if updatedCorrect != 0 {
-			t.Logf("Updated replicas remaining=%d, expecting 0; images=%v", updatedCorrect, imageByOrdinal)
-			return false
 		}
 		return true
-	}, 3*time.Minute, 2*time.Second, "Scale down should keep only partition-protected role replicas")
+	}, 3*time.Minute, 2*time.Second, "Scale down should preserve instances 2, 3 and 4 with their original identities and versions")
 
 	t.Log("ModelServing role partition scale down test passed successfully")
 }

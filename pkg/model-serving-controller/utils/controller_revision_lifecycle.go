@@ -69,14 +69,30 @@ func RecordModelServingRevision(
 		if owner == nil || owner.UID != ms.UID {
 			continue
 		}
+		identity := revision.Labels[ControllerRevisionRevisionLabelKey]
+		if identity == "" || revision.Name != GenerateControllerRevisionName(ms.Name, identity) {
+			continue
+		}
 		if latest == nil || controllerRevisionLess(latest, revision) {
 			latest = revision
 		}
 		if revision.Revision > maxRevision {
 			maxRevision = revision.Revision
 		}
-		if revision.Annotations[ControllerRevisionDataVersionAnnotation] == ControllerRevisionDataVersionV1 &&
-			revisionDataEqual(revision.Data.Raw, data) {
+		comparison := revision.Data.Raw
+		if revision.Annotations[ControllerRevisionDataVersionAnnotation] == "" {
+			workload, err := ModelServingForControllerRevision(ms, revision)
+			if err != nil {
+				continue
+			}
+			comparison, err = BuildRevisionData(workload)
+			if err != nil {
+				continue
+			}
+		} else if revision.Annotations[ControllerRevisionDataVersionAnnotation] != ControllerRevisionDataVersionV1 {
+			continue
+		}
+		if revisionDataEqual(comparison, data) {
 			if equivalent == nil || controllerRevisionLess(equivalent, revision) {
 				equivalent = revision
 			}
