@@ -88,6 +88,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &networkingv1alpha1.WorkloadSelectorApplyConfiguration{}
 
 		// Group=workload.serving.volcano.sh, Version=v1alpha1
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutomaticRollback"):
+		return &applyconfigurationworkloadv1alpha1.AutomaticRollbackApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicy"):
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyBehavior"):
@@ -164,6 +166,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.RoleScalingParamApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RollingUpdateConfiguration"):
 		return &applyconfigurationworkloadv1alpha1.RollingUpdateConfigurationApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RolloutFailurePolicy"):
+		return &applyconfigurationworkloadv1alpha1.RolloutFailurePolicyApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RolloutProgress"):
+		return &applyconfigurationworkloadv1alpha1.RolloutProgressApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RolloutStrategy"):
 		return &applyconfigurationworkloadv1alpha1.RolloutStrategyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroup"):

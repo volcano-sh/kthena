@@ -17,6 +17,44 @@
 
 
 
+#### AutomaticRollback
+
+
+
+AutomaticRollback records the most recent automatic rollback.
+
+
+
+_Appears in:_
+- [ModelServingStatus](#modelservingstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `fromRevision` _string_ | FromRevision is the revision that failed. |  |  |
+| `toRevision` _string_ | ToRevision is the completed revision being restored. |  |  |
+| `phase` _[AutomaticRollbackPhase](#automaticrollbackphase)_ | Phase is the state of the rollback. |  |  |
+| `reason` _string_ | Reason summarizes the failure that triggered the rollback. |  |  |
+
+
+#### AutomaticRollbackPhase
+
+_Underlying type:_ _string_
+
+AutomaticRollbackPhase is the state of an automatic rollback.
+
+
+
+_Appears in:_
+- [AutomaticRollback](#automaticrollback)
+
+| Field | Description |
+| --- | --- |
+| `Pending` | RollbackPending means the rollback is decided but the spec is not restored yet.<br /> |
+| `Applied` | RollbackApplied means the spec is restored and the rollout back to ToRevision is in progress.<br /> |
+| `Completed` | RollbackCompleted means the rollout back to ToRevision completed.<br /> |
+| `Abandoned` | RollbackAbandoned means the spec changed before the rollback was applied.<br /> |
+
+
 #### AutoscalingPolicy
 
 
@@ -620,6 +658,8 @@ _Appears in:_
 | `updateRevision` _string_ | UpdateRevision, if not empty, indicates the ControllerRevision version targeted by<br />the current ModelServing spec. |  |  |
 | `collisionCount` _integer_ | CollisionCount tracks hash collisions for ControllerRevision names. |  |  |
 | `labelSelector` _string_ | LabelSelector is a label query over pods that should match the replica count. |  |  |
+| `rolloutProgress` _[RolloutProgress](#rolloutprogress)_ | RolloutProgress tracks the current rollout when rolloutStrategy.failurePolicy is set. |  |  |
+| `lastRollback` _[AutomaticRollback](#automaticrollback)_ | LastRollback records the most recent automatic rollback. |  |  |
 
 
 #### ModelStatus
@@ -1050,6 +1090,58 @@ _Appears in:_
 | `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition protects replicas whose absolute ordinal is in [0, Partition)<br />from template updates, including when the existing ordinal set is sparse.<br />It does not change the selection priority of explicit replica-count decreases.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
 
 
+#### RolloutFailureAction
+
+_Underlying type:_ _string_
+
+RolloutFailureAction is the action taken when a rollout fails.
+
+
+
+_Appears in:_
+- [RolloutFailurePolicy](#rolloutfailurepolicy)
+
+| Field | Description |
+| --- | --- |
+| `Halt` | RolloutFailureHalt reports the failure and stops replacing outdated replicas with the failed revision.<br /> |
+| `Rollback` | RolloutFailureRollback restores the last completed revision when the failed revision caused the failure.<br />It acts like Halt when a rollback is not possible, and rolls back at most once per failed revision.<br /> |
+
+
+#### RolloutFailurePolicy
+
+
+
+RolloutFailurePolicy defines how the controller handles a failed rollout.
+
+
+
+_Appears in:_
+- [RolloutStrategy](#rolloutstrategy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `action` _[RolloutFailureAction](#rolloutfailureaction)_ | Action is taken when a rollout fails.<br />Failures caused by the environment, such as unschedulable Pods, never trigger a rollback. |  | Enum: [Halt Rollback] <br /> |
+
+
+#### RolloutProgress
+
+
+
+RolloutProgress tracks the rollout towards one target revision.
+
+
+
+_Appears in:_
+- [ModelServingStatus](#modelservingstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `revision` _string_ | Revision is the target revision being tracked. |  |  |
+| `maxTargetUnits` _integer_ | MaxTargetUnits is the highest number of rollout units observed on Revision.<br />A unit is a ServingGroup, or a Role instance under RoleRollingUpdate. |  |  |
+| `maxReadyUnits` _integer_ | MaxReadyUnits is the highest number of Ready rollout units observed on Revision. |  |  |
+| `workloadFailures` _integer_ | WorkloadFailures counts failures observed on Revision that the revision itself caused,<br />such as crashes or unexpected container restarts. |  |  |
+
+
 #### RolloutStrategy
 
 
@@ -1066,7 +1158,8 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type selects the granularity of rolling updates. Supported values are<br />ServingGroupRollingUpdate and RoleRollingUpdate. It defaults to<br />ServingGroupRollingUpdate.<br />ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;<br />rolling update settings on individual Roles do not take effect.<br />RoleRollingUpdate uses the rolling update configuration on each Role;<br />rolloutStrategy.rollingUpdateConfiguration must not be set.<br />Kthena performs RoleRollingUpdate across all ServingGroups at the same time.<br />Therefore, we recommend using it only in scenarios with a single ServingGroup. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
 | `updateMethod` _[UpdateMethod](#updatemethod)_ | UpdateMethod selects how outdated ServingGroups or Roles are moved to the desired revision.<br />Supported values are Recreate (default) and InPlace.<br />InPlace patches container images on existing Pods when only regular-container images change.<br />Otherwise the ServingGroup, or the Role instance under RoleRollingUpdate, is recreated, and an InPlaceUpdateFallback event reports why. | Recreate | Enum: [Recreate InPlace] <br /> |
-| `progressDeadlineSeconds` _integer_ | ProgressDeadlineSeconds is the maximum time for a ServingGroup or Role instance updated in place to become ready on the target image.<br />After it passes, unfinished Pods are handled according to RecoveryPolicy.<br />It only applies to in-place updates, and defaults to 1800 seconds. |  | Minimum: 60 <br /> |
+| `progressDeadlineSeconds` _integer_ | ProgressDeadlineSeconds is the maximum time for a ServingGroup or Role instance updated in place to become ready on the target image.<br />After it passes, unfinished Pods are handled according to RecoveryPolicy.<br />When FailurePolicy is set, it is also the maximum time any rollout may go without progress before it fails.<br />Progress means that a ServingGroup, or a Role instance under RoleRollingUpdate, is created or becomes Ready on the target revision.<br />Defaults to 1800 seconds. |  | Minimum: 60 <br /> |
+| `failurePolicy` _[RolloutFailurePolicy](#rolloutfailurepolicy)_ | FailurePolicy enables rollout failure detection and selects the action taken when a rollout fails.<br />When it is unset, rollout failures are neither detected nor reported. |  |  |
 | `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration configures ServingGroupRollingUpdate.<br />It must not be set when type is RoleRollingUpdate; configure maxUnavailable<br />maxSurge, and partition on each Role instead. |  |  |
 | `roleCoordination` _[RoleCoordination](#rolecoordination)_ | RoleCoordination defines the cross-Role coordination parameters to be used<br />when type is RoleRollingUpdate. |  |  |
 | `evictionStrategy` _[EvictionStrategySpec](#evictionstrategyspec)_ | EvictionStrategy defines the protection policy during node eviction. |  |  |

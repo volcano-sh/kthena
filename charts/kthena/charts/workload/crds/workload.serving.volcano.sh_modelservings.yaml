@@ -169,11 +169,29 @@ spec:
                     required:
                     - protectionLevel
                     type: object
+                  failurePolicy:
+                    description: |-
+                      FailurePolicy enables rollout failure detection and selects the action taken when a rollout fails.
+                      When it is unset, rollout failures are neither detected nor reported.
+                    properties:
+                      action:
+                        description: |-
+                          Action is taken when a rollout fails.
+                          Failures caused by the environment, such as unschedulable Pods, never trigger a rollback.
+                        enum:
+                        - Halt
+                        - Rollback
+                        type: string
+                    required:
+                    - action
+                    type: object
                   progressDeadlineSeconds:
                     description: |-
                       ProgressDeadlineSeconds is the maximum time for a ServingGroup or Role instance updated in place to become ready on the target image.
                       After it passes, unfinished Pods are handled according to RecoveryPolicy.
-                      It only applies to in-place updates, and defaults to 1800 seconds.
+                      When FailurePolicy is set, it is also the maximum time any rollout may go without progress before it fails.
+                      Progress means that a ServingGroup, or a Role instance under RoleRollingUpdate, is created or becomes Ready on the target revision.
+                      Defaults to 1800 seconds.
                     format: int32
                     minimum: 60
                     type: integer
@@ -17937,6 +17955,32 @@ spec:
                 description: LabelSelector is a label query over pods that should
                   match the replica count.
                 type: string
+              lastRollback:
+                description: LastRollback records the most recent automatic rollback.
+                properties:
+                  fromRevision:
+                    description: FromRevision is the revision that failed.
+                    type: string
+                  phase:
+                    description: Phase is the state of the rollback.
+                    type: string
+                  reason:
+                    description: Reason summarizes the failure that triggered the
+                      rollback.
+                    type: string
+                  startTime:
+                    description: StartTime is when the rollback was decided.
+                    format: date-time
+                    type: string
+                  toRevision:
+                    description: ToRevision is the completed revision being restored.
+                    type: string
+                required:
+                - fromRevision
+                - phase
+                - startTime
+                - toRevision
+                type: object
               observedGeneration:
                 description: |-
                   observedGeneration is the most recent generation observed for ModelServing. It corresponds to the
@@ -17948,6 +17992,41 @@ spec:
                   have been created (updated or not, ready or not)
                 format: int32
                 type: integer
+              rolloutProgress:
+                description: RolloutProgress tracks the current rollout when rolloutStrategy.failurePolicy
+                  is set.
+                properties:
+                  lastProgressTime:
+                    description: LastProgressTime is when MaxTargetUnits or MaxReadyUnits
+                      last increased.
+                    format: date-time
+                    type: string
+                  maxReadyUnits:
+                    description: MaxReadyUnits is the highest number of Ready rollout
+                      units observed on Revision.
+                    format: int32
+                    type: integer
+                  maxTargetUnits:
+                    description: |-
+                      MaxTargetUnits is the highest number of rollout units observed on Revision.
+                      A unit is a ServingGroup, or a Role instance under RoleRollingUpdate.
+                    format: int32
+                    type: integer
+                  revision:
+                    description: Revision is the target revision being tracked.
+                    type: string
+                  workloadFailures:
+                    description: |-
+                      WorkloadFailures counts failures observed on Revision that the revision itself caused,
+                      such as crashes or unexpected container restarts.
+                    format: int32
+                    type: integer
+                required:
+                - lastProgressTime
+                - maxReadyUnits
+                - maxTargetUnits
+                - revision
+                type: object
               updateRevision:
                 description: |-
                   UpdateRevision, if not empty, indicates the ControllerRevision version targeted by

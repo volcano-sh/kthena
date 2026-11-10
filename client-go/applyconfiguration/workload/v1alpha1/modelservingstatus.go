@@ -50,6 +50,10 @@ type ModelServingStatusApplyConfiguration struct {
 	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	// LabelSelector is a label query over pods that should match the replica count.
 	LabelSelector *string `json:"labelSelector,omitempty"`
+	// RolloutProgress tracks the current rollout when rolloutStrategy.failurePolicy is set.
+	RolloutProgress *RolloutProgressApplyConfiguration `json:"rolloutProgress,omitempty"`
+	// LastRollback records the most recent automatic rollback.
+	LastRollback *AutomaticRollbackApplyConfiguration `json:"lastRollback,omitempty"`
 }
 
 // ModelServingStatusApplyConfiguration constructs a declarative configuration of the ModelServingStatus type for use with
@@ -140,5 +144,21 @@ func (b *ModelServingStatusApplyConfiguration) WithConditions(values ...*v1.Cond
 // If called multiple times, the LabelSelector field is set to the value of the last call.
 func (b *ModelServingStatusApplyConfiguration) WithLabelSelector(value string) *ModelServingStatusApplyConfiguration {
 	b.LabelSelector = &value
+	return b
+}
+
+// WithRolloutProgress sets the RolloutProgress field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the RolloutProgress field is set to the value of the last call.
+func (b *ModelServingStatusApplyConfiguration) WithRolloutProgress(value *RolloutProgressApplyConfiguration) *ModelServingStatusApplyConfiguration {
+	b.RolloutProgress = value
+	return b
+}
+
+// WithLastRollback sets the LastRollback field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the LastRollback field is set to the value of the last call.
+func (b *ModelServingStatusApplyConfiguration) WithLastRollback(value *AutomaticRollbackApplyConfiguration) *ModelServingStatusApplyConfiguration {
+	b.LastRollback = value
 	return b
 }

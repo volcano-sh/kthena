@@ -47,8 +47,13 @@ type RolloutStrategyApplyConfiguration struct {
 	UpdateMethod *workloadv1alpha1.UpdateMethod `json:"updateMethod,omitempty"`
 	// ProgressDeadlineSeconds is the maximum time for a ServingGroup or Role instance updated in place to become ready on the target image.
 	// After it passes, unfinished Pods are handled according to RecoveryPolicy.
-	// It only applies to in-place updates, and defaults to 1800 seconds.
+	// When FailurePolicy is set, it is also the maximum time any rollout may go without progress before it fails.
+	// Progress means that a ServingGroup, or a Role instance under RoleRollingUpdate, is created or becomes Ready on the target revision.
+	// Defaults to 1800 seconds.
 	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty"`
+	// FailurePolicy enables rollout failure detection and selects the action taken when a rollout fails.
+	// When it is unset, rollout failures are neither detected nor reported.
+	FailurePolicy *RolloutFailurePolicyApplyConfiguration `json:"failurePolicy,omitempty"`
 	// RollingUpdateConfiguration configures ServingGroupRollingUpdate.
 	// It must not be set when type is RoleRollingUpdate; configure maxUnavailable
 	// maxSurge, and partition on each Role instead.
@@ -87,6 +92,14 @@ func (b *RolloutStrategyApplyConfiguration) WithUpdateMethod(value workloadv1alp
 // If called multiple times, the ProgressDeadlineSeconds field is set to the value of the last call.
 func (b *RolloutStrategyApplyConfiguration) WithProgressDeadlineSeconds(value int32) *RolloutStrategyApplyConfiguration {
 	b.ProgressDeadlineSeconds = &value
+	return b
+}
+
+// WithFailurePolicy sets the FailurePolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the FailurePolicy field is set to the value of the last call.
+func (b *RolloutStrategyApplyConfiguration) WithFailurePolicy(value *RolloutFailurePolicyApplyConfiguration) *RolloutStrategyApplyConfiguration {
+	b.FailurePolicy = value
 	return b
 }
 

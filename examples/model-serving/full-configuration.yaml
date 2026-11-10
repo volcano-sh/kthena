@@ -26,8 +26,12 @@ spec:
     type: ServingGroupRollingUpdate
     # Recreate (default) or InPlace.
     updateMethod: Recreate
-    ## For use with Inplace only.
+    ## Bounds in-place updates, and every rollout when failurePolicy is set.
     progressDeadlineSeconds: 1800
+    # Optional. Detects a rollout that makes no progress within progressDeadlineSeconds.
+    # Halt stops replacing healthy ServingGroups; Rollback restores the last completed revision.
+    failurePolicy:
+      action: Halt
     # With RoleRollingUpdate, remove this block and set the same fields inline on each Role instead.
     rollingUpdateConfiguration:
       maxUnavailable: 1

@@ -732,6 +732,8 @@ func (c *ModelServingController) enforceInPlaceDeadline(ctx context.Context, ms 
 func (c *ModelServingController) handleInPlaceTimeout(ctx context.Context, ms *workloadv1alpha1.ModelServing, unit *inPlaceUnit, revision string, deadline time.Duration) error {
 	c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "InPlaceUpdateTimeout",
 		fmt.Sprintf("In-place update of ServingGroup %s exceeded progress deadline %s, applying recovery policy %s", unit.groupName, deadline, ms.Spec.RecoveryPolicy))
+	// An in-place update that cannot finish is evidence against the target revision.
+	c.recordRolloutRevisionFailure(ms, revision)
 	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy {
 		return nil
 	}

@@ -170,10 +170,17 @@ type RolloutStrategy struct {
 
 	// ProgressDeadlineSeconds is the maximum time for a ServingGroup or Role instance updated in place to become ready on the target image.
 	// After it passes, unfinished Pods are handled according to RecoveryPolicy.
-	// It only applies to in-place updates, and defaults to 1800 seconds.
+	// When FailurePolicy is set, it is also the maximum time any rollout may go without progress before it fails.
+	// Progress means that a ServingGroup, or a Role instance under RoleRollingUpdate, is created or becomes Ready on the target revision.
+	// Defaults to 1800 seconds.
 	// +kubebuilder:validation:Minimum=60
 	// +optional
 	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty"`
+
+	// FailurePolicy enables rollout failure detection and selects the action taken when a rollout fails.
+	// When it is unset, rollout failures are neither detected nor reported.
+	// +optional
+	FailurePolicy *RolloutFailurePolicy `json:"failurePolicy,omitempty"`
 
 	// RollingUpdateConfiguration configures ServingGroupRollingUpdate.
 	// It must not be set when type is RoleRollingUpdate; configure maxUnavailable
@@ -189,6 +196,26 @@ type RolloutStrategy struct {
 	// EvictionStrategy defines the protection policy during node eviction.
 	// +optional
 	EvictionStrategy *EvictionStrategySpec `json:"evictionStrategy,omitempty"`
+}
+
+// RolloutFailureAction is the action taken when a rollout fails.
+type RolloutFailureAction string
+
+const (
+	// RolloutFailureHalt reports the failure and stops replacing outdated replicas with the failed revision.
+	RolloutFailureHalt RolloutFailureAction = "Halt"
+
+	// RolloutFailureRollback restores the last completed revision when the failed revision caused the failure.
+	// It acts like Halt when a rollback is not possible, and rolls back at most once per failed revision.
+	RolloutFailureRollback RolloutFailureAction = "Rollback"
+)
+
+// RolloutFailurePolicy defines how the controller handles a failed rollout.
+type RolloutFailurePolicy struct {
+	// Action is taken when a rollout fails.
+	// Failures caused by the environment, such as unschedulable Pods, never trigger a rollback.
+	// +kubebuilder:validation:Enum={Halt,Rollback}
+	Action RolloutFailureAction `json:"action"`
 }
 
 // ProtectionLevelType defines the level of protection during eviction.
@@ -341,7 +368,65 @@ const (
 	// Role rolling update is waiting for a dependency, proportional progress,
 	// old-version retention, or admitted target-version readiness.
 	ModelServingCoordinatedRoleRolloutBlocked ModelServingConditionType = "CoordinatedRoleRolloutBlocked"
+
+	// ModelServingRolloutFailed indicates that a rollout made no progress within its deadline.
+	// It is only reported when rolloutStrategy.failurePolicy is set.
+	ModelServingRolloutFailed ModelServingConditionType = "RolloutFailed"
 )
+
+// RolloutProgress tracks the rollout towards one target revision.
+type RolloutProgress struct {
+	// Revision is the target revision being tracked.
+	Revision string `json:"revision"`
+
+	// MaxTargetUnits is the highest number of rollout units observed on Revision.
+	// A unit is a ServingGroup, or a Role instance under RoleRollingUpdate.
+	MaxTargetUnits int32 `json:"maxTargetUnits"`
+
+	// MaxReadyUnits is the highest number of Ready rollout units observed on Revision.
+	MaxReadyUnits int32 `json:"maxReadyUnits"`
+
+	// LastProgressTime is when MaxTargetUnits or MaxReadyUnits last increased.
+	LastProgressTime metav1.Time `json:"lastProgressTime"`
+
+	// WorkloadFailures counts failures observed on Revision that the revision itself caused,
+	// such as crashes or unexpected container restarts.
+	// +optional
+	WorkloadFailures int32 `json:"workloadFailures,omitempty"`
+}
+
+// AutomaticRollbackPhase is the state of an automatic rollback.
+type AutomaticRollbackPhase string
+
+const (
+	// RollbackPending means the rollback is decided but the spec is not restored yet.
+	RollbackPending AutomaticRollbackPhase = "Pending"
+	// RollbackApplied means the spec is restored and the rollout back to ToRevision is in progress.
+	RollbackApplied AutomaticRollbackPhase = "Applied"
+	// RollbackCompleted means the rollout back to ToRevision completed.
+	RollbackCompleted AutomaticRollbackPhase = "Completed"
+	// RollbackAbandoned means the spec changed before the rollback was applied.
+	RollbackAbandoned AutomaticRollbackPhase = "Abandoned"
+)
+
+// AutomaticRollback records the most recent automatic rollback.
+type AutomaticRollback struct {
+	// FromRevision is the revision that failed.
+	FromRevision string `json:"fromRevision"`
+
+	// ToRevision is the completed revision being restored.
+	ToRevision string `json:"toRevision"`
+
+	// Phase is the state of the rollback.
+	Phase AutomaticRollbackPhase `json:"phase"`
+
+	// Reason summarizes the failure that triggered the rollback.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// StartTime is when the rollback was decided.
+	StartTime metav1.Time `json:"startTime"`
+}
 
 // ModelServingStatus defines the observed state of ModelServing
 type ModelServingStatus struct {
@@ -381,6 +466,14 @@ type ModelServingStatus struct {
 
 	// LabelSelector is a label query over pods that should match the replica count.
 	LabelSelector string `json:"labelSelector,omitempty"`
+
+	// RolloutProgress tracks the current rollout when rolloutStrategy.failurePolicy is set.
+	// +optional
+	RolloutProgress *RolloutProgress `json:"rolloutProgress,omitempty"`
+
+	// LastRollback records the most recent automatic rollback.
+	// +optional
+	LastRollback *AutomaticRollback `json:"lastRollback,omitempty"`
 }
 
 // +kubebuilder:object:root=true
