@@ -43,6 +43,9 @@ type auxiliaryCleanupKey struct {
 // finishPendingDeletions retries failed API requests before any new capacity can
 // reuse an identity. Services with an accepted DELETE may still have finalizers.
 func (c *ModelServingController) finishPendingDeletions(ctx context.Context, ms *workload.ModelServing) error {
+	if err := c.resumeMarkedDeletions(ms); err != nil {
+		return err
+	}
 	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return err
@@ -67,6 +70,49 @@ func (c *ModelServingController) finishPendingDeletions(ctx context.Context, ms 
 				}
 			}
 		}
+	}
+	return nil
+}
+
+// resumeMarkedDeletions rebuilds deletions that a previous controller
+// committed with DeletionScopeAnnotation but did not finish. Only the marked
+// Pod UIDs become targets; the selector is never resnapshotted.
+func (c *ModelServingController) resumeMarkedDeletions(ms *workload.ModelServing) error {
+	pods, err := c.podsLister.Pods(ms.Namespace).List(labels.SelectorFromSet(labels.Set{workload.ModelServingNameLabelKey: ms.Name}))
+	if err != nil {
+		return err
+	}
+	key := utils.GetNamespaceName(ms)
+	groupScoped := map[string]bool{}
+	for _, pod := range pods {
+		if podOwnedForDeletion(pod, ms) && pod.Annotations[utils.DeletionScopeAnnotation] == utils.DeletionScopeServingGroup {
+			groupScoped[pod.Labels[workload.GroupNameLabelKey]] = true
+		}
+	}
+	marked := map[auxiliaryCleanupKey]*podDeletionTargets{}
+	for _, pod := range pods {
+		if !podOwnedForDeletion(pod, ms) || !utils.HasDeletionScope(pod) {
+			continue
+		}
+		group, role, id := pod.Labels[workload.GroupNameLabelKey], utils.GetRoleName(pod), utils.GetRoleID(pod)
+		c.store.AddServingGroupAndRole(key, group, utils.ObjectRevision(pod), c.resolveRoleTemplateHash(ms, role, pod), role, id)
+		target := auxiliaryCleanupKey{uid: ms.UID, group: group}
+		if groupScoped[group] {
+			err = c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupDeleting)
+		} else {
+			target.role, target.id = role, id
+			err = c.store.UpdateRoleStatus(key, group, role, id, datastore.RoleDeleting)
+		}
+		if err != nil {
+			return err
+		}
+		if marked[target] == nil {
+			marked[target] = &podDeletionTargets{targets: map[string]types.UID{}, done: map[string]bool{}, namespace: ms.Namespace, ownerName: ms.Name, ownerUID: ms.UID}
+		}
+		marked[target].targets[pod.Name] = pod.UID
+	}
+	for target, targets := range marked {
+		c.podDeletions.LoadOrStore(target, targets)
 	}
 	return nil
 }

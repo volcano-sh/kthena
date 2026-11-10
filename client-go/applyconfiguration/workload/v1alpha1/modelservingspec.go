@@ -39,7 +39,9 @@ type ModelServingSpecApplyConfiguration struct {
 	Template *ServingGroupApplyConfiguration `json:"template,omitempty"`
 	// RolloutStrategy defines the strategy that will be applied to update replicas
 	RolloutStrategy *RolloutStrategyApplyConfiguration `json:"rolloutStrategy,omitempty"`
-	// RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt
+	// RecoveryPolicy selects the replacement scope for a failed or unexpectedly
+	// restarted Pod after its grace period. None disables active fault recovery;
+	// missing Pods are still replenished and normal template rollout continues.
 	RecoveryPolicy *workloadv1alpha1.RecoveryPolicy `json:"recoveryPolicy,omitempty"`
 	// RevisionHistoryLimit is the maximum number of non-live revisions to retain.
 	// Revisions still referenced by the ModelServing or its workloads do not count

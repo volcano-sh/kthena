@@ -575,3 +575,38 @@ func TestGetMaxSurgeForRole(t *testing.T) {
 		})
 	}
 }
+
+func TestConditionSummaryRefreshIsBoundedAndStable(t *testing.T) {
+	wentTrue := metav1.NewTime(time.Now().Add(-time.Hour))
+	ms := &workloadv1alpha1.ModelServing{Status: workloadv1alpha1.ModelServingStatus{Conditions: []metav1.Condition{{
+		Type: string(workloadv1alpha1.ModelServingUpdateInProgress), Status: metav1.ConditionTrue,
+		Reason: "OldReason", Message: "old summary", LastTransitionTime: wentTrue,
+	}, {
+		Type: string(workloadv1alpha1.ModelServingAvailable), Status: metav1.ConditionFalse,
+		Reason: "OldReason", Message: "old summary", LastTransitionTime: wentTrue,
+	}}}}
+	groups := make([]int, 1000)
+	for i := range groups {
+		groups[i] = len(groups) - i - 1
+	}
+	assert.True(t, SetConditionWithRolloutAndProgressState(ms, groups, []int{2, 1}, nil, true, true))
+	condition := meta.FindStatusCondition(ms.Status.Conditions, string(workloadv1alpha1.ModelServingUpdateInProgress))
+	assert.Equal(t, wentTrue, condition.LastTransitionTime, "summary refresh is not a Status transition")
+	assert.Equal(t, "GroupsUpdating", condition.Reason)
+	assert.Contains(t, condition.Message, "[0 1 2 3 4 5 6 7 8 9] (1000 total)")
+	assert.Contains(t, condition.Message, "[1 2]")
+	assert.Less(t, len(condition.Message), 300)
+	unavailable := meta.FindStatusCondition(ms.Status.Conditions, string(workloadv1alpha1.ModelServingAvailable))
+	assert.Equal(t, condition.Message, unavailable.Message, "a False condition also refreshes its summary")
+	assert.Equal(t, condition.Reason, unavailable.Reason)
+	assert.Equal(t, wentTrue, unavailable.LastTransitionTime)
+	assert.False(t, SetConditionWithRolloutAndProgressState(ms, groups, []int{1, 2}, nil, true, true), "equivalent observations must not request another status write")
+	assert.Len(t, ms.Status.Conditions, 2)
+	assert.Equal(t, 999, groups[0], "summarizing must not reorder caller-owned slices")
+
+	assert.True(t, SetConditionWithRolloutAndProgressState(ms, nil, nil, nil, false, false))
+	condition = meta.FindStatusCondition(ms.Status.Conditions, string(workloadv1alpha1.ModelServingUpdateInProgress))
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.True(t, condition.LastTransitionTime.After(wentTrue.Time))
+	assert.False(t, SetConditionWithRolloutAndProgressState(ms, nil, nil, nil, false, false))
+}

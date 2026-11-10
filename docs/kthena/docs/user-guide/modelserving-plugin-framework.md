@@ -206,4 +206,4 @@ For more design details, see the [ModelServing Plugin Framework proposal](https:
 
 ### Interaction with in-place image updates
 
-ModelServings that include `headless-service` use the controller's recreate fallback when `updateMethod: InPlaceUpdate` is requested, including image-only changes. New LWS-converted children also include this plugin, so their image updates may replace Pods. Plan for the selected rollout budget and Pod replacement; do not rely on Pod UID retention for these workloads. The plugin does not currently declare support for in-place updates.
+ModelServings that include `headless-service` use the controller's recreate fallback when `updateMethod: InPlace` is requested, including image-only changes. New LWS-converted children also include this plugin, so their image updates may replace Pods. Plan for the selected rollout budget and Pod replacement; do not rely on Pod UID retention for these workloads. The plugin does not currently declare support for in-place updates.

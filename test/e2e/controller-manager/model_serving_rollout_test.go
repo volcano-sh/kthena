@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -1923,4 +1924,34 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 	}, 3*time.Minute, 2*time.Second, "Scale down should preserve instances 2, 3 and 4 with their original identities and versions")
 
 	t.Log("ModelServing role partition scale down test passed successfully")
+}
+
+// TestModelServingZeroRoleReplicasCompleteRollout verifies that a rollout which
+// scales every Role to zero completes and promotes the new revision.
+func TestModelServingZeroRoleReplicasCompleteRollout(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	modelServing := createBasicModelServing("test-zero-role-replicas-rollout", 1, 1)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+
+	t.Log("Changing the image and scaling the only Role to zero")
+	updateModelServingWithRetry(t, ctx, kthenaClient, modelServing.Name, func(ms *workload.ModelServing) {
+		ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+		ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = nginxAlpineImage
+	})
+
+	waitForPodsGone(t, ctx, kubeClient, modelServingLabelSelector(modelServing.Name), 2*time.Minute)
+	require.Eventually(t, func() bool {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		status := ms.Status
+		return status.ObservedGeneration == ms.Generation &&
+			status.UpdateRevision != "" &&
+			status.CurrentRevision == status.UpdateRevision &&
+			status.UpdatedReplicas == 1 &&
+			status.AvailableReplicas == 1 &&
+			meta.IsStatusConditionTrue(status.Conditions, string(workload.ModelServingAvailable))
+	}, 2*time.Minute, 2*time.Second, "Rollout to zero Role replicas did not complete")
 }

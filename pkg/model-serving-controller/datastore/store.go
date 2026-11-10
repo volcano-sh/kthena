@@ -483,6 +483,11 @@ func (s *store) UpdateServingGroupStatus(modelServingName types.NamespacedName, 
 		return fmt.Errorf("failed to find modelServing %s", modelServingName.Namespace+"/"+modelServingName.Name)
 	}
 	if group, ok := groups[groupName]; ok {
+		// Deletion is committed until this incarnation is removed. A late Ready
+		// callback must not make it available or allow its members to be refilled.
+		if group.Status == ServingGroupDeleting && status != ServingGroupDeleting {
+			return nil
+		}
 		group.Status = status
 		groups[groupName] = group
 	} else {

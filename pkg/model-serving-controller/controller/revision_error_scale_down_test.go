@@ -305,7 +305,16 @@ func TestDesiredRevisionFailureStillBoundsReplicaDecrease(t *testing.T) {
 					if action.GetResource().Resource != "pods" {
 						continue
 					}
-					require.NotContains(t, []string{"create", "update", "patch"}, action.GetVerb())
+					if action.GetVerb() == "patch" {
+						scope := utils.DeletionScopeRole
+						if strategy == api.ServingGroupRollingUpdate {
+							scope = utils.DeletionScopeServingGroup
+						}
+						patch := action.(kt.PatchAction)
+						assertDeletionScopePatch(t, action, scope, originalUIDs[patch.GetName()])
+						continue
+					}
+					require.NotContains(t, []string{"create", "update"}, action.GetVerb())
 					if deletion, ok := action.(kt.DeleteAction); ok {
 						deletions++
 						require.Equal(t, originalUIDs[deletion.GetName()], *deletion.GetDeleteOptions().Preconditions.UID)
@@ -331,5 +340,137 @@ func TestDesiredRevisionFailureStillBoundsReplicaDecrease(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// API v2.11 §2.3 and SG §0.6: lowering surge alone is not an explicit
+// formal count decrease and cannot bypass the live healthy floor.
+func TestSurgeDesiredRevisionFailureKeepsHealthyRoleFloor(t *testing.T) {
+	ctx := context.Background()
+	ms := semanticRevisionTestModelServing("role-origin-error", "target")
+	ms.ResourceVersion = "1"
+	ms.Status.CurrentRevision = "old"
+	ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.RoleRollingUpdate}
+	ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](3)
+	ms.Spec.Template.Roles[0].RollingUpdateConfiguration = api.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(1)), MaxSurge: ptr.To(intstr.FromInt(0))}
+	c := newRevisionTestController(t, ms)
+	old := ms.DeepCopy()
+	old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old"
+	recordTestRevision(t, c.kubeClientSet, old, "old")
+	group := ms.Name + "-0"
+	for ordinal := 0; ordinal < 4; ordinal++ {
+		seedAppliedRole(t, c, old, old.Spec.Template.Roles[0], 0, ordinal, "old", -1)
+		id := utils.GenerateRoleID("decode", ordinal)
+		require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), group, "decode", id, datastore.RoleRunning))
+		pod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, utils.GeneratePodName(group, id, 0), metav1.GetOptions{})
+		require.NoError(t, err)
+		if ordinal < 2 {
+			pod.Status.Conditions[0].Status = "False"
+		}
+		if ordinal == 3 {
+			setSurgeScope(pod, surgeRole)
+		}
+		_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		// Preserve the realistic earlier Ready projection. The desired-history
+		// failure must not bypass the live healthy floor through count cleanup.
+	}
+	require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), group, datastore.ServingGroupRunning))
+	c.kubeClientSet.(*kubefake.Clientset).PrependReactor("list", "controllerrevisions", func(kt.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("injected desired history read failure")
+	})
+	require.ErrorContains(t, c.syncModelServing(ctx, ms.Namespace+"/"+ms.Name), "injected desired history read failure")
+	pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 4, "failed target history cannot authorize rolling cleanup or formal shrink when R is unchanged")
+	ready := 0
+	for i := range pods.Items {
+		if utils.IsPodRunningAndReady(&pods.Items[i]) {
+			ready++
+		}
+	}
+	require.GreaterOrEqual(t, ready, 2, "R3/U1 permits no healthy deletion when the Ready surge and only one stable instance together supply floor2; current R did not shrink")
+}
+
+func TestSurgeRoleOriginIsNotFallbackFormalCapacity(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		mode          api.RolloutStrategyType
+		formal        int
+		desired       int32
+		surge         int
+		origin        bool
+		foreignMarker bool
+		coordinated   bool
+		expected      int
+	}{
+		{name: "owned-source-kept", mode: api.RoleRollingUpdate, formal: 1, desired: 1, origin: true, expected: 2},
+		{name: "formal-shrink", mode: api.RoleRollingUpdate, formal: 2, desired: 1, origin: true, expected: 2},
+		{name: "role-zero", mode: api.RoleRollingUpdate, formal: 2, origin: true},
+		{name: "foreign-marker-not-owned-source", mode: api.RoleRollingUpdate, formal: 2, desired: 1, foreignMarker: true, expected: 1},
+		{name: "coordinated-gate-unchanged", mode: api.RoleRollingUpdate, formal: 2, desired: 1, origin: true, coordinated: true, expected: 3},
+		{name: "legacy-unmarked-allowance", mode: api.RoleRollingUpdate, formal: 4, desired: 2, surge: 1, expected: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			ms := semanticRevisionTestModelServing("role-fallback-count", "target")
+			ms.ResourceVersion = "1"
+			ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: test.mode}
+			if test.coordinated {
+				ms.Spec.RolloutStrategy.RoleCoordination = coordinationForTest("100%")
+			}
+			ms.Spec.Template.Roles[0].Replicas = ptr.To(test.desired)
+			ms.Spec.Template.Roles[0].RollingUpdateConfiguration = api.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(1)), MaxSurge: ptr.To(intstr.FromInt(test.surge))}
+			c := newRevisionTestController(t, ms)
+			target, group := utils.ModelServingRevision(ms), ms.Name+"-0"
+			count := test.formal
+			if test.origin {
+				count++
+			}
+			for ordinal := 0; ordinal < count; ordinal++ {
+				seedAppliedRole(t, c, ms, ms.Spec.Template.Roles[0], 0, ordinal, target, -1)
+				require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), group, "decode", utils.GenerateRoleID("decode", ordinal), datastore.RoleRunning))
+			}
+			require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), group, datastore.ServingGroupRunning))
+			name := utils.GeneratePodName(group, utils.GenerateRoleID("decode", count-1), 0)
+			anchor, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
+			require.NoError(t, err)
+			if test.origin || test.foreignMarker {
+				marked := anchor.DeepCopy()
+				setSurgeScope(marked, surgeRole)
+				if test.foreignMarker {
+					marked.Name, marked.UID = "foreign-origin", "foreign-origin-uid"
+					marked.OwnerReferences[0].UID = "different-owner"
+					_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, marked, metav1.CreateOptions{})
+				} else {
+					_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Update(ctx, marked, metav1.UpdateOptions{})
+				}
+				require.NoError(t, err)
+			}
+			c.kubeClientSet.(*kubefake.Clientset).PrependReactor("list", "controllerrevisions", func(kt.Action) (bool, runtime.Object, error) {
+				return true, nil, fmt.Errorf("injected desired history read failure")
+			})
+			require.ErrorContains(t, c.syncModelServing(ctx, ms.Namespace+"/"+ms.Name), "injected desired history read failure")
+			pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			owned := 0
+			for i := range pods.Items {
+				if utils.IsOwnedByModelServingWithUID(&pods.Items[i], ms.UID) {
+					owned++
+				}
+			}
+			require.Equal(t, test.expected, owned)
+			if test.origin && test.desired > 0 {
+				actual, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
+				require.NoError(t, err)
+				require.Equal(t, anchor.UID, actual.UID)
+				require.Equal(t, surgeRole, actual.Annotations[surgeAnnotation])
+			}
+			if test.foreignMarker {
+				foreign, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, "foreign-origin", metav1.GetOptions{})
+				require.NoError(t, err)
+				require.Equal(t, types.UID("foreign-origin-uid"), foreign.UID)
+			}
+		})
 	}
 }

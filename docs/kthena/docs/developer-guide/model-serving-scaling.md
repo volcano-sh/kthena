@@ -61,13 +61,13 @@ Role instances also use deterministic ordinals. Within each `ServingGroup`, scal
 
 ## Role Scaling Process
 
-Symbol meaning identical to [ServingGroup Scaling Process](#servinggroup-scaling-process)
+Role instance counts advance independently in all non-deleting ServingGroups. They do not wait for another group to become Ready and are not batched by the ServingGroup rollout budget. A possible scale-up trajectory is:
 
 | | G-0 | G-1 | G-2 | G-3 | Note |
 | --- | --- | --- | --- | --- | --- |
 | Stage1 | ✅ | ✅ | ✅ | ✅ | Before scaling up/down |
-| Stage2 | ⏳ | ❎ | ❎ | ❎ | Scaling has started for one ServingGroup |
-| Stage3 | ✅ | ⏳ | ❎ | ❎ | The next ServingGroup is scaling |
-| Stage4 | ✅ | ✅ | ⏳ | ❎ | Role replicas in the next ServingGroup are scaling |
-| Stage5 | ✅ | ✅ | ✅ | ⏳ | Role replicas in the final ServingGroup are scaling |
-| Stage6 | ✅ | ✅ | ✅ | ✅ | Scale completed |
+| Stage2 | ⏳ | ⏳ | ⏳ | ⏳ | All groups add the requested Role capacity independently |
+| Stage3 | ✅ | ⏳ | ✅ | ⏳ | Each group reports complete Ready when all its required members are Ready |
+| Stage4 | ✅ | ✅ | ✅ | ✅ | Scale completed |
+
+Protected groups use their applicable historical templates with the latest Role counts. Template and worker-layout changes still follow the selected rollout budget; see [ModelServing behavior](../user-guide/modelserving-behavior.md#scaling-and-template-updates).
