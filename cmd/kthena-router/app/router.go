@@ -237,6 +237,8 @@ type listenerConfig struct {
 	shutdownDoneLog  string
 	logShutdownErr   func(err error)
 	logListenErr     func(err error)
+	// listenerClosed, when set, is closed once the server has stopped listening.
+	listenerClosed chan struct{}
 }
 
 func newListenerHandler(cfg listenerConfig) http.Handler {
@@ -327,6 +329,10 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 	}
 
 	go func() {
+		if cfg.listenerClosed != nil {
+			// ListenAndServe returns only once its listener is closed.
+			defer close(cfg.listenerClosed)
+		}
 		klog.Info(cfg.startLog)
 		if cfg.enableTLS {
 			if cfg.tlsCertFile == "" || cfg.tlsKeyFile == "" {
@@ -440,6 +446,9 @@ type PortListenerInfo struct {
 	Server       *http.Server
 	ShutdownFunc context.CancelFunc
 	Listeners    []ListenerConfig
+	// listenerClosed is closed once Server has stopped listening, so the port
+	// can be bound again.
+	listenerClosed chan struct{}
 }
 
 // ListenerManager manages Gateway listeners dynamically
@@ -611,6 +620,7 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 	if !exists {
 		// New port: middleware order matches default server (access log wraps handler).
 		listenerCtx, cancel := context.WithCancel(lm.ctx)
+		listenerClosed := make(chan struct{})
 
 		server := startListener(listenerCtx, listenerConfig{
 			addr:             ":" + strconv.Itoa(int(port)),
@@ -633,6 +643,7 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 			logListenErr: func(err error) {
 				klog.Errorf("listen failed for port %d: %v", port, err)
 			},
+			listenerClosed: listenerClosed,
 		})
 		if server == nil {
 			// The router is shutting down, so no new port is opened.
@@ -641,8 +652,9 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 		}
 
 		portInfo = &PortListenerInfo{
-			Server:    server,
-			Listeners: []ListenerConfig{config},
+			Server:         server,
+			Listeners:      []ListenerConfig{config},
+			listenerClosed: listenerClosed,
 		}
 		lm.portListeners[port] = portInfo
 		portInfo.ShutdownFunc = cancel
@@ -770,6 +782,11 @@ func (lm *ListenerManager) checkAndClosePortIfEmpty(port int32) {
 		delete(lm.portListeners, port)
 		klog.Infof("No listeners remaining on port %d, shutting down server", port)
 		portInfo.ShutdownFunc()
+		// The server stops listening asynchronously. Wait until it has, so that
+		// a listener added to this port next can bind it.
+		if portInfo.listenerClosed != nil {
+			<-portInfo.listenerClosed
+		}
 	}
 }
 
