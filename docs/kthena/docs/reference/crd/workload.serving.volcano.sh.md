@@ -912,7 +912,7 @@ _Appears in:_
 | --- | --- |
 | `ServingGroupRecreate` | ServingGroupRecreate will recreate all the pods in the ServingGroup if<br />1. Any individual pod in the group is recreated; 2. Any containers/init-containers<br />in a pod is restarted. This is to ensure all pods/containers in the group will be<br />started in the same time.<br /> |
 | `RoleRecreate` | RoleRecreate will recreate all pods in one Role if<br />1. Any individual pod in the group is recreated; 2. Any containers/init-containers<br />in a pod is restarted.<br /> |
-| `None` | NoneRestartPolicy will follow the same behavior as the default pod or deployment.<br /> |
+| `None` | NoneRestartPolicy never deletes a failed or restarted Pod; the kubelet handles it<br />according to the Pod's restartPolicy. A Pod deleted by others is recreated on its own.<br /> |
 
 
 #### Role
@@ -1123,7 +1123,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `restartGracePeriodSeconds` _integer_ | RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs<br />Defaults to 0 (ServingGroup will be rebuilt immediately after an error) | 0 |  |
+| `restartGracePeriodSeconds` _integer_ | RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs<br />Defaults to 0 (ServingGroup will be rebuilt immediately after an error)<br />-1 tolerates a failed or restarted Pod indefinitely: the controller never deletes it,<br />including one that misses an in-place update deadline. A Pod deleted by others is<br />still rebuilt according to recoveryPolicy. Values below -1 are rejected. | 0 | Minimum: -1 <br /> |
 | `gangPolicy` _[GangPolicy](#gangpolicy)_ | GangPolicy defines the gang scheduler config. |  |  |
 | `networkTopology` _[NetworkTopology](#networktopology)_ | NetworkTopology defines the network topology affinity scheduling policy for the roles of the `ServingGroup`,<br />it works only when the scheduler supports network topology-aware scheduling. |  |  |
 | `roles` _[Role](#role) array_ |  |  | MaxItems: 4 <br />MinItems: 1 <br /> |

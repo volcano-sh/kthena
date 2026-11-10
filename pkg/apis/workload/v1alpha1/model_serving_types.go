@@ -135,7 +135,8 @@ const (
 	// in a pod is restarted.
 	RoleRecreate RecoveryPolicy = "RoleRecreate"
 
-	// NoneRestartPolicy will follow the same behavior as the default pod or deployment.
+	// NoneRestartPolicy never deletes a failed or restarted Pod; the kubelet handles it
+	// according to the Pod's restartPolicy. A Pod deleted by others is recreated on its own.
 	NoneRestartPolicy RecoveryPolicy = "None"
 )
 
