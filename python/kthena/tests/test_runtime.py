@@ -239,7 +239,7 @@ def test_load_config_fills_missing_values_without_mutating_input(monkeypatch):
     assert config == {"endpoint": "http://storage.local"}
 
 
-@pytest.mark.parametrize("config", [123, ["hf_token"], "[1, 2]", "not json"])
+@pytest.mark.parametrize("config", [123, 0, False, [], ["hf_token"], "[1, 2]", "not json"])
 def test_load_config_rejects_values_that_are_not_objects(config):
     with pytest.raises(ValueError):
         load_config(config)

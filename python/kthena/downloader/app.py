@@ -28,7 +28,7 @@ def load_config(raw_config: str | dict | None = None) -> dict:
     config = {}
     if isinstance(raw_config, dict):
         config = dict(raw_config)
-    elif raw_config:
+    elif raw_config is not None and raw_config != "":
         try:
             config = json.loads(raw_config)
             logger.info("Loaded configuration from JSON string.")
