@@ -25,11 +25,12 @@ import (
 )
 
 var (
-	KVCacheUsage      = "vllm:kv_cache_usage_perc"
-	RequestWaitingNum = "vllm:num_requests_waiting"
-	RequestRunningNum = "vllm:num_requests_running"
-	ITL               = "vllm:inter_token_latency_seconds"
-	TTFT              = "vllm:time_to_first_token_seconds"
+	KVCacheUsage        = "vllm:kv_cache_usage_perc"
+	LegacyGPUCacheUsage = "vllm:gpu_cache_usage_perc"
+	RequestWaitingNum   = "vllm:num_requests_waiting"
+	RequestRunningNum   = "vllm:num_requests_running"
+	ITL                 = "vllm:inter_token_latency_seconds"
+	TTFT                = "vllm:time_to_first_token_seconds"
 )
 
 var (
@@ -80,6 +81,9 @@ func (engine *vllmEngine) GetCountMetricsInfo(allMetrics map[string]*dto.MetricF
 	wantMetrics := make(map[string]float64)
 	for _, metricName := range CounterAndGaugeMetrics {
 		metricInfo, exist := allMetrics[metricName]
+		if !exist && metricName == KVCacheUsage {
+			metricInfo, exist = allMetrics[LegacyGPUCacheUsage]
+		}
 		if !exist {
 			continue
 		}
