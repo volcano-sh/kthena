@@ -25,6 +25,9 @@ package v1alpha1
 type ServingGroupApplyConfiguration struct {
 	// RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs
 	// Defaults to 0 (ServingGroup will be rebuilt immediately after an error)
+	// -1 tolerates a failed or restarted Pod indefinitely: the controller never deletes it,
+	// including one that misses an in-place update deadline. A Pod deleted by others is
+	// still rebuilt according to recoveryPolicy. Values below -1 are rejected.
 	RestartGracePeriodSeconds *int64 `json:"restartGracePeriodSeconds,omitempty"`
 	// GangPolicy defines the gang scheduler config.
 	GangPolicy *GangPolicyApplyConfiguration `json:"gangPolicy,omitempty"`
