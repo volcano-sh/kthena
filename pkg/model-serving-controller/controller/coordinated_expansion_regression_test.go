@@ -203,6 +203,15 @@ func TestCoordinatedExpansionCountsFormalStartsAgainstLaterReplacement(t *testin
 				if action.GetResource().Resource != "pods" || action.GetVerb() == "get" || action.GetVerb() == "list" || action.GetVerb() == "watch" {
 					continue
 				}
+				if method == api.RecreateUpdateMethod && action.GetVerb() == "patch" {
+					patch := action.(clienttesting.PatchAction)
+					previous, exists := original[patch.GetName()]
+					require.True(t, exists)
+					_, ordinal := utils.GetParentNameAndOrdinal(utils.GetRoleID(previous))
+					require.Equal(t, 3, ordinal)
+					assertDeletionScopePatch(t, action, utils.DeletionScopeRole, previous.UID)
+					continue
+				}
 				mutations++
 				if method == api.RecreateUpdateMethod {
 					deletion, ok := action.(clienttesting.DeleteAction)

@@ -27,11 +27,79 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 )
+
+func TestRoleReadinessSyncEmitsStatusEventsBeforeReadyCallback(t *testing.T) {
+	for _, scenario := range []struct {
+		name    string
+		mode    api.RolloutStrategyType
+		refresh bool
+	}{
+		{name: "ServingGroup sync", mode: api.ServingGroupRollingUpdate},
+		{name: "Role sync", mode: api.RoleRollingUpdate},
+		{name: "Role availability refresh", mode: api.RoleRollingUpdate, refresh: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := context.Background()
+			ms := mergeReadyModelServing("role-status-events", 1, 1)
+			ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: scenario.mode}
+			ms.Spec.Template.Roles = ms.Spec.Template.Roles[:1]
+			role := &ms.Spec.Template.Roles[0]
+			role.WorkerReplicas = 1
+			role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+			revision := utils.ModelServingRevision(ms)
+			ms.Status.CurrentRevision, ms.Status.UpdateRevision = revision, revision
+			c := newRevisionTestController(t, ms)
+			key, group, roleID := utils.GetNamespaceName(ms), ms.Name+"-0", role.Name+"-0"
+			c.store.AddServingGroup(key, 0, revision)
+			pods := addMergeReadyInstance(t, c, ms, group, *role, 0, revision, revision, utils.CalRoleTemplateHash(*role))
+			require.NoError(t, c.store.UpdateRoleStatus(key, group, role.Name, roleID, datastore.RoleCreating))
+			recorder := record.NewFakeRecorder(8)
+			c.recorder = recorder
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			for _, ready := range []bool{false, true, false} {
+				worker := pods[1].DeepCopy()
+				worker.Status.Conditions[0].Status = corev1.ConditionFalse
+				if ready {
+					worker.Status.Conditions[0].Status = corev1.ConditionTrue
+				}
+				_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+				require.NoError(t, err)
+				require.NoError(t, c.podsInformer.GetIndexer().Update(worker))
+				previous := c.store.GetRoleStatus(key, group, role.Name, roleID)
+				status := datastore.RoleCreating
+				if ready {
+					status = datastore.RoleRunning
+				}
+				for attempt := 0; attempt < 2; attempt++ {
+					client.ClearActions()
+					if scenario.refresh {
+						require.NoError(t, c.refreshCoordinatedAvailabilityInRound(ctx, ms))
+					} else {
+						require.NoError(t, c.manageRoleReplicasPerGroup(ctx, ms, group, *role, 0, revision, true, nil))
+					}
+					require.Equal(t, status, c.store.GetRoleStatus(key, group, role.Name, roleID))
+					// The sync observes health before the entry's Ready callback.
+					require.NoError(t, c.handleReadyPod(ms, group, pods[0]))
+					requireNoMergeReadyPodMutations(t, client.Actions())
+					if attempt == 0 && previous != status {
+						require.Len(t, recorder.Events, 1)
+						require.Equal(t, fmt.Sprintf("Normal Role%s Role %s/%s in ServingGroup %s is now %s", status, role.Name, roleID, group, status), <-recorder.Events)
+					} else {
+						require.Empty(t, recorder.Events, "unchanged readiness must not emit another status event")
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestProtectedRoleHistorySurvivesReplacementGap(t *testing.T) {
 	for _, scenario := range []struct {
@@ -112,6 +180,267 @@ func TestProtectedRoleHistorySurvivesReplacementGap(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestServingGroupBudgetSharesOneObservation(t *testing.T) {
+	ctx := context.Background()
+	ms := mergeReadyModelServing("group-budget-round", 3, 1)
+	ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.ServingGroupRollingUpdate,
+		RollingUpdateConfiguration: &api.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(1))}}
+	for i := range ms.Spec.Template.Roles {
+		role := &ms.Spec.Template.Roles[i]
+		role.WorkerReplicas = 1
+		role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+	}
+	revision, key := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms)
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = revision, revision
+	c := newRevisionTestController(t, ms)
+	require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+	recordTestRevision(t, c.kubeClientSet, ms, revision)
+	var worker *corev1.Pod
+	for ordinal := 0; ordinal < 3; ordinal++ {
+		group := utils.GenerateServingGroupName(ms.Name, ordinal)
+		c.store.AddServingGroup(key, ordinal, revision)
+		for _, role := range ms.Spec.Template.Roles {
+			pods := addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))
+			worker = pods[1]
+		}
+		require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+	}
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	for _, ready := range []bool{true, false} {
+		if !ready {
+			unready := worker.DeepCopy()
+			unready.Status.Conditions[0].Status = corev1.ConditionFalse
+			_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, unready, metav1.UpdateOptions{})
+			require.NoError(t, err)
+		}
+		groups, err := c.store.GetServingGroupByModelServing(key)
+		require.NoError(t, err)
+		client.ClearActions()
+		round := withObservationRound(ctx, ms)
+		observed, err := c.observeServingGroups(round, ms, groups)
+		require.NoError(t, err)
+		budget, err := c.servingGroupRolloutBudget(round, ms, observed, revision)
+		require.NoError(t, err)
+		expected := rolloutBudget{total: 1, healthy: 1}
+		if !ready {
+			expected = rolloutBudget{}
+		}
+		require.Equal(t, expected, budget, "the next budget must observe API readiness loss without an informer update")
+		podLists, historyGets := 0, 0
+		for _, action := range client.Actions() {
+			if action.GetVerb() == "list" && action.GetResource().Resource == "pods" {
+				podLists++
+			}
+			if action.GetVerb() == "get" && action.GetResource().Resource == "controllerrevisions" {
+				historyGets++
+			}
+		}
+		require.Equal(t, 1, podLists, "all groups, Roles and workers share one fresh Pod observation per budget")
+		require.Equal(t, 1, historyGets, "one budget reuses the immutable applied history")
+	}
+}
+
+func TestReadinessObservationsShareReadsAndRefreshBetweenCalls(t *testing.T) {
+	for _, mode := range []api.RolloutStrategyType{api.ServingGroupRollingUpdate, api.RoleRollingUpdate} {
+		t.Run(string(mode), func(t *testing.T) {
+			ctx := context.Background()
+			ms := mergeReadyModelServing("readiness-facts", 1, 1)
+			ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: mode}
+			for i := range ms.Spec.Template.Roles {
+				role := &ms.Spec.Template.Roles[i]
+				role.WorkerReplicas = 1
+				role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+			}
+			revision, key, group := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms), ms.Name+"-0"
+			c := newRevisionTestController(t, ms)
+			require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+			recordTestRevision(t, c.kubeClientSet, ms, revision)
+			c.store.AddServingGroup(key, 0, revision)
+			var worker *corev1.Pod
+			for _, role := range ms.Spec.Template.Roles {
+				worker = addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))[1]
+			}
+			require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			for _, observation := range []string{"Ready", "worker NotReady", "foreign replacement", "owned replacement"} {
+				switch observation {
+				case "worker NotReady":
+					worker = worker.DeepCopy()
+					worker.Status.Conditions[0].Status = corev1.ConditionFalse
+					_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+					require.NoError(t, err)
+				case "foreign replacement":
+					require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(ctx, worker.Name, metav1.DeleteOptions{}))
+					worker = worker.DeepCopy()
+					worker.UID += "-replacement"
+					worker.OwnerReferences[0].UID = "another-owner"
+					worker.Status.Conditions[0].Status = corev1.ConditionTrue
+					_, err := client.CoreV1().Pods(ms.Namespace).Create(ctx, worker, metav1.CreateOptions{})
+					require.NoError(t, err)
+				case "owned replacement":
+					worker.OwnerReferences[0].UID = ms.UID
+					_, err := client.CoreV1().Pods(ms.Namespace).Update(ctx, worker, metav1.UpdateOptions{})
+					require.NoError(t, err)
+				}
+				// The informer and store retain their original Ready worker UID.
+				client.ClearActions()
+				ready, err := c.checkServingGroupReadyWithContext(ctx, ms, group)
+				require.NoError(t, err)
+				require.Equal(t, observation == "Ready" || observation == "owned replacement", ready, observation)
+				lists, gets := 0, 0
+				for _, action := range client.Actions() {
+					if action.Matches("list", "pods") {
+						lists++
+					}
+					if action.Matches("get", "controllerrevisions") {
+						gets++
+					}
+				}
+				require.Equal(t, 1, lists, "each readiness call shares one new Pod snapshot")
+				require.Equal(t, 1, gets, "Roles reuse their common immutable history")
+			}
+		})
+	}
+}
+
+func TestReadyEventSharesOneObservation(t *testing.T) {
+	for _, mode := range []api.RolloutStrategyType{api.ServingGroupRollingUpdate, api.RoleRollingUpdate} {
+		t.Run(string(mode), func(t *testing.T) {
+			ctx := context.Background()
+			ms := mergeReadyModelServing("ready-event-facts", 1, 1)
+			ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: mode}
+			for i := range ms.Spec.Template.Roles {
+				role := &ms.Spec.Template.Roles[i]
+				role.WorkerReplicas = 1
+				role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+			}
+			revision, key, group := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms), ms.Name+"-0"
+			c := newRevisionTestController(t, ms)
+			require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+			recordTestRevision(t, c.kubeClientSet, ms, revision)
+			c.store.AddServingGroup(key, 0, revision)
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			var entry, worker *corev1.Pod
+			for _, role := range ms.Spec.Template.Roles {
+				pods := addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))
+				if entry == nil {
+					entry, worker = pods[0], pods[1]
+				}
+			}
+			worker = worker.DeepCopy()
+			worker.Status.Conditions[0].Status = corev1.ConditionFalse
+			_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			for _, complete := range []bool{false, true} {
+				if complete {
+					require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(ctx, worker.Name, metav1.DeleteOptions{}))
+					worker = worker.DeepCopy()
+					worker.UID += "-replacement"
+					worker.Status.Conditions[0].Status = corev1.ConditionTrue
+					_, err = client.CoreV1().Pods(ms.Namespace).Create(ctx, worker, metav1.CreateOptions{})
+					require.NoError(t, err)
+				}
+				client.ClearActions()
+				require.NoError(t, c.handleReadyPod(ms, group, entry))
+				lists, gets := 0, 0
+				for _, action := range client.Actions() {
+					if action.Matches("list", "pods") {
+						lists++
+					}
+					if action.Matches("get", "controllerrevisions") {
+						gets++
+					}
+				}
+				require.Equal(t, 1, lists, "one Ready event shares its live observation across all readiness checks")
+				require.Equal(t, 1, gets, "hook and readiness use the same immutable history")
+			}
+		})
+	}
+}
+
+func TestRolePlanningObservationsRefreshBetweenCalls(t *testing.T) {
+	ctx := context.Background()
+	ms := mergeReadyModelServing("role-planning-facts", 1, 1)
+	ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.RoleRollingUpdate}
+	for i := range ms.Spec.Template.Roles {
+		role := &ms.Spec.Template.Roles[i]
+		role.WorkerReplicas = 1
+		role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+	}
+	revision, key, group := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms), ms.Name+"-0"
+	c := newRevisionTestController(t, ms)
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	require.NoError(t, client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+	recordTestRevision(t, client, ms, revision)
+	c.store.AddServingGroup(key, 0, revision)
+	var entry, worker *corev1.Pod
+	for _, role := range ms.Spec.Template.Roles {
+		pods := addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))
+		if entry == nil {
+			entry, worker = pods[0].DeepCopy(), pods[1].DeepCopy()
+		}
+	}
+	for _, observation := range []string{"Ready", "worker NotReady", "foreign entry", "owned replacement"} {
+		switch observation {
+		case "worker NotReady":
+			worker = worker.DeepCopy()
+			worker.Status.Conditions[0].Status = corev1.ConditionFalse
+			_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+			require.NoError(t, err)
+		case "foreign entry":
+			worker = worker.DeepCopy()
+			worker.Status.Conditions[0].Status = corev1.ConditionTrue
+			_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(ctx, entry.Name, metav1.DeleteOptions{}))
+			entry = entry.DeepCopy()
+			entry.UID += "-replacement"
+			entry.OwnerReferences[0].UID = "another-owner"
+			_, err = client.CoreV1().Pods(ms.Namespace).Create(ctx, entry, metav1.CreateOptions{})
+			require.NoError(t, err)
+		case "owned replacement":
+			entry = entry.DeepCopy()
+			entry.OwnerReferences[0].UID = ms.UID
+			_, err := client.CoreV1().Pods(ms.Namespace).Update(ctx, entry, metav1.UpdateOptions{})
+			require.NoError(t, err)
+		}
+		// Keep the informer and datastore at their original Ready identities.
+		for _, planning := range []string{"comparison", "candidates"} {
+			client.ClearActions()
+			sg := datastore.ServingGroup{Name: group, Revision: revision}
+			if planning == "comparison" {
+				want := templateEquivalent
+				if observation == "foreign entry" {
+					want = templateUnknown
+				}
+				require.Equal(t, want, c.compareServingGroupTemplate(ctx, ms, sg, revision), observation)
+			} else {
+				selected, outdated, err := c.rolesToDeleteForRoleRollingUpdateInRound(ctx, ms, sg, nil)
+				require.NoError(t, err)
+				require.Empty(t, selected, "current or unresolved identities must not be deleted")
+				require.Equal(t, observation == "foreign entry", outdated, observation)
+			}
+			lists, gets := 0, 0
+			for _, action := range client.Actions() {
+				if action.GetResource().Resource == "pods" {
+					require.Contains(t, []string{"get", "list"}, action.GetVerb(), "planning must not mutate Pods")
+				}
+				if action.Matches("list", "pods") {
+					lists++
+				}
+				if action.Matches("get", "controllerrevisions") {
+					gets++
+				}
+			}
+			require.Equal(t, 1, lists, planning+": each call shares only its own Pod observation")
+			require.Equal(t, 1, gets, planning+": common immutable history is read once")
+		}
+		actual, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, entry.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, entry.UID, actual.UID)
 	}
 }
 
@@ -322,6 +651,11 @@ func TestCoordinatedScaleDownRetainsHistorySafetyForTheSurvivingGroup(t *testing
 				if action.GetResource().Resource != "pods" || action.GetVerb() == "list" || action.GetVerb() == "get" {
 					continue
 				}
+				if action.GetVerb() == "patch" {
+					assertDeletionScopePatch(t, action, utils.DeletionScopeServingGroup, "")
+					require.Contains(t, action.(clienttesting.PatchAction).GetName(), discarded+"-")
+					continue
+				}
 				deletion, ok := action.(clienttesting.DeleteAction)
 				require.True(t, ok, "only the selected excess group may have a Pod mutation; got %s", action.GetVerb())
 				require.Contains(t, deletion.GetName(), discarded+"-")
@@ -330,6 +664,130 @@ func TestCoordinatedScaleDownRetainsHistorySafetyForTheSurvivingGroup(t *testing
 				deleted = true
 			}
 			require.True(t, deleted, "the same normal scale-down candidate must be removed in both history placements")
+		})
+	}
+}
+
+func TestManagedRoleObservationsRefreshForEachInstance(t *testing.T) {
+	ctx := context.Background()
+	ms := mergeReadyModelServing("managed-observations", 1, 2)
+	ms.Spec.RolloutStrategy.RoleCoordination = nil
+	ms.Spec.Template.Roles = ms.Spec.Template.Roles[:1]
+	role := &ms.Spec.Template.Roles[0]
+	role.Partition = ptr.To(intstr.FromInt(1))
+	role.WorkerReplicas = 1
+	role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+	oldMS := ms.DeepCopy()
+	oldRole := &oldMS.Spec.Template.Roles[0]
+	oldRole.EntryTemplate.Spec.Containers[0].Image = "old"
+	oldRole.WorkerTemplate.Spec.Containers[0].Image = "old"
+	revision, oldRevision := utils.ModelServingRevision(ms), utils.ModelServingRevision(oldMS)
+	key, group := utils.GetNamespaceName(ms), ms.Name+"-0"
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = oldRevision, revision
+	c := newRevisionTestController(t, ms)
+	require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+	recordTestRevision(t, c.kubeClientSet, ms, revision)
+	recordTestRevision(t, c.kubeClientSet, oldMS, oldRevision)
+	c.store.AddServingGroup(key, 0, oldRevision)
+	addMergeReadyInstance(t, c, ms, group, *oldRole, 0, oldRevision, oldRevision, utils.CalRoleTemplateHash(*oldRole))
+	worker := addMergeReadyInstance(t, c, ms, group, *role, 1, revision, revision, utils.CalRoleTemplateHash(*role))[1].DeepCopy()
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	injected := false
+	client.PrependReactor("get", "controllerrevisions", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if injected || action.(clienttesting.GetAction).GetName() != utils.GenerateControllerRevisionName(ms.Name, oldRevision) {
+			return false, nil, nil
+		}
+		// Planning skips protected instance 0. Its applied history is loaded
+		// after its Pod observation, before the next instance is observed.
+		injected = true
+		worker.Status.Conditions[0].Status = corev1.ConditionFalse
+		if err := client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), worker, ms.Namespace); err != nil {
+			return true, nil, err
+		}
+		return false, nil, nil
+	})
+	client.ClearActions()
+	require.NoError(t, c.manageRoleReplicasPerGroup(ctx, ms, group, *role, 0, revision, true, nil))
+	require.True(t, injected, "the protected instance must load its distinct applied history")
+	require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group, role.Name, role.Name+"-0"))
+	require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(key, group, role.Name, role.Name+"-1"), "the second instance must observe the API-only Ready loss")
+	requireNoMergeReadyPodMutations(t, client.Actions())
+
+	worker.Status.Conditions[0].Status = corev1.ConditionTrue
+	_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	client.ClearActions()
+	require.NoError(t, c.manageRoleReplicasPerGroup(ctx, ms, group, *role, 0, revision, true, nil))
+	require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group, role.Name, role.Name+"-1"), "the next invocation must observe API-only recovery")
+	requireNoMergeReadyPodMutations(t, client.Actions())
+}
+
+func TestIndependentRolePlanningObservationsRefreshBetweenCalls(t *testing.T) {
+	for _, entry := range []string{"groups", "role", "outdated"} {
+		t.Run(entry, func(t *testing.T) {
+			ctx := context.Background()
+			ms := mergeReadyModelServing("planning-observations", 3, 3)
+			ms.Spec.RolloutStrategy.RoleCoordination = nil
+			oldMS := ms.DeepCopy()
+			oldMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old"
+			revision, oldRevision, key := utils.ModelServingRevision(ms), utils.ModelServingRevision(oldMS), utils.GetNamespaceName(ms)
+			ms.Status.CurrentRevision, ms.Status.UpdateRevision = revision, revision
+			c := newRevisionTestController(t, ms)
+			require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+			recordTestRevision(t, c.kubeClientSet, ms, revision)
+			recordTestRevision(t, c.kubeClientSet, oldMS, oldRevision)
+			role, group := ms.Spec.Template.Roles[0], ms.Name+"-0"
+			var first *corev1.Pod
+			for ordinal := 0; ordinal < 3; ordinal++ {
+				name := utils.GenerateServingGroupName(ms.Name, ordinal)
+				c.store.AddServingGroup(key, ordinal, revision)
+				for _, spec := range ms.Spec.Template.Roles {
+					for instance := 0; instance < 3; instance++ {
+						pod := addMergeReadyInstance(t, c, ms, name, spec, instance, revision, revision, utils.CalRoleTemplateHash(spec))[0]
+						if name == group && spec.Name == role.Name && instance == 0 {
+							first = pod.DeepCopy()
+						}
+					}
+				}
+			}
+			groups, err := c.store.GetServingGroupByModelServing(key)
+			require.NoError(t, err)
+			instances, err := c.store.GetRoleList(key, group, role.Name)
+			require.NoError(t, err)
+			observe := func() bool {
+				switch entry {
+				case "groups":
+					return c.hasUpdateableOutdatedServingGroup(ctx, ms, groups, revision, 0)
+				case "role":
+					return c.hasUpdateableOutdatedRoleInRound(ctx, ms, group, role, instances)
+				default:
+					outdated, _ := c.outdatedRolesInRound(ctx, ms, datastore.ServingGroup{Name: group, Revision: revision}, role, instances)
+					return len(outdated) > 0
+				}
+			}
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			for _, replaced := range []bool{false, true} {
+				if replaced {
+					require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(ctx, first.Name, metav1.DeleteOptions{}))
+					first.UID += "-replacement"
+					first.Labels[api.RevisionLabelKey] = oldRevision
+					first.Labels[api.RoleTemplateHashLabelKey] = utils.CalRoleTemplateHash(oldMS.Spec.Template.Roles[0])
+					first.Spec.Containers[0].Image = "old"
+					_, err := client.CoreV1().Pods(ms.Namespace).Create(ctx, first, metav1.CreateOptions{})
+					require.NoError(t, err)
+				}
+				// Cache identity and revision stay unchanged between calls.
+				client.ClearActions()
+				require.Equal(t, replaced, observe(), "each invocation must read the new owned identity and applied revision")
+				lists := 0
+				for _, action := range client.Actions() {
+					if action.Matches("list", "pods") {
+						lists++
+					}
+				}
+				require.Equal(t, 1, lists, "one read-only invocation shares its Pod observation")
+				requireNoMergeReadyPodMutations(t, client.Actions())
+			}
 		})
 	}
 }

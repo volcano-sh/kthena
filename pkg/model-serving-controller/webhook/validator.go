@@ -143,6 +143,9 @@ func modelServingValidationErrors(modelServing *workloadv1alpha1.ModelServing) f
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
 	allErrs = append(allErrs, validateEvictionStrategy(modelServing)...)
+	if grace := modelServing.Spec.Template.RestartGracePeriodSeconds; grace != nil && *grace < -1 {
+		allErrs = append(allErrs, field.Invalid(field.NewPath("spec", "template", "restartGracePeriodSeconds"), *grace, "must be greater than or equal to -1"))
+	}
 
 	return allErrs
 }

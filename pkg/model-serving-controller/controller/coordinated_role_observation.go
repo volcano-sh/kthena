@@ -30,6 +30,7 @@ import (
 
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -62,9 +63,10 @@ func (c *ModelServingController) coordinatedLiveRole(ctx context.Context, ms *ap
 }
 
 func (c *ModelServingController) refreshCoordinatedAvailabilityInRound(ctx context.Context, ms *api.ModelServing) error {
-	if roleCoordination(ms) == nil || ms.ResourceVersion == "" {
+	if ms.ResourceVersion == "" || !isRoleRollingUpdate(ms) {
 		return nil
 	}
+	ctx = ensureObservationRound(ctx, ms)
 	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err == datastore.ErrServingGroupNotFound {
 		return nil
@@ -87,7 +89,13 @@ func (c *ModelServingController) refreshCoordinatedAvailabilityInRound(ctx conte
 				}
 				ready, err := c.checkRoleReadyInRound(ctx, ms, group.Name, name, instance.Name)
 				if err != nil {
-					return err
+					if roleCoordination(ms) != nil || !onlyRevisionErrors(err) {
+						return err
+					}
+					// Independent Roles do not share history or rollout budgets.
+					// Invalidate only this unit; report its history wait after safe
+					// quantity changes and other Roles have reconciled.
+					c.revisionHistory(ctx, ms).recordComparisonError(group.Name+"/"+instance.Name, err)
 				}
 				status := datastore.RoleCreating
 				if ready {
@@ -100,6 +108,10 @@ func (c *ModelServingController) refreshCoordinatedAvailabilityInRound(ctx conte
 				}
 				if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), group.Name, name, instance.Name, status); err != nil {
 					return err
+				}
+				if instance.Status != status {
+					message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now %s", name, instance.Name, group.Name, status)
+					c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "Role"+string(status), message)
 				}
 			}
 		}
@@ -125,6 +137,75 @@ func (b *rolloutBudget) take(ready bool) bool {
 	}
 	return true
 }
+
+// observeServingGroups replaces cached ServingGroup states with one physical
+// observation, because the datastore can lag a readiness change or a
+// replacement incarnation. A group whose Pods are terminating or updating in
+// place is reported as Deleting: it occupies capacity but is not a candidate.
+func (c *ModelServingController) observeServingGroups(ctx context.Context, ms *api.ModelServing, groups []datastore.ServingGroup) ([]datastore.ServingGroup, error) {
+	var pods []*corev1.Pod
+	if ms.ResourceVersion != "" {
+		ctx = ensureObservationRound(ctx, ms)
+		var err error
+		if pods, err = c.coordinatedPods(ctx, ms, labels.Everything()); err != nil {
+			return nil, err
+		}
+	}
+	observed := slices.Clone(groups)
+	for i := range observed {
+		group := &observed[i]
+		if group.Status == datastore.ServingGroupDeleting || c.rolloutDeletionPending(ms, group.Name, "", "") {
+			group.Status = datastore.ServingGroupDeleting
+			continue
+		}
+		if ms.ResourceVersion == "" {
+			continue
+		}
+		for _, pod := range pods {
+			if pod.Labels[api.GroupNameLabelKey] != group.Name {
+				continue
+			}
+			if pod.DeletionTimestamp != nil || inplace.StateOf(pod).InProgress() {
+				group.Status = datastore.ServingGroupDeleting
+			}
+			if utils.ObjectRevision(pod) != group.Revision {
+				// A cached old revision never authorizes deleting a replacement.
+				group.Revision = ""
+			}
+		}
+		if group.Status == datastore.ServingGroupDeleting {
+			continue
+		}
+		ready, err := c.checkServingGroupReadyWithContext(ctx, ms, group.Name)
+		group.Status = datastore.ServingGroupCreating
+		if ready && err == nil && group.Revision != "" {
+			group.Status = datastore.ServingGroupRunning
+		}
+	}
+	return observed, nil
+}
+
+// servingGroupRolloutBudget counts every group, including partition-protected
+// groups and surge. A committed deletion still occupies capacity and its
+// allowance until it disappears.
+func (c *ModelServingController) servingGroupRolloutBudget(ctx context.Context, ms *api.ModelServing, groups []datastore.ServingGroup, revision string) (rolloutBudget, error) {
+	u, err := utils.GetMaxUnavailable(ms)
+	if err != nil {
+		return rolloutBudget{}, err
+	}
+	ready, unavailable := 0, 0
+	for _, group := range groups {
+		if group.Status == datastore.ServingGroupDeleting {
+			unavailable++
+		} else if group.Status == datastore.ServingGroupRunning {
+			ready++
+		} else if c.compareServingGroupTemplate(ctx, ms, group, revision) != templateDifferent {
+			unavailable++
+		}
+	}
+	return newRolloutBudget(modelServingReplicas(ms), u, len(groups), ready, unavailable), nil
+}
+
 func roleRolloutBudget(role api.Role, instances []datastore.Role, unavailable int) (rolloutBudget, error) {
 	u, configured, err := utils.GetMaxUnavailableForRole(role)
 	if err != nil {
@@ -159,7 +240,11 @@ func (c *ModelServingController) rolloutDeletionPending(ms *api.ModelServing, gr
 	if c.podsInformer == nil {
 		return false
 	}
-	pods, err := c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, role, instance))
+	index, key := GroupNameKey, ms.Namespace+"/"+group
+	if role != "" {
+		index, key = RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, role, instance)
+	}
+	pods, err := c.getPodsByIndex(index, key)
 	if err != nil {
 		return true
 	}
@@ -172,12 +257,14 @@ func (c *ModelServingController) rolloutDeletionPending(ms *api.ModelServing, gr
 }
 
 // A persisted origin distinguishes temporary capacity from unmarked sparse
-// binpack survivors. A marked instance inside the new desired range is formal.
+// binpack survivors. Entering the desired range permits adoption only when
+// retained capacity leaves a formal slot; paired low-hole surge can still wait.
 type coordinatedSurgeKey struct{}
 
 const (
-	surgeAnnotation = "modelserving.volcano.sh/surge"
-	surgeRole       = "role"
+	surgeAnnotation   = "modelserving.volcano.sh/surge"
+	surgeRole         = "role"
+	surgeServingGroup = "serving-group"
 )
 
 func setSurgeScope(pod *corev1.Pod, scope string) {
@@ -187,35 +274,59 @@ func setSurgeScope(pod *corev1.Pod, scope string) {
 	pod.Annotations[surgeAnnotation] = scope
 }
 func (c *ModelServingController) surgePodsInRound(ctx context.Context, ms *api.ModelServing, scope, group, role string) ([]*corev1.Pod, error) {
-	selector := labels.Set{api.ModelServingNameLabelKey: ms.Name, api.GroupNameLabelKey: group, api.RoleLabelKey: role}.AsSelector()
+	selection := labels.Set{api.ModelServingNameLabelKey: ms.Name}
+	if group != "" {
+		selection[api.GroupNameLabelKey] = group
+	}
+	if role != "" {
+		selection[api.RoleLabelKey] = role
+	}
+	selector := selection.AsSelector()
 	var pods []*corev1.Pod
+	var err error
 	if ms.ResourceVersion != "" {
-		var err error
 		pods, err = c.coordinatedPods(ctx, ms, selector)
-		if err != nil {
-			return nil, err
-		}
 	} else if c.podsInformer != nil {
-		var err error
-		pods, err = c.getPodsByIndex(GroupNameKey, ms.Namespace+"/"+group)
-		if err != nil {
-			return nil, err
-		}
+		pods, err = c.podsLister.Pods(ms.Namespace).List(selector)
+	}
+	if err != nil {
+		return nil, err
 	}
 	var result []*corev1.Pod
 	for _, pod := range pods {
-		if selector.Matches(labels.Set(pod.Labels)) && utils.IsOwnedByModelServingWithUID(pod, ms.UID) && pod.Annotations[surgeAnnotation] == scope {
+		if selector.Matches(labels.Set(pod.Labels)) && utils.IsOwnedByModelServingWithUID(pod, ms.UID) && (scope == "" || pod.Annotations[surgeAnnotation] == scope) {
 			result = append(result, pod)
 		}
 	}
 	return result, nil
 }
-func markedSurgeNames(pods []*corev1.Pod, scope string, n int) sets.Set[string] {
+func surgeIdentity(pod *corev1.Pod, scope string) (string, int) {
+	name := utils.GetRoleID(pod)
+	if scope == surgeServingGroup {
+		name = pod.Labels[api.GroupNameLabelKey]
+	}
+	_, ordinal := utils.GetParentNameAndOrdinal(name)
+	return name, ordinal
+}
+
+// temporaryRoleNames returns the marked Role surge instances. A coordinated
+// Role adopts a marked instance once it falls inside the desired range.
+func temporaryRoleNames(ms *api.ModelServing, pods []*corev1.Pod, role api.Role) sets.Set[string] {
+	boundary := 0
+	if roleCoordination(ms) != nil {
+		boundary = roleReplicas(role)
+	}
+	return markedSurgeNames(pods, surgeRole, boundary)
+}
+
+func markedSurgeNames(pods []*corev1.Pod, scope string, boundary int) sets.Set[string] {
 	names := sets.New[string]()
 	for _, pod := range pods {
-		name := utils.GetRoleID(pod)
-		_, ordinal := utils.GetParentNameAndOrdinal(name)
-		if ordinal >= n {
+		if pod.Annotations[surgeAnnotation] != scope {
+			continue
+		}
+		name, ordinal := surgeIdentity(pod, scope)
+		if ordinal >= boundary {
 			names.Insert(name)
 		}
 	}
@@ -247,14 +358,63 @@ func forEachCoordinatedOrdinal(n, formalSlots int, existing []int, limit int, cr
 	}
 }
 
-func (c *ModelServingController) adoptCoordinatedSurge(ctx context.Context, ms *api.ModelServing, group string, role api.Role) error {
-	pods, err := c.surgePodsInRound(ctx, ms, surgeRole, group, role.Name)
+func (c *ModelServingController) adoptSurgeReplicas(ctx context.Context, ms *api.ModelServing, scope, group, role string, replicas int) error {
+	pods, err := c.surgePodsInRound(ctx, ms, "", group, role)
 	if err != nil {
 		return err
 	}
+	occupied, temporary := sets.New[string](), sets.New[string]()
 	for _, pod := range pods {
-		_, ordinal := utils.GetParentNameAndOrdinal(utils.GetRoleID(pod))
-		if ordinal < 0 || ordinal >= roleReplicas(role) || pod.DeletionTimestamp != nil {
+		name, _ := surgeIdentity(pod, scope)
+		occupied.Insert(name)
+		if pod.Annotations[surgeAnnotation] == scope {
+			temporary.Insert(name)
+		}
+	}
+	if scope == surgeServingGroup {
+		groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+		if err != nil && err != datastore.ErrServingGroupNotFound {
+			return err
+		}
+		for _, unit := range groups {
+			occupied.Insert(unit.Name)
+		}
+	} else {
+		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), group) != datastore.ServingGroupNotFound {
+			instances, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group, role)
+			if err != nil {
+				return err
+			}
+			for _, unit := range instances {
+				occupied.Insert(unit.Name)
+			}
+		}
+	}
+	slots := max(0, replicas-occupied.Difference(temporary).Len())
+	adopt := sets.New[string]()
+	candidates := sets.List(temporary)
+	slices.SortFunc(candidates, func(a, b string) int {
+		_, x := utils.GetParentNameAndOrdinal(a)
+		_, y := utils.GetParentNameAndOrdinal(b)
+		return x - y
+	})
+	for _, name := range candidates {
+		_, ordinal := utils.GetParentNameAndOrdinal(name)
+		if ordinal < 0 || ordinal >= replicas || slots == 0 {
+			continue
+		}
+		if slices.ContainsFunc(pods, func(pod *corev1.Pod) bool {
+			unit, _ := surgeIdentity(pod, scope)
+			return unit == name && pod.DeletionTimestamp != nil
+		}) {
+			continue
+		}
+		adopt.Insert(name)
+		slots--
+	}
+	for _, pod := range pods {
+		name, _ := surgeIdentity(pod, scope)
+		if !adopt.Has(name) || pod.Annotations[surgeAnnotation] != scope {
 			continue
 		}
 		patch, err := json.Marshal(map[string]interface{}{"metadata": map[string]interface{}{
@@ -280,7 +440,7 @@ func (c *ModelServingController) finishCoordinatedSurge(ctx context.Context, ms 
 		c.enqueueModelServingAfter(ms, enqueueAfter)
 		return true, err
 	}
-	temporary := markedSurgeNames(pods, surgeRole, roleReplicas(role))
+	temporary := temporaryRoleNames(ms, pods, role)
 	if temporary.Len() == 0 {
 		return false, nil
 	}
@@ -318,7 +478,7 @@ func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms 
 		c.enqueueModelServingAfter(ms, enqueueAfter)
 		return true, err
 	}
-	temporary := markedSurgeNames(pods, surgeRole, roleReplicas(role))
+	temporary := temporaryRoleNames(ms, pods, role)
 	if temporary.Len() == 0 {
 		return false, nil
 	}
@@ -346,7 +506,7 @@ func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms 
 				if err != nil {
 					return true, err
 				}
-				if !markedSurgeNames(marked, surgeRole, roleReplicas(role)).Has(instance.Name) {
+				if !temporaryRoleNames(ms, marked, role).Has(instance.Name) {
 					continue
 				}
 				at := slices.IndexFunc(current, func(r datastore.Role) bool { return r.Name == instance.Name })

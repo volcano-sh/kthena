@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -39,7 +40,12 @@ import (
 )
 
 const (
-	Entry = "true"
+	// DeletionScopeAnnotation persists a committed Role or ServingGroup
+	// deletion on each original Pod so it survives a controller restart.
+	DeletionScopeAnnotation   = "workload.kthena.io/deletion-scope"
+	DeletionScopeRole         = "Role"
+	DeletionScopeServingGroup = "ServingGroup"
+	Entry                     = "true"
 
 	// condition status of ModelServingStatus
 	AllGroupsIsReady         = "All Serving groups are ready"
@@ -444,15 +450,15 @@ func SetConditionWithRolloutAndProgressState(
 	shouldUpdate := false
 
 	if rolloutActive {
-		message := SomeGroupsAreUpdated + ": " + fmt.Sprintf("%v", updatedGroups)
+		message := SomeGroupsAreUpdated + ": " + summarizeGroupOrdinals(updatedGroups)
 		if len(progressingGroups) > 0 {
-			message = SomeGroupsAreProgressing + ": " + fmt.Sprintf("%v", progressingGroups) + ", " + message
+			message = SomeGroupsAreProgressing + ": " + summarizeGroupOrdinals(progressingGroups) + ", " + message
 		}
 		newCond = newCondition(workloadv1alpha1.ModelServingUpdateInProgress, message)
 	} else if !progressActive {
 		newCond = newCondition(workloadv1alpha1.ModelServingAvailable, AllGroupsIsReady)
 	} else {
-		message := SomeGroupsAreProgressing + ": " + fmt.Sprintf("%v", progressingGroups)
+		message := SomeGroupsAreProgressing + ": " + summarizeGroupOrdinals(progressingGroups)
 		newCond = newCondition(workloadv1alpha1.ModelServingProgressing, message)
 	}
 
@@ -462,16 +468,25 @@ func SetConditionWithRolloutAndProgressState(
 			if newCond.Status != curCondition.Status {
 				ms.Status.Conditions[i] = newCond
 				shouldUpdate = true
+			} else if newCond.Reason != curCondition.Reason || newCond.Message != curCondition.Message {
+				newCond.LastTransitionTime = curCondition.LastTransitionTime
+				ms.Status.Conditions[i] = newCond
+				shouldUpdate = true
 			}
 			found = true
 		} else {
 			// Available and progressing/updateInprogress are not allowed to be true at the same time.
-			if exclusiveConditionTypes(curCondition, newCond) && curCondition.Status == metav1.ConditionTrue && newCond.Status == metav1.ConditionTrue {
-				ms.Status.Conditions[i].Status = metav1.ConditionFalse
-				ms.Status.Conditions[i].LastTransitionTime = newCond.LastTransitionTime
-				ms.Status.Conditions[i].Reason = newCond.Reason
-				ms.Status.Conditions[i].Message = newCond.Message
-				shouldUpdate = true
+			if exclusiveConditionTypes(curCondition, newCond) && newCond.Status == metav1.ConditionTrue {
+				if curCondition.Status != metav1.ConditionFalse {
+					ms.Status.Conditions[i].Status = metav1.ConditionFalse
+					ms.Status.Conditions[i].LastTransitionTime = newCond.LastTransitionTime
+					shouldUpdate = true
+				}
+				if curCondition.Reason != newCond.Reason || curCondition.Message != newCond.Message {
+					ms.Status.Conditions[i].Reason = newCond.Reason
+					ms.Status.Conditions[i].Message = newCond.Message
+					shouldUpdate = true
+				}
 			}
 		}
 	}
@@ -482,6 +497,17 @@ func SetConditionWithRolloutAndProgressState(
 	}
 
 	return shouldUpdate
+}
+
+// Keep status summaries deterministic and bounded as the workload grows.
+func summarizeGroupOrdinals(groups []int) string {
+	const limit = 10
+	ordinals := slices.Clone(groups)
+	slices.Sort(ordinals)
+	if len(ordinals) <= limit {
+		return fmt.Sprintf("%v", ordinals)
+	}
+	return fmt.Sprintf("%v (%d total)", ordinals[:limit], len(ordinals))
 }
 
 // This function is refer to https://github.com/kubernetes-sigs/lws/blob/main/pkg/controllers/leaderworkerset_controller.go#L840
@@ -649,4 +675,10 @@ func roleReplicas(role workloadv1alpha1.Role) int {
 		return 1
 	}
 	return int(*role.Replicas)
+}
+
+// HasDeletionScope reports whether the Pod belongs to a committed deletion.
+func HasDeletionScope(pod *corev1.Pod) bool {
+	scope := pod.Annotations[DeletionScopeAnnotation]
+	return scope == DeletionScopeRole || scope == DeletionScopeServingGroup
 }

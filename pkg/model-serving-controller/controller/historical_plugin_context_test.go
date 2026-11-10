@@ -31,6 +31,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -53,6 +54,26 @@ func historicalPluginFixture(t *testing.T) (*ModelServingController, *kubefake.C
 	c, err := NewModelServingController(client, kthenafake.NewSimpleClientset(ms), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
 	require.NoError(t, err)
 	return c, client, ms
+}
+
+func TestPodCreateStripsDeletionMarkerAfterPluginHooks(t *testing.T) {
+	c, client, ms := historicalPluginFixture(t)
+	ms.Spec.Plugins = []workload.PluginSpec{{Name: plugins.DemoPluginName, Config: &apiextensionsv1.JSON{Raw: []byte(`{"annotations":{"workload.kthena.io/deletion-scope":"ServingGroup","example.com/plugin":"kept"}}`)}}}
+	role := ms.Spec.Template.Roles[0]
+	role.WorkerReplicas = 1
+	role.EntryTemplate.Metadata = &workload.Metadata{Annotations: map[string]string{utils.DeletionScopeAnnotation: utils.DeletionScopeRole, "example.com/template": "kept"}}
+	role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+	ms.Spec.Template.Roles[0] = role
+	_, err := c.createPodsByRole(context.Background(), role, ms, 0, 0, utils.ModelServingRevision(ms), "hash")
+	require.NoError(t, err)
+	pods, err := client.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 2)
+	for _, pod := range pods.Items {
+		require.NotContains(t, pod.Annotations, utils.DeletionScopeAnnotation)
+		require.Equal(t, "kept", pod.Annotations["example.com/template"])
+		require.Equal(t, "kept", pod.Annotations["example.com/plugin"])
+	}
 }
 
 func TestCoordinatedHistoryFormatsAndOwnerIdentity(t *testing.T) {
@@ -94,6 +115,9 @@ func TestCoordinatedHistoryFormatsAndOwnerIdentity(t *testing.T) {
 					require.ErrorContains(t, readErr, "is not controlled by ModelServing")
 					require.ErrorContains(t, persistErr, "is not controlled by ModelServing")
 					for _, action := range client.Actions() {
+						if action.GetResource().Resource == "events" {
+							continue // Diagnostic Events are delivered asynchronously.
+						}
 						require.Equal(t, "get", action.GetVerb(), "foreign history must have no metadata or workload writes")
 					}
 				}
@@ -323,7 +347,10 @@ func TestHistoricalContextRejectsUnusableHistoryBeforeEffects(t *testing.T) {
 				}
 				require.Error(t, err)
 				for _, a := range client.Actions() {
-					require.NotContains(t, []string{"create", "update", "delete", "patch"}, a.GetVerb())
+					if a.GetResource().Resource == "events" {
+						continue // Diagnostic Events are delivered asynchronously.
+					}
+					require.NotContains(t, []string{"create", "update", "delete", "patch"}, a.GetVerb(), "unexpected API resource: %s", a.GetResource().Resource)
 				}
 			})
 		}
@@ -530,6 +557,9 @@ func TestCurrentV1CreationKeepsPodAndStoreHashAligned(t *testing.T) {
 			outdated, _ := c.outdatedRoles(ms, sg, ms.Spec.Template.Roles[0], roles)
 			require.Empty(t, outdated)
 			require.Empty(t, c.findOutdatedRolesInServingGroups(ms, []datastore.ServingGroup{sg}, revision))
+			pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+			_, err = client.CoreV1().Pods(ms.Namespace).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+			require.NoError(t, err)
 			require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
 			require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), sg.Name, "infer", "infer-0", datastore.RoleRunning))
 			require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), sg.Name, datastore.ServingGroupRunning))
