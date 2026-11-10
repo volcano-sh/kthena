@@ -69,10 +69,14 @@ deploying and scaling another service.
 - Batches of tens of thousands of requests, with bounded router memory regardless of batch
   size.
 - Each batch line takes the same path as an interactive request, so route matching, rate
-  limiting, fairness and the KV-cache aware plugins all still apply.
-- Every `custom_id` in the input appears exactly once across the output and error files,
-  including across a takeover. This is a guarantee about committed results: a line in
-  flight during a takeover can reach the backend twice.
+  limiting, fairness and the KV-cache aware plugins all still apply. The few places a
+  batch line is treated differently are listed under
+  [How it plugs into the existing router](#how-it-plugs-into-the-existing-router).
+- For every batch that starts running, every `custom_id` in the input appears exactly once
+  across the output and error files, including across a takeover. This is a guarantee
+  about committed results: a line in flight during a takeover can reach the backend twice.
+  A batch cancelled or expired while still queued was never read, so it has no result
+  files.
 - A temporary failure delays a line instead of failing it. A rate limit or a model with no
   ready pods does not turn a batch into a file of errors.
 - Any replica can serve the API, one replica owns a batch at a time, and a batch survives
@@ -192,7 +196,8 @@ file, and every request that never finished is written to the error file with
 
 A ModelRoute has a token rate limit, and a batch reaches it. The lines wait and carry on
 as budget comes back. The batch takes longer, and no line fails because of the limit
-unless the batch runs out of time.
+unless the batch runs out of time. The one exception is a line whose prompt is larger than
+the whole budget: waiting cannot help it, so it fails at once and the rest carry on.
 
 #### Notes/Constraints/Caveats
 
@@ -230,6 +235,7 @@ unless the batch runs out of time.
 | Redis loses batch state | Require AOF with `appendfsync everysec` or stricter, plus `maxmemory-policy noeviction`. RDB alone is not enough. What a crash still loses is listed under [What a Redis failure loses](#what-a-redis-failure-loses) |
 | Forged batch identity | Owner and gateway context travel in the request context, never in a header; the engine that trusts them binds no listener, and a client cannot write into a Go `context.Context` |
 | One tenant starves the queue | `maxQueuedBatchesPerTenant` and `maxActiveBatchesPerTenant`, see [Multi-tenancy](#multi-tenancy) |
+| Two issuers hand out the same subject | The tenant is the token's issuer and subject together, not the subject alone, see [Multi-tenancy](#multi-tenancy) |
 | Files fill the volume | Expiry, a sweeper, per-batch and per-tenant byte limits, see [Reclaiming storage](#reclaiming-storage) |
 | Prompts and answers sit on a shared volume | Files are stored as plain bytes, and encryption is left to the volume. With auth disabled every caller shares one tenant, so batch should not be enabled on a shared cluster without auth |
 
@@ -245,7 +251,7 @@ under `cmd`. The Implementation Plan at the end splits these into serial PRs.
 | `batch/types.go` | `Job`, `File`, `Lease`, `Checkpoint`, `Status` |
 | `batch/store.go` | the `Store` interface, the only writer of job state |
 | `batch/redis_store.go` | Redis implementation: keys, indexes, script loading |
-| `batch/scripts/*.lua` | the ten scripts listed under [State model](#state-model) |
+| `batch/scripts/*.lua` | the twelve scripts listed under [State model](#state-model) |
 | `batch/files.go` | `/v1/files`, the `FileStore` interface and its volume implementation |
 | `batch/batches.go` | `/v1/batches`: create, list, get, cancel |
 | `batch/validate.go` | input validation and the OpenAI error envelope |
@@ -260,8 +266,8 @@ The proof of concept is about 3,300 lines of Go and 120 of Lua, plus 3,700 lines
 
 #### How it plugs into the existing router
 
-Existing files are only added to, never changed. In the proof of concept the Go side is 29
-added lines across two files, and there are no deletions anywhere in the four:
+In the proof of concept, existing files are only added to: the Go side is 29 added lines
+across two files, and there are no deletions anywhere in the four:
 
 | Existing file | Change |
 | --- | --- |
@@ -270,12 +276,24 @@ added lines across two files, and there are no deletions anywhere in the four:
 | `charts/kthena/charts/networking/values.yaml` | +27: the `batch` block, defaulted off |
 | `charts/kthena/charts/networking/templates/kthena-router/component/deployment.yaml` | +49: the optional volume mount. The worker pool adds one new template |
 
-Deliberately **not** modified: the scheduler, the datastore, the rate limiters, the access
-log, and `AuthMiddleware`. Batch lines reach all of them by being dispatched through the
-ordinary handler chain rather than by being special cased inside it. That is the one
-decision the rest of this section follows from. The one exception is fairness, as Decision
-2 recommends: `handleFairnessScheduling` and the two `UpdateTokenCount` calls each gain one
-condition, so batch lines queue last and are not counted against their owner.
+Batch lines reach the scheduler, the rate limiters, the fairness queue and the access log
+by being dispatched through the ordinary handler chain rather than by being special cased
+inside it. That is the one decision the rest of this section follows from. Reviewing the
+proof of concept against the router found four places where an ordinary request and a
+batch line must still be treated differently, so this design changes existing code there,
+each in a few lines:
+
+| Existing file | Change | Why |
+| --- | --- | --- |
+| `pkg/kthena-router/router/router.go` | `handleFairnessScheduling` marks a batch line's queue request as `Batch`, and the two `UpdateTokenCount` calls skip batch lines | batch queues last and does not lower its owner's priority, see [How batch lines count against limits](#how-batch-lines-count-against-limits) |
+| `pkg/kthena-router/router/router.go` | `proxyRequest` passes a backend's non-2xx answer through for a batch line instead of trying the next pod | the executor needs the backend's real status and body, see [When a line fails](#when-a-line-fails) |
+| `pkg/kthena-router/datastore/fairness_queue.go` | a `Batch` field on `Request`, one comparison at the top of `Less`, and a skip in the two priority refresh paths | the queue orders a user's requests by arrival before priority, and refresh would overwrite batch's priority |
+| `pkg/kthena-router/filters/ratelimit/ratelimit.go` | a prompt larger than the whole token bucket gets its own error | waiting can never let it through, see [When a line fails](#when-a-line-fails) |
+
+The first three act only on requests that carry the batch flag `batchIdentity` sets, which
+a network request cannot carry. The rate limiter change also reaches interactive clients:
+they still get a 429, with a message that says the prompt can never fit. `AuthMiddleware`,
+the scheduler and the access log are not modified.
 
 #### End to end: the steps for one batch
 
@@ -305,18 +323,19 @@ sequenceDiagram
     end
     X->>R: checkpoint, periodically
     X->>R: transition to finalizing
-    X->>V: build result files
-    X->>R: transition to completed
-    X->>V: remove segments and index
+    X->>V: build and sync result files
+    X->>R: transition to completed, schedule cleanup
     C->>A: GET batch, poll
     C->>A: GET output file content
 ```
 
 1. **Upload**, batch API. `POST /v1/files` with `purpose: batch` streams the JSONL body
    into the file store and writes a `file:<id>` record owned by the caller's tenant.
-2. **Create**, batch API. `POST /v1/batches` checks the request, then the `create` script
-   checks the file is still live, adds the batch to `fileref:<id>`, writes `job:<id>` and
-   pushes the ID onto `queue`, all in one step. The client gets a batch in `validating`.
+2. **Create**, batch API. `POST /v1/batches` checks the request, including that `endpoint`
+   is `/v1/chat/completions`, the only endpoint the first phase supports. Then the
+   `create` script checks the file is still live, adds the batch to `fileref:<id>`, writes
+   `job:<id>` and pushes the ID onto `queue`, all in one step. The client gets a batch in
+   `validating`.
 3. **Claim**, worker. Every replica with the worker enabled runs a claim loop. `claim`
    pops the oldest queued ID, writes `lease:<id>` with a TTL, stamps `holder` and `fence`
    onto the job, and adds it to `active` for the reaper. Exactly one replica wins.
@@ -337,12 +356,13 @@ sequenceDiagram
    returns the current status in the same round trip, which is how a running executor
    learns it was cancelled. If the pod dies the lease expires, `reap` requeues the job,
    and the next owner resumes from the checkpoint, skipping lines in the done bitmap.
-8. **Finalize**, executor. The valid prefix of each segment is concatenated into the
-   output and error files, their file records are written, and the job transitions to
-   `completed`.
-9. **Clean up**, executor and sweeper. The owner removes the segments, the index and the
-   checkpoint, and releases the input file. The sweeper catches anything a crash left
-   behind, see [Reclaiming storage](#reclaiming-storage).
+8. **Finalize**, executor. The valid prefix of each segment is concatenated into result
+   files named with the owner's fence and synced to disk. One fenced transition then
+   writes their file records and moves the job to `completed`, see
+   [Resumable execution](#resumable-execution).
+9. **Clean up**, sweeper. The same transition releases the input file and schedules the
+   segments, the index and the checkpoint for removal a few minutes later, and the sweeper
+   removes them, see [Reclaiming storage](#reclaiming-storage).
 10. **Poll and download**, batch API. The client polls `GET /v1/batches/{id}` throughout,
     then fetches `output_file_id` and `error_file_id`.
 
@@ -403,7 +423,9 @@ stateDiagram-v2
 ```
 
 `validating --> cancelled` and `validating --> expired` are a batch still in the queue,
-which no worker has claimed. A running batch stays in `cancelling` or `in_progress` while
+which no worker has claimed. Its input was never read, so it has no result files and its
+`request_counts` stay at 0; the exactly-once guarantee covers batches that start running.
+A running batch stays in `cancelling` or `in_progress` while
 its result files are built, and only then becomes `cancelled` or `expired`, so
 `finalizing` always means the batch ran to the end.
 
@@ -496,6 +518,11 @@ before it parses a model request, and only for `/v1/` paths, which `AuthMiddlewa
 false the request continues down the existing model path unchanged. When batch is disabled
 the field is nil and the cost is one nil comparison per request.
 
+A batch line never reaches the extension. Create only accepts `/v1/chat/completions` as the
+batch `endpoint`, every line's `url` must match it, and on top of that the extension does
+not answer a request that carries the batch flag. So a batch cannot create files or
+batches of its own.
+
 The route table itself is never touched, which is the point: batch adds a branch inside
 the catch-all instead of competing with it. Any future non-model OpenAI endpoint can use
 the same seam.
@@ -518,11 +545,13 @@ prefix must keep a `{...}` hash tag, or the scripts fail on Redis Cluster.
 | `fileref:<id>` | set | batches still needing this file, so a delete keeps the bytes |
 | `idx:batches:<tenant>` | zset | a tenant's batches, for listing |
 | `idx:files:<tenant>` | zset | a tenant's files, for listing |
-| `gc` | zset | files and finished jobs, scored by when they may be removed |
+| `gc` | zset | files, finished jobs and working files, scored by when they may be removed |
+| `bytes:<tenant>` | string | bytes reserved by the tenant's files and running batches |
 
 Every multi-step state change is a Lua script, so it is atomic against other replicas.
-There are ten, and each one is short enough to read in full: `create`, `claim`, `renew`,
-`transition`, `checkpoint`, `cancel`, `reap`, `release`, `delete_file`, `sweep`.
+There are twelve, and each one is short enough to read in full: `reserve`, `create`,
+`claim`, `renew`, `transition`, `checkpoint`, `cancel`, `reap`, `release`, `delete_file`,
+`sweep`, `sweep_done`.
 
 ##### What a Redis failure loses
 
@@ -535,7 +564,7 @@ never issued twice:
 | A create | The client gets a 404 when it polls and creates the batch again. The input file is still there |
 | A checkpoint | The next owner resumes from the one before and redoes those lines. The valid byte counts went back with it, so the output stays exactly once |
 | A claim or a lease | The old owner's next write is rejected or its next renew reports the loss, and it stops. Two owners can overlap for one renew interval, which costs duplicate backend work only |
-| The final transition | The batch looks unfinished. The next owner rebuilds the same result files and transitions again |
+| The final transition | The batch looks unfinished. Nothing was removed yet, because the cleanup it scheduled was lost with it, so the next owner resumes from the last checkpoint, publishes result files under its own fence and transitions again. The first owner's result files are never referenced, and the orphan sweep removes them |
 | Everything, on a Redis with no persistence | Batches are gone and the API answers 404. Running executors stop at their next renew, and the bytes left on the volume are removed by the orphan sweep |
 
 #### Ownership: leases and fencing
@@ -576,10 +605,11 @@ chart's 330 second grace period already leaves room for it.
 
 `claim` also counts attempts. A graceful `release` gives its attempt back, and a
 checkpoint with progress resets the count. A batch that reaches `maxAttempts` without
-progress moves to `failed` with `too_many_attempts`, with whatever was committed still
-published. This is what stops a batch that always fails, such as one that crashes its
-owner or meets a full volume, from retrying forever. A worker also waits one poll interval
-before claiming again after a run ends in an error.
+progress moves to `failed` with `too_many_attempts`. Whatever was committed is
+published, and the remaining lines are written to the error file with `batch_failed`.
+This is what stops a batch that always fails, such as one that crashes its owner or meets
+a full volume, from retrying forever. A worker also waits one poll interval before
+claiming again after a run ends in an error.
 
 #### Resumable execution
 
@@ -619,31 +649,82 @@ What a new owner does depends on the status it finds:
 | `finalizing` | publishes only, and dispatches nothing |
 
 Finalizing concatenates the valid prefix of every segment into the final output and error
-files, then transitions to the terminal status. The result files are written under
-deterministic names through `Create`, which stages a temporary file and renames it into
-place, so a finalize that is interrupted and retried by the next owner rebuilds the same
-lines and swaps them in once. A stale owner that renames late cannot change the result
-either: a batch only reaches `finalizing` once its checkpoint is final, so both owners
-build the same bytes from the same segments. The stale owner also never gets as far as
-cleanup, because removing the segments comes after the fenced transition to a terminal
-status, which its fence fails.
+files, then transitions to the terminal status. Two rules make that safe:
+
+- **Each owner publishes its own files.** The result files are named with the owner's
+  fence, so two owners never write the same file. Two owners can build different bytes:
+  if Redis loses the final checkpoint, the next owner re-runs some lines and the model may
+  answer them differently. That is fine, because only one set is ever referenced. The
+  `transition` script writes the file records and sets `output_file_id` and
+  `error_file_id` in the same fenced step, so only the current owner's files become the
+  batch's results. A stale owner's files are never referenced, and the orphan sweep
+  removes them.
+- **The bytes are on disk before Redis points at them.** `Create` writes a temporary
+  file, syncs it, renames it into place and syncs the directory, and only then returns,
+  as the proof of concept's does. The transition runs after `Create` returns, so a
+  terminal status never names a file a node crash could lose.
+
+The owner deletes nothing itself. The terminal transition schedules the segments, the
+index and the checkpoint for the sweeper, `retention.removalGrace` later, 10 minutes by
+default. If Redis loses that transition, it loses the schedule with it, so the files are
+still there for the next owner to resume from.
 
 #### When a line fails
 
 A batch runs for hours against model servers that restart, scale and hit rate limits, so a
-failed attempt is not a failed line. What happens depends on the answer:
+failed attempt is not a failed line. What happens depends on who answered and how.
 
-| Answer | Retry | Recorded as |
-| --- | --- | --- |
-| 2xx | no | output file |
-| 429 from the rate limiter or a backend | yes, until the batch deadline. The whole batch pauses, and the wait does not use up the line's attempts | `batch_expired` if the deadline arrives first |
-| 500, 502, 503, 504, a connection error, `lineTimeout` | yes, up to `maxLineAttempts` | error file, with the last status |
-| Any other 4xx, such as 400 or a 404 for an unknown model | no, the same request gives the same answer | error file |
-| A response over `maxResponseBytes` | no, and it is never truncated into the output file | error file, `response_too_large` |
+Today the router hides a backend's error: `proxyRequest` treats any non-2xx answer as a
+failed attempt, tries the next pod, and after the last one answers a generic 503,
+`request to all pods failed`. A backend's 400 or 429 never reaches the client as itself.
+For a batch line, `proxyRequest` instead writes the backend's non-2xx answer through,
+with its status, headers and body, and does not try the next pod. Retrying is the
+executor's job, because it knows the deadline and the attempt count. A connection error
+still moves on to the next pod, as it does today.
 
-The 503 case matters most: the router answers it when a model server has no ready pods,
-which is normal during a rollout or a scale up. The 504 case is a line that outlived
-`FAIRNESS_QUEUE_TIMEOUT`.
+The router's own refusals are told apart by the `finishReason` it already sets in the
+gin context before answering: `rate_limit` for its 429, `pod_discovery` when it cannot
+find pods for the model, `scheduling` when a request leaves the fairness queue without
+being admitted, `proxy` when every pod failed to connect. A backend answer passed through
+carries none of them. A reason alone is not enough, because one reason covers several
+answers: `pod_discovery` is a 503 when no pod is ready, but a 404 when the model server
+does not exist. So the executor classifies by the reason and the status together. gin
+reuses its context once a request ends, so `batchIdentity`, which wraps the chain, copies
+the reason onto the line's `batchWriter` when the chain returns, and the executor reads it
+there.
+
+The executor checks the line's own context first. If that ended, because of `lineTimeout`
+or a cancel, that decides what happens, whatever the router answered: a line cancelled
+while waiting in the fairness queue gets a 503 that only says the caller went away.
+
+| Who answered | Answer | Retry | Recorded as |
+| --- | --- | --- | --- |
+| backend | 2xx | no | output file |
+| backend | 429 | yes, until the batch deadline. The whole batch pauses, and the wait does not use up the line's attempts | `batch_expired` if the deadline arrives first |
+| backend | 500, 502, 503, 504 | yes, up to `maxLineAttempts` | error file, with the backend's answer |
+| backend | any other 4xx, such as 400 | no, the same request gives the same answer | error file, with the backend's answer |
+| router, `rate_limit` | 429, the token budget is used up for now | yes, until the batch deadline, pausing the batch as above | `batch_expired` if the deadline arrives first |
+| router, `rate_limit_capacity` | 429, the prompt is larger than the whole bucket | no, waiting cannot help | error file, `rate_limit_capacity` |
+| router, `pod_discovery` | 503, no ready pods | yes, until the batch deadline, pausing the batch as above, since every line targets the same model | `batch_expired` if the deadline arrives first |
+| router, `pod_discovery` | 404, the model server does not exist | no | error file |
+| router, `pod_discovery` | 500, listing the pods failed | yes, up to `maxLineAttempts` | error file, with the last status |
+| router, `scheduling` | 504 queue timeout, 503 the queue is closing | yes, until the batch deadline, pausing the batch as above | `batch_expired` if the deadline arrives first |
+| router, `proxy` | 503, no pod could be reached | yes, up to `maxLineAttempts` | error file, with the last status |
+| router, any other reason | such as `route_not_found` | no | error file |
+| none | `lineTimeout` | yes, up to `maxLineAttempts` | error file |
+| either | a response over `maxResponseBytes` | no, and it is never truncated into the output file | error file, `response_too_large` |
+
+No ready pods and a queue timeout are the cases that matter most. Both are normal during a
+rollout, a scale up or a burst of interactive traffic, so they wait for the deadline
+instead of spending attempts, and a batch outlasts them rather than failing lines.
+
+A prompt larger than the whole bucket is the one 429 that waiting cannot fix. The local
+and the global limiter are both token buckets that hold `InputTokensPerUnit` tokens, and
+`AllowN` refuses any request larger than that every time, so pausing the batch for it
+would stop every other line until the deadline. `RateLimit` already estimates the
+prompt's tokens, so it returns its own error when the estimate exceeds the bucket, and the
+router sets `finishReason` to `rate_limit_capacity` for it, a new reason. An interactive
+client still gets a 429.
 
 Retries back off from 1 second to 60 seconds with jitter, and honor `Retry-After` when
 there is one. A retrying line keeps its concurrency slot, so a struggling backend sees
@@ -652,8 +733,6 @@ so a line starts counting again after a takeover. In the error file, a line that
 answer has the OpenAI shape `{"response": {"status_code": 503, ...}, "error": null}`, and
 a line that got no answer has
 `{"response": null, "error": {"code": "...", "message": "..."}}`.
-
-
 
 #### How batch lines count against limits
 
@@ -668,12 +747,17 @@ that means differs per limit:
   budget too, and the model's real limit is the sum across pods. Only a global limit, kept
   in Redis, is one shared budget.
 - **Fairness puts batch last.** When `ENABLE_FAIRNESS_SCHEDULING` is on, which is not the
-  default, a batch line gets the lowest priority, the one unauthenticated requests get
-  today, so it waits behind interactive requests. Its tokens are not added to the fairness
-  tracker, so a batch does not lower its owner's priority for their own interactive
-  requests. `batchIdentity` marks the line in the gin context, which is how the router
-  tells it apart. With session boost on instead, a batch line carries no session ID, so it
-  is never boosted.
+  default, a batch line waits behind every interactive request. A low priority alone
+  would not do that: `Less` in `fairness_queue.go` orders two requests from the same user
+  by arrival before it compares priority, so an owner's earlier batch line would go ahead
+  of their own interactive request, and priority refresh, when
+  `FAIRNESS_PRIORITY_REFRESH_RETRIES` is set, recomputes every queued priority from token
+  usage. So a batch line carries a `Batch` class into the queue. `Less` compares that
+  class first, before the same-user and session-boost rules, and both refresh paths skip
+  batch requests. Batch lines among themselves stay in arrival order. Their tokens are not
+  added to the fairness tracker either, so a batch does not lower its owner's priority for
+  their own interactive requests. `batchIdentity` marks the line in the gin context, which
+  is how the router tells it apart.
 - **The on-flight counter is shared** when Redis is configured, so the scheduler sees
   batch load on a pod from any router.
 
@@ -685,11 +769,19 @@ this design does not, because the limit is what protects the model server.
 Each line becomes an in-process HTTP request through the router's own `http.Handler`:
 
 ```go
-identity := Identity{Tenant: request.Tenant, Dispatch: request.Dispatch}
+identity := Identity{Tenant: request.Tenant, User: request.User, Dispatch: request.Dispatch}
 httpRequest, err := http.NewRequestWithContext(
 	WithIdentity(lineCtx, identity), http.MethodPost, request.Endpoint,
 	bytes.NewReader(request.Body))
+if request.Dispatch.Host != "" {
+	httpRequest.Host = request.Dispatch.Host
+}
 ```
+
+`request.Endpoint` is a path, so without the last three lines the line would have no
+`Host`, and an HTTPRoute that lists hostnames would never match it: the matcher compares
+`c.Request.Host`. The host is taken from the create request and stored with the job, as
+the proof of concept already does, so it survives a takeover.
 
 This is the core design decision and the reason batch lines get everything interactive
 requests get: the same route matching, the same rate limits, the same fairness queue, the
@@ -711,11 +803,13 @@ recovery -> batchIdentity -> [access log] -> Router.HandlerFunc()
 ```
 
 `batchIdentity` stands in for `AuthMiddleware`. It reads the identity from the Go request
-context, aborts with 403 when there is none, and sets `common.UserIdKey` and, in Gateway
-API mode, the listener keys: the same gin context state the authenticated path would have
-produced. It also sets a batch flag, which the fairness path reads, see
-[How batch lines count against limits](#how-batch-lines-count-against-limits). From that
-point on the request is handled by the ordinary chain.
+context, aborts with 403 when there is none, and sets `common.UserIdKey` to the owner's
+subject and, in Gateway API mode, the listener keys: the same gin context state the
+authenticated path would have produced. It also sets a batch flag, which the fairness
+path and the proxy read, see
+[How batch lines count against limits](#how-batch-lines-count-against-limits) and
+[When a line fails](#when-a-line-fails). From that point on the request is handled by the
+ordinary chain.
 
 This is also why the identity travels in the context rather than a header. A client cannot
 write a value into a Go `context.Context`; the only writer is the dispatcher, in the same
@@ -743,10 +837,10 @@ header in `forwardHeaders`.
 
 ##### Two more details
 
-- **Identity is captured once, not per line.** The owning tenant and, under Gateway API,
-  the listener the batch arrived on, are recorded when the batch is created and replayed
-  on every line through `context.WithValue`, so a batch keeps the identity it was created
-  with even when another replica takes it over.
+- **Identity is captured once, not per line.** The owning tenant and subject, the `Host`
+  and, under Gateway API, the listener the batch arrived on, are recorded when the batch
+  is created and replayed on every line through `context.WithValue`, so a batch keeps the
+  identity it was created with even when another replica takes it over.
 - **The response writer has to look like a real connection.** `batchWriter` collects the
   body up to a cap and implements `Flush` and `CloseNotify`, because gin's streaming path
   casts the writer to `http.CloseNotifier` and a writer without it panics. Its notify
@@ -766,8 +860,21 @@ generates the ID and checks it against a fixed pattern before building a path, s
 the client's filename nor the tenant string ever reaches the filesystem.
 
 The proof of concept's interface returns `*os.File` from `Open` and `Append`. That is
-honest about the shared volume but cannot be implemented for S3, so those two methods
-should return `io.ReadSeekCloser` and `io.WriteCloser`. It is a small change, and the
+honest about the shared volume but cannot be implemented for S3, so `Open` should return
+`io.ReadSeekCloser`, and `Append` a small interface of its own:
+
+```go
+type SegmentWriter interface {
+	io.Writer
+	Sync() error
+	Close() error
+}
+```
+
+A plain `io.WriteCloser` would not be enough: the executor syncs both segments before
+every checkpoint, see [Resumable execution](#resumable-execution), and that barrier has
+to be part of the contract rather than a type assertion to `*os.File`. `Create` stays a
+single call that returns only once the file is durable. It is a small change, and the
 recommendation is to make it in the first PR, while there is one implementation to update.
 
 The reference count only protects the bytes if taking it and checking the file are one
@@ -782,34 +889,49 @@ when it expires one.
 
 What removes what:
 
-- **Working files.** After a batch reaches a terminal status, its owner removes the
-  segments and the index, and the checkpoint. The bytes they hold are already in the
-  result files.
+- **Working files.** The transition to a terminal status puts the segments, the index and
+  the checkpoint into `gc`, `retention.removalGrace` later, 10 minutes by default. The
+  bytes they hold are already in the result files. The wait is far longer than the second
+  of writes a Redis crash can lose, so if Redis loses the transition, the files it would
+  have removed are still there for the next owner.
 - **Expiry.** An upload expires after `expires_after`, or `retention.files` by default. A
   result file expires after `output_expires_after`, or `retention.files`. A finished job
   record stays for `retention.jobs`. All of them go into the `gc` zset, scored by when
   they may be removed.
-- **The sweeper.** Every replica with a worker runs `sweep` on a timer. The script pops
-  what is due, and pushes back a file that a batch still references. The Go side removes
-  the bytes first and the record second, so a crash in between leaves something the next
-  pass can see. Removal is idempotent, so replicas need no lock between them.
+- **The sweeper.** Every replica with a worker runs `sweep` on a timer. The script does
+  not pop what is due: it moves each entry a retry interval into the future and returns
+  it, and it pushes back a file that a batch still references. The Go side removes the
+  bytes, then `sweep_done` deletes the record and the `gc` entry in one step. A crash at
+  any point leaves the entry in `gc`, so a later pass finds it again. Removal is
+  idempotent, so replicas need no lock between them.
 - **Deleted files.** When the last reference on a deleted file is dropped, the file goes
-  into `gc` at the current time.
-- **Orphans.** A slower pass walks the volume and removes files with no record that are
-  older than `retention.orphanGrace`, 48 hours by default, which is longer than any batch
-  can run. This catches temporary files from crashed uploads and the bytes left after
-  losing Redis.
+  into `gc` `retention.removalGrace` later, for the same reason as working files.
+- **Orphans.** A slower pass walks the tenant directories and removes files with no record
+  that are older than `retention.orphanGrace`, 48 hours by default, which is longer than
+  any batch can run. This catches temporary files from crashed uploads and the bytes left
+  after losing Redis. The `volume-id` marker and the probe's temporary files live in a
+  reserved `.kthena/` directory at the volume root, which the walk skips.
 
 Limits keep the volume from filling before any of that runs. 50,000 lines of 2 MiB is
 about 100 GiB in theory; real batches land nearer 100 MB to 1 GB, but one bad batch should
 not fill a volume other tenants depend on:
 
 - `maxOutputBytes` bounds one batch. A batch that passes it stops dispatching and moves to
-  `failed` with `output_too_large`, with what it already committed still published.
-- `maxStorageBytesPerTenant` bounds one tenant, checked on upload and when claiming a
-  batch. An upload over the limit gets a 413.
+  `failed` with `output_too_large`. What it already committed is published, and every
+  line it did not get to is written to the error file with `batch_failed`, as an expired
+  or cancelled batch does, so every `custom_id` still appears once.
+- `maxStorageBytesPerTenant` bounds one tenant through reservations, not a check. The
+  `reserve` script reserves `maxFileBytes` before an upload writes its first byte, and the
+  upload corrects that to its real size when it ends. `claim` reserves twice the batch's
+  `maxOutputBytes`, because the result files are built while the segments still exist, and
+  the batch returns what it did not use when it ends. Each reservation is one script on
+  `bytes:<tenant>`, so concurrent uploads and claims cannot pass the limit together: an
+  upload over it gets a 413, and a batch over it goes back to the queue. The sweeper
+  returns the bytes of every file it removes, including an abandoned upload's, and a
+  batch's reservation is stored on its job record, so a new owner takes it over.
 - A full volume is an error like any other: the run fails, the attempt counts, and
-  `maxAttempts` ends it.
+  `maxAttempts` ends it. If the volume cannot take even the error lines, the batch still
+  moves to `failed`, with the reason in its `errors` list and no result files.
 
 #### Flow control
 
@@ -819,8 +941,8 @@ worker switch. Worst case, lines and answers held in memory are
 `maxConcurrentJobs x concurrency x (maxLineBytes + maxResponseBytes)`, which is 48 MiB
 with the defaults.
 
-Part of this design: a retrying line holds its slot, and a 429 pauses the batch, as
-described under [When a line fails](#when-a-line-fails).
+Part of this design: a retrying line holds its slot, and a rate limit, no ready pods or a
+queue timeout pauses the batch, as described under [When a line fails](#when-a-line-fails).
 
 Proposed next, and **not yet built**: additive-increase/multiplicative-decrease on the
 per-batch concurrency, driven by the waiting and running request counts the datastore
@@ -831,9 +953,14 @@ deliberately scoped as a follow-up so the first PRs stay reviewable.
 
 #### Multi-tenancy
 
-The owning tenant is the authenticated subject, read from the same gin key the rest of the
-router uses (`common.UserIdKey`). Files and batches are scoped to it: a lookup that does
-not match the caller's tenant is a 404, not a 403, so IDs cannot be probed.
+The owning tenant is the validated token's issuer and subject together. A subject is only
+unique within its issuer, and `AuthMiddleware` allows `auth.issuer` to be unset, in which
+case it accepts any issuer signed by the configured keys, so the subject alone could give
+two users from different issuers the same tenant. The batch API reads both from the
+parsed token `AuthMiddleware` leaves in the gin context (`common.JWTTokenKey`) when a file
+or batch is created. Fairness keeps using the subject alone (`common.UserIdKey`), as it
+does for interactive requests. Files and batches are scoped to the tenant: a lookup that
+does not match the caller's tenant is a 404, not a 403, so IDs cannot be probed.
 
 When auth is disabled every caller shares one tenant, which is the same posture the rest
 of the router takes. In that mode any caller can read any file.
@@ -885,6 +1012,7 @@ batch:
     files: 720h                  # 30 days, OpenAI's default
     jobs: 720h
     orphanGrace: 48h
+    removalGrace: 10m            # delay before working and deleted files are removed
   accessLog: true            # one access log line per batch request
   forwardHeaders: []         # header names to replay, for header-matching ModelRoutes
 ```
@@ -894,7 +1022,8 @@ create request and replayed on every line. OpenAI's input lines carry no headers
 is no per-line source.
 
 Enabling batch without `storage.claimName` fails at `helm install`, through Helm's
-`required`.
+`required`. So does enabling it with `worker.enabled: false` and no `workerPool`, because
+nothing would claim a batch and every batch would stay in `validating`.
 
 `worker.enabled` is a property of a Deployment rather than of a single replica: the chart
 renders one router Deployment, so every replica in it shares the setting.
@@ -923,16 +1052,20 @@ background loop retries these checks until they pass:
 2. **The volume is writable by this pod.** `Probe` writes, syncs, renames and deletes a
    file, because a mounted volume can still be read-only for the user the pod runs as.
 3. **The volume is the shared one.** A writable volume is not enough: replicas on separate
-   volumes would accept uploads and then lose them on takeover. The first replica writes a
-   random `volume-id` file to the volume and sets the same value in Redis if none is
-   there. Every replica compares the file it sees with the value in Redis, and a mismatch
-   stays not ready. A ReadWriteOnce claim across nodes shows up separately, as a
+   volumes would accept uploads and then lose them on takeover. A replica creates
+   `.kthena/volume-id`, holding a random value, with an exclusive create, so on a shared
+   volume only the first one succeeds and the rest read its value. It then stores that
+   value in Redis with `SET NX`, which keeps only the first value, and compares the two.
+   On one shared volume every replica reads the same file and matches. On separate
+   volumes each replica creates its own file, only one value reaches Redis, and every
+   other replica stays not ready. If Redis loses the key, the next check stores the
+   file's value again. A ReadWriteOnce claim across nodes shows up separately, as a
    Multi-Attach event on the pod that cannot start.
 
 While not ready, the batch endpoints answer 503 with the OpenAI error envelope, the worker
 does not claim, the reason is logged at error level, and, once the metrics land,
-`kthena_router_batch_ready` is 0. There
-is no other state to recover from, so batch comes back without a restart.
+`kthena_router_batch_ready` is 0. There is no other state to recover from, so batch comes
+back without a restart.
 
 #### Observability
 
@@ -972,14 +1105,21 @@ has to keep reading the version before it.
 #### Test Plan
 
 Unit tests per component: the Redis store against a Redis fake including every Lua script
-and the fence-conflict paths; the file store including the probe and the size limits; the
-API including tenant isolation, validation and the error envelope; the executor including
-resume-from-checkpoint, the segment prefix rules, retries and every row of the takeover
-table; the worker including claim, renew, lease loss, graceful release and the attempt
-limit; the sweeper including a file still referenced and a crash between removing bytes
-and the record; the router including that a batch line gets the lowest fairness priority,
-is left out of the token tracker, and that a request from the network cannot set the batch
-flag.
+and the fence-conflict paths; the file store including the probe, the size limits, and
+that `Create` and `Sync` reach the disk before they return; the API including tenant
+isolation, two issuers with the same subject, validation and the error envelope; the
+executor including resume-from-checkpoint, the segment prefix rules, every row of the
+line failure table and every row of the takeover table, and a stale owner whose result
+files are never referenced; the worker including claim, renew, lease loss, graceful
+release and the attempt limit; the sweeper including a file still referenced, a crash
+between removing bytes and `sweep_done`, and `removalGrace`.
+
+Router tests: a batch line queues after an interactive request from the same user, and
+keeps that place when priority refresh is on; it is left out of the token tracker; a
+backend's 400 and 429 reach a batch line as themselves while an interactive request still
+tries the next pod; a prompt larger than the bucket gets `rate_limit_capacity`; a line's
+`Host` matches an HTTPRoute that lists hostnames; and a request from the network cannot
+set the batch flag.
 
 E2E on kind, with two router replicas sharing one volume and one Redis, against the
 `llm-d-inference-sim` mock the existing e2e tests already use:
@@ -993,15 +1133,18 @@ E2E on kind, with two router replicas sharing one volume and one Redis, against 
 4. Cancel mid-flight: completed answers kept, the rest recorded as `batch_cancelled`, with
    slow backend responses so a line is in flight when the cancel arrives.
 5. Expiry: same shape, recorded as `batch_expired`.
-6. Rate limit: a ModelRoute with a low token limit, assert no line fails and the batch
-   completes.
+6. Rate limit: a ModelRoute with a low token limit that every prompt still fits in, assert
+   no line fails and the batch completes; and one line whose prompt is larger than the
+   limit, assert it alone fails with `rate_limit_capacity`.
 7. No ready pods: scale the model server to zero mid-flight and back, assert the batch
    completes.
 8. Redis restart with AOF on, mid-flight, assert the batch completes with no duplicated
    `custom_id`.
 9. Gateway API mode: a batch against a model only reachable through a Gateway-bound
-   ModelRoute.
+   ModelRoute, and one through an HTTPRoute that lists hostnames.
 10. Worker pool: batches run only on the pool, and the main routers still serve the API.
+11. Backend errors: a backend that answers 400 for some lines, assert the error file holds
+    the backend's 400 and body rather than a 503.
 
 ### Evidence from the proof of concept
 
@@ -1057,6 +1200,10 @@ means it follows from reading the code.
 | --- | --- | --- | --- |
 | Long lines | A line over 64 KiB passes validation, then fails at dispatch with an empty `custom_id`, because `readLineAt` reads at most 64 KiB | Test | Reads up to `maxLineBytes` |
 | Temporary failures | Every non-2xx answer fails the line. A rate limited batch of 50 ended `completed` with 50 failed lines | Test | [When a line fails](#when-a-line-fails) |
+| Backend errors | A backend's 400 or 429 reaches the line as the router's generic 503, because `proxyRequest` tries the next pod and then gives up | Code | Passed through for batch lines |
+| Fairness order | Batch lines take the owner's own priority, and the queue orders a user's requests by arrival | Code | `Batch` class in the queue |
+| Tenant | The subject alone | Code | Issuer and subject |
+| Result files | Named `<batch id>-output` and `-errors`, so two owners write the same file | Code | Named with the owner's fence, published by the fenced transition |
 | Cancel, then takeover while finalizing | The new owner ran all 10 lines and reported `completed` | Test | `finalizing` publishes only; a cancelled batch never enters it |
 | Noticing a cancel | `renew` returns the status but nothing acts on it, so a cancel waits for the next line to finish, up to `lineTimeout` | Test | `renew` aborts in-flight lines |
 | Input file reference | Taken separately from the check, and still held after a failed validation or a cancel while queued | Test | Atomic in `create`, dropped on every terminal status |
@@ -1082,7 +1229,8 @@ Serial PRs, each independently reviewable. Nothing is reachable until the seam l
 4. Input validation
 5. Executor: checkpoints, segments, line retries
 6. Worker: claim, renew, reap, release, attempt limit, shutdown wait
-7. Router API extension seam, dispatch and the fairness condition
+7. Router API extension seam, dispatch, and the router changes: fairness class, backend
+   pass-through, rate limit capacity reason
 8. Sweeper and storage limits
 9. Helm chart, worker pool, readiness and docs
 10. E2E suite
@@ -1096,17 +1244,20 @@ Each of these has a recommendation, and the design above assumes it. Any of them
 change before implementation starts.
 
 1. **Is the in-process handler chain the right dispatch hook?** Recommended: yes. It gives
-   batch lines every router feature with 29 lines of change to existing Go files, and the
-   identity cannot be forged from the network.
+   batch lines every router feature with a small change to existing Go files, the seam
+   plus the four changes listed under
+   [How it plugs into the existing router](#how-it-plugs-into-the-existing-router), and
+   the identity cannot be forged from the network.
 2. **How should batch lines count against rate limits and fairness?** Recommended for the
    first phase: batch lines count against the model's rate limit, because the limit
    protects the backend, and they pace themselves on 429. When fairness is on, they queue
-   behind interactive requests by taking the lowest priority, the same one unauthenticated
-   requests get today, and they stay out of the token tracker so a batch does not lower
-   its owner's interactive priority. That is one condition in `handleFairnessScheduling`
-   and one at each of the two `UpdateTokenCount` calls. The alternative is OpenAI's model,
-   a separate budget for batch, which is cleaner for interactive traffic but needs a
-   second limiter per ModelRoute, so it is better as a follow-up.
+   behind every interactive request, including their owner's, through a `Batch` class the
+   queue compares first, and they stay out of the token tracker so a batch does not lower
+   its owner's interactive priority. That is one condition in `handleFairnessScheduling`,
+   one at each of the two `UpdateTokenCount` calls, and the class in `fairness_queue.go`.
+   The alternative is OpenAI's model, a separate budget for batch, which is cleaner for
+   interactive traffic but needs a second limiter per ModelRoute, so it is better as a
+   follow-up.
 3. **Is it acceptable to require AOF and `noeviction`?** Recommended: yes, documented,
    with a warning at startup when `CONFIG GET` shows otherwise, since managed Redis may
    block that command. A catch: `REDIS_HOST` is shared with the on-flight counter and the
