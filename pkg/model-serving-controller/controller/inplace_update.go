@@ -508,7 +508,7 @@ func (c *ModelServingController) reconcileInPlaceUnit(ctx context.Context, ms *w
 
 	if !retargeted && hasUnpatchedOutdatedPod(unit, revision) {
 		// A patch that keeps failing must not leave the unit half updated forever.
-		if deadline, remaining := inPlaceDeadline(ms, earliest); remaining <= 0 && ms.Spec.RecoveryPolicy != workloadv1alpha1.NoneRestartPolicy {
+		if deadline, remaining := inPlaceDeadline(ms, earliest); remaining <= 0 && !recoveryDisabled(ms) {
 			return c.handleInPlaceTimeout(ctx, ms, unit, revision, deadline)
 		} else if remaining > 0 {
 			c.enqueueModelServingAfter(ms, remaining)
@@ -635,10 +635,10 @@ func (c *ModelServingController) repairInPlaceRevision(ctx context.Context, ms *
 	return nil
 }
 
-// podFinished tells whether the update of a Pod is done. With recoveryPolicy None a crash is
+// podFinished tells whether the update of a Pod is done. With recovery disabled a crash is
 // never recovered, so it must not keep a Pod that runs the target image from finishing.
 func podFinished(ms *workloadv1alpha1.ModelServing, state *inplace.State, pod *corev1.Pod) bool {
-	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy {
+	if recoveryDisabled(ms) {
 		return state.OnTarget(pod)
 	}
 	return state.Completed(pod)
@@ -726,13 +726,13 @@ func (c *ModelServingController) enforceInPlaceDeadline(ctx context.Context, ms 
 // handleInPlaceTimeout treats the Pods that did not finish in time as error Pods, so the
 // recovery policy decides what happens: ServingGroupRecreate and RoleRecreate go through
 // handleErrorPod (grace period, deletion, then recreation of the Role or ServingGroup),
-// while None leaves the Pods alone like a plain Deployment would.
+// while None or restartGracePeriodSeconds -1 leaves the Pods alone.
 // Pods of the unit that were never patched are deleted directly: they are healthy, so the
 // error path would keep them, and the unit cannot finish without them.
 func (c *ModelServingController) handleInPlaceTimeout(ctx context.Context, ms *workloadv1alpha1.ModelServing, unit *inPlaceUnit, revision string, deadline time.Duration) error {
 	c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "InPlaceUpdateTimeout",
 		fmt.Sprintf("In-place update of ServingGroup %s exceeded progress deadline %s, applying recovery policy %s", unit.groupName, deadline, ms.Spec.RecoveryPolicy))
-	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy {
+	if recoveryDisabled(ms) {
 		return nil
 	}
 	for i, pod := range unit.pods {

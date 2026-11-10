@@ -271,6 +271,7 @@ func TestCompleteInPlaceUpdates(t *testing.T) {
 		name        string
 		startedAgo  time.Duration
 		policy      workloadv1alpha1.RecoveryPolicy
+		grace       *int64
 		status      func(*corev1.ContainerStatus)
 		wantFlipped bool
 	}{
@@ -286,6 +287,16 @@ func TestCompleteInPlaceUpdates(t *testing.T) {
 			name:       "extra crash on the target image completes with recoveryPolicy None",
 			startedAgo: time.Minute,
 			policy:     workloadv1alpha1.NoneRestartPolicy,
+			status: func(s *corev1.ContainerStatus) {
+				kubeletRestart("img:v2", "id-v2")(s)
+				kubeletRestart("img:v2", "id-v2b")(s)
+			},
+			wantFlipped: true,
+		},
+		{
+			name:       "extra crash on the target image completes with grace -1",
+			startedAgo: time.Minute,
+			grace:      ptr.To[int64](-1),
 			status: func(s *corev1.ContainerStatus) {
 				kubeletRestart("img:v2", "id-v2")(s)
 				kubeletRestart("img:v2", "id-v2b")(s)
@@ -321,6 +332,7 @@ func TestCompleteInPlaceUpdates(t *testing.T) {
 				if tt.policy != "" {
 					ms.Spec.RecoveryPolicy = tt.policy
 				}
+				ms.Spec.Template.RestartGracePeriodSeconds = tt.grace
 			}, nil)
 			ctx := context.Background()
 			sg := datastore.ServingGroup{Name: inPlaceTestGroup, Revision: f.oldRev, Status: datastore.ServingGroupRunning}
@@ -351,7 +363,7 @@ func TestCompleteInPlaceUpdates(t *testing.T) {
 				revision, ok := f.controller.store.GetServingGroupRevision(utils.GetNamespaceName(f.newMS), inPlaceTestGroup)
 				assert.True(t, ok)
 				assert.Equal(t, f.newRev, revision)
-				if tt.policy != workloadv1alpha1.NoneRestartPolicy {
+				if !recoveryDisabled(f.newMS) {
 					assert.False(t, inplace.UnexpectedRestart(got), "the expected restart must not trigger recovery")
 				}
 			}
@@ -579,11 +591,13 @@ func TestInPlaceDeadlineFollowsRecoveryPolicy(t *testing.T) {
 		name       string
 		roleMode   bool
 		policy     workloadv1alpha1.RecoveryPolicy
+		grace      *int64
 		wantDelete bool
 	}{
 		{name: "ServingGroup update, RoleRecreate", policy: workloadv1alpha1.RoleRecreate, wantDelete: true},
 		{name: "ServingGroup update, ServingGroupRecreate", policy: workloadv1alpha1.ServingGroupRecreate, wantDelete: true},
 		{name: "ServingGroup update, None", policy: workloadv1alpha1.NoneRestartPolicy},
+		{name: "ServingGroup update, RoleRecreate with grace -1", policy: workloadv1alpha1.RoleRecreate, grace: ptr.To[int64](-1)},
 		{name: "Role update, RoleRecreate", roleMode: true, policy: workloadv1alpha1.RoleRecreate, wantDelete: true},
 		{name: "Role update, ServingGroupRecreate", roleMode: true, policy: workloadv1alpha1.ServingGroupRecreate, wantDelete: true},
 		{name: "Role update, None", roleMode: true, policy: workloadv1alpha1.NoneRestartPolicy},
@@ -593,6 +607,7 @@ func TestInPlaceDeadlineFollowsRecoveryPolicy(t *testing.T) {
 			mutate := func(ms *workloadv1alpha1.ModelServing) {
 				ms.Spec.RolloutStrategy.ProgressDeadlineSeconds = ptr.To[int32](60)
 				ms.Spec.RecoveryPolicy = tt.policy
+				ms.Spec.Template.RestartGracePeriodSeconds = tt.grace
 			}
 			if tt.roleMode {
 				mutate = roleModeMutate(1, mutate)
@@ -613,7 +628,7 @@ func TestInPlaceDeadlineFollowsRecoveryPolicy(t *testing.T) {
 			if tt.wantDelete {
 				assert.Eventually(t, func() bool { return podDeleted(f) }, 5*time.Second, 20*time.Millisecond, "the stuck Pod is handled as an error Pod")
 			} else {
-				assert.Never(t, func() bool { return podDeleted(f) }, 300*time.Millisecond, 20*time.Millisecond, "None must leave the Pod alone")
+				assert.Never(t, func() bool { return podDeleted(f) }, 300*time.Millisecond, 20*time.Millisecond, "disabled recovery must leave the Pod alone")
 				assert.True(t, inplace.InProgress(f.syncPodFromAPI(t)))
 			}
 		})
@@ -964,16 +979,19 @@ func TestHalfPatchedUnitHitsDeadline(t *testing.T) {
 	tests := []struct {
 		name       string
 		policy     workloadv1alpha1.RecoveryPolicy
+		grace      *int64
 		wantDelete bool
 	}{
 		{name: "RoleRecreate deletes the never patched Pod", policy: workloadv1alpha1.RoleRecreate, wantDelete: true},
 		{name: "None keeps resuming", policy: workloadv1alpha1.NoneRestartPolicy},
+		{name: "grace -1 keeps resuming", policy: workloadv1alpha1.RoleRecreate, grace: ptr.To[int64](-1)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newInPlaceFixture(t, func(ms *workloadv1alpha1.ModelServing) {
 				ms.Spec.RolloutStrategy.ProgressDeadlineSeconds = ptr.To[int32](60)
 				ms.Spec.RecoveryPolicy = tt.policy
+				ms.Spec.Template.RestartGracePeriodSeconds = tt.grace
 			}, nil)
 			ctx := context.Background()
 			second := f.syncPodFromAPI(t).DeepCopy()
@@ -996,7 +1014,7 @@ func TestHalfPatchedUnitHitsDeadline(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.False(t, podDeleted(f))
-			assert.True(t, inplace.InProgress(got), "None retries the patch")
+			assert.True(t, inplace.InProgress(got), "disabled recovery retries the patch")
 		})
 	}
 }
