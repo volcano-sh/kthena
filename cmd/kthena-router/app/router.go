@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"strconv"
@@ -315,9 +316,14 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 		return nil
 	}
 
+	// Closing a connection does not always cancel its request's context: once
+	// a client has pipelined another request, net/http stops watching the
+	// connection. Requests therefore use a context that the drain cancels.
+	requestCtx, cancelRequests := context.WithCancel(context.Background())
 	srv := &http.Server{
-		Addr:    cfg.addr,
-		Handler: cfg.requests.track(newListenerHandler(cfg)),
+		Addr:        cfg.addr,
+		Handler:     cfg.requests.track(newListenerHandler(cfg)),
+		BaseContext: func(net.Listener) context.Context { return requestCtx },
 	}
 
 	go func() {
@@ -342,6 +348,7 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 
 	go func() {
 		defer cfg.listeners.done()
+		defer cancelRequests()
 		<-ctx.Done()
 		klog.Info(cfg.shutdownStartLog)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.drainTimeout)
