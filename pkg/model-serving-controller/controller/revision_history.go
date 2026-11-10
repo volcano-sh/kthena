@@ -78,7 +78,7 @@ type roleRevision struct {
 }
 
 // revisionHistory resolves immutable ControllerRevision snapshots for one reconcile.
-// It persists desired revisions and one-time legacy compatibility baselines.
+// It persists desired revisions and caches owned history for that reconcile.
 // Missing or invalid history is cached only for this reconcile so the workqueue
 // retry can observe repaired history without restarting the controller.
 type revisionHistory struct {
@@ -132,15 +132,11 @@ func (c *ModelServingController) revisionHistory(ctx context.Context, ms *worklo
 	return history
 }
 
-func (h *revisionHistory) decode(ctx context.Context, cr *appsv1.ControllerRevision) revisionSnapshot {
+func (h *revisionHistory) decode(cr *appsv1.ControllerRevision) revisionSnapshot {
 	if cr == nil {
 		return revisionSnapshot{err: fmt.Errorf("ControllerRevision is missing")}
 	}
 	if err := validateControllerRevisionOwner(h.ms, cr); err != nil {
-		return revisionSnapshot{err: err}
-	}
-	cr, err := utils.EnsureRevisionBaseline(ctx, h.controller.kubeClientSet, h.ms, cr)
-	if err != nil {
 		return revisionSnapshot{err: err}
 	}
 	workload, err := utils.ModelServingForControllerRevision(h.ms, cr)
@@ -165,7 +161,7 @@ func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloa
 		if err != nil {
 			snapshot.err = err
 		} else {
-			snapshot = h.decode(ctx, cr)
+			snapshot = h.decode(cr)
 			if snapshot.err != nil {
 				snapshot.err = fmt.Errorf("ControllerRevision %s: %w", revision, snapshot.err)
 			}
@@ -348,31 +344,6 @@ func (h *revisionHistory) desiredRevision(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	selector := labels.SelectorFromSet(map[string]string{
-		utils.ControllerRevisionLabelKey: h.ms.Name,
-	})
-	list, err := h.controller.kubeClientSet.AppsV1().ControllerRevisions(h.ms.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: selector.String(),
-	})
-	if err != nil {
-		return "", fmt.Errorf("list ControllerRevisions: %w", err)
-	}
-
-	// Pin missing legacy inputs once, before using canonical history. Never
-	// rewrite a legacy Data.Raw or adopt new plugin values on subsequent runs.
-	for i := range list.Items {
-		cr := &list.Items[i]
-		revision := cr.Labels[utils.ControllerRevisionRevisionLabelKey]
-		if revision == "" || cr.Name != utils.GenerateControllerRevisionName(h.ms.Name, revision) {
-			continue
-		}
-		if !metav1.IsControlledBy(cr, h.ms) || cr.Annotations[utils.ControllerRevisionDataVersionAnnotation] != "" {
-			continue
-		}
-		if _, err := utils.EnsureRevisionBaseline(ctx, h.controller.kubeClientSet, h.ms, cr); err != nil {
-			return "", fmt.Errorf("establish legacy revision baseline: %w", err)
-		}
-	}
 	cr, collisions, err := utils.RecordModelServingRevision(ctx, h.controller.kubeClientSet, h.ms, data)
 	if err != nil {
 		return "", fmt.Errorf("persist desired ControllerRevision: %w", err)
@@ -385,7 +356,7 @@ func (h *revisionHistory) desiredRevision(ctx context.Context) (string, error) {
 		round.snapshots[revision] = controllerRevisionObservation{revision: cr}
 	}
 	h.collisionCount = collisions
-	h.snapshots[revision] = h.decode(ctx, cr)
+	h.snapshots[revision] = h.decode(cr)
 	if h.snapshots[revision].err == nil {
 		h.targetRevision = revision
 	}

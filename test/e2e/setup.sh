@@ -16,6 +16,15 @@
 
 set -e
 
+e2e_manifest_dir=$(mktemp -d)
+trap 'rm -rf "$e2e_manifest_dir"' EXIT
+kubectl_from_url() {
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+        --connect-timeout 10 --max-time 60 --retry-max-time 180 \
+        -o "$e2e_manifest_dir/manifest.yaml" "$2" || return
+    kubectl "$1" -f "$e2e_manifest_dir/manifest.yaml"
+}
+
 HUB=${HUB:-ghcr.io/volcano-sh}
 TAG=${TAG:-latest}
 CLUSTER_NAME=${CLUSTER_NAME:-kthena-e2e}
@@ -53,39 +62,41 @@ case "${TEST_CATEGORY}" in
 esac
 
 echo "Start to install cert-manager"
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.2/cert-manager.yaml
+helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
+    --version v1.18.2 --namespace cert-manager --create-namespace \
+    --set crds.enabled=true --set startupapicheck.enabled=false
 echo "Waiting for cert-manager to be ready..."
 go install github.com/cert-manager/cmctl/v2@v2.2.0 && "$(go env GOPATH)/bin/cmctl" check api --wait=5m
 
 echo "Start to install Volcano"
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/volcano/master/installer/volcano-development.yaml
+kubectl_from_url apply https://raw.githubusercontent.com/volcano-sh/volcano/master/installer/volcano-development.yaml
 
 # Install CRDs based on test category
 case "${TEST_CATEGORY}" in
   gateway-api)
     echo "Start to install Gateway API CRDs"
-    kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
+    kubectl_from_url apply https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
     ;;
   gateway-inference-extension)
     echo "Start to install Gateway API CRDs"
-    kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
+    kubectl_from_url apply https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
     echo "Start to install Gateway API Inference Extension CRDs"
-    kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.2.0/manifests.yaml
+    kubectl_from_url apply https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.2.0/manifests.yaml
     ;;
   controller-manager)
     echo "Start to install LeaderWorkerSet CRDs"
-    kubectl create -f https://raw.githubusercontent.com/kubernetes-sigs/lws/refs/tags/v0.8.0/charts/lws/crds/leaderworkerset.x-k8s.io_leaderworkersets.yaml
+    kubectl_from_url create https://raw.githubusercontent.com/kubernetes-sigs/lws/refs/tags/v0.8.0/charts/lws/crds/leaderworkerset.x-k8s.io_leaderworkersets.yaml
     ;;
   router)
     echo "Router tests: no additional CRDs needed"
     ;;
   all|*)
     echo "Start to install Gateway API CRDs"
-    kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
+    kubectl_from_url apply https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
     echo "Start to install Gateway API Inference Extension CRDs"
-    kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.2.0/manifests.yaml
+    kubectl_from_url apply https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.2.0/manifests.yaml
     echo "Start to install LeaderWorkerSet CRDs"
-    kubectl create -f https://raw.githubusercontent.com/kubernetes-sigs/lws/refs/tags/v0.8.0/charts/lws/crds/leaderworkerset.x-k8s.io_leaderworkersets.yaml
+    kubectl_from_url create https://raw.githubusercontent.com/kubernetes-sigs/lws/refs/tags/v0.8.0/charts/lws/crds/leaderworkerset.x-k8s.io_leaderworkersets.yaml
     ;;
 esac
 

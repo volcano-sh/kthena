@@ -132,6 +132,32 @@ func TestReconcileRecreatesModelRouteWhenModelRequestNameChanges(t *testing.T) {
 
 	kubeClient := fake.NewClientset()
 	kthenaClient := kthenafake.NewSimpleClientset()
+	// The fake tracker replaces whole objects for status updates. Match the API
+	// server so an in-flight status write cannot undo the requested spec change.
+	kthenaClient.PrependReactor("update", "modelboosters", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "status" {
+			return false, nil, nil
+		}
+		requested := action.(k8stesting.UpdateAction).GetObject().(*workload.ModelBooster)
+		current, err := kthenaClient.Tracker().Get(action.GetResource(), action.GetNamespace(), requested.Name)
+		if err != nil {
+			return true, nil, err
+		}
+		updated := current.(*workload.ModelBooster)
+		updated.Status = requested.Status
+		err = kthenaClient.Tracker().Update(action.GetResource(), updated, action.GetNamespace())
+		return true, updated, err
+	})
+
+	var deletes, creates atomic.Int32
+	kthenaClient.PrependReactor("delete", "modelroutes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		deletes.Add(1)
+		return false, nil, nil
+	})
+	kthenaClient.PrependReactor("create", "modelroutes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		creates.Add(1)
+		return false, nil, nil
+	})
 	controller := NewModelBoosterController(kubeClient, kthenaClient)
 	go controller.Run(ctx, 1)
 	assert.True(t, waitForControllerCacheSync(controller), "controller informers did not sync")
@@ -144,16 +170,7 @@ func TestReconcileRecreatesModelRouteWhenModelRequestNameChanges(t *testing.T) {
 		route, err := kthenaClient.NetworkingV1alpha1().ModelRoutes(model.Namespace).Get(ctx, model.Name, metav1.GetOptions{})
 		return err == nil && route.Spec.ModelName == model.Name
 	}))
-
-	var deletes, creates atomic.Int32
-	kthenaClient.PrependReactor("delete", "modelroutes", func(k8stesting.Action) (bool, runtime.Object, error) {
-		deletes.Add(1)
-		return false, nil, nil
-	})
-	kthenaClient.PrependReactor("create", "modelroutes", func(k8stesting.Action) (bool, runtime.Object, error) {
-		creates.Add(1)
-		return false, nil, nil
-	})
+	creates.Store(0)
 
 	createdModel.Spec.Name = "deepseek-v3-request"
 	createdModel.Generation++

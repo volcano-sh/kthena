@@ -373,7 +373,7 @@ func (c *ModelServingController) ensureTargetRevision(ctx context.Context, ms *w
 			return fmt.Errorf("in-place target revision %s disappeared; retry with the newly resolved identity", revision)
 		}
 	}
-	target := c.revisionHistory(ctx, ms).decode(ctx, cr)
+	target := c.revisionHistory(ctx, ms).decode(cr)
 	if target.err != nil {
 		return target.err
 	}

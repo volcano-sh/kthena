@@ -110,6 +110,12 @@ func TestRecordModelServingRevisionReusesSemanticallyEqualEncoding(t *testing.T)
 	if err != nil {
 		t.Fatalf("RecordModelServingRevision(encodedA) error = %v", err)
 	}
+	alias := first.DeepCopy()
+	alias.Name += "-baseline"
+	alias.Revision = 100
+	if _, err := client.AppsV1().ControllerRevisions(ms.Namespace).Create(ctx, alias, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 	second, _, err := RecordModelServingRevision(ctx, client, ms, encodedB)
 	if err != nil {
 		t.Fatalf("RecordModelServingRevision(encodedB) error = %v", err)
@@ -121,8 +127,18 @@ func TestRecordModelServingRevisionReusesSemanticallyEqualEncoding(t *testing.T)
 	if err != nil {
 		t.Fatalf("list ControllerRevisions error = %v", err)
 	}
-	if len(list.Items) != 1 {
-		t.Fatalf("ControllerRevision count = %d, want 1", len(list.Items))
+	if len(list.Items) != 2 {
+		t.Fatalf("ControllerRevision count = %d, want only the source and pre-existing suffix object", len(list.Items))
+	}
+	if err := client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, first.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	replacement, _, err := RecordModelServingRevision(ctx, client, ms, encodedB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.Name == alias.Name || replacement.Name != GenerateControllerRevisionName(ms.Name, replacement.Labels[ControllerRevisionRevisionLabelKey]) {
+		t.Fatalf("missing source selected suffix object instead of recording ordinary history: %s", replacement.Name)
 	}
 }
 
@@ -280,8 +296,12 @@ func TestRecordModelServingRevisionBreaksRevisionTiesByCreationTime(t *testing.T
 	ms := lifecycleTestModelServing()
 	desiredData := lifecycleRevisionData("desired")
 	older := revisionForLifecycleTest(ms, "z-older", lifecycleRevisionData("old"), 5)
+	older.Name = GenerateControllerRevisionName(ms.Name, "z-older")
+	older.Labels[ControllerRevisionRevisionLabelKey] = "z-older"
 	older.CreationTimestamp = metav1.NewTime(time.Unix(100, 0))
 	newer := revisionForLifecycleTest(ms, "a-newer", desiredData, 5)
+	newer.Name = GenerateControllerRevisionName(ms.Name, "a-newer")
+	newer.Labels[ControllerRevisionRevisionLabelKey] = "a-newer"
 	newer.CreationTimestamp = metav1.NewTime(time.Unix(200, 0))
 	client := kubefake.NewSimpleClientset(older, newer)
 

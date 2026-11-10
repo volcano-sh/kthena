@@ -28,9 +28,92 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
+
+func TestProtectedRoleHistorySurvivesReplacementGap(t *testing.T) {
+	for _, scenario := range []struct {
+		name           string
+		state          datastore.ServingGroupStatus
+		complete       bool
+		missingHistory bool
+	}{
+		{name: "creating group", state: datastore.ServingGroupCreating},
+		{name: "cached running group", state: datastore.ServingGroupRunning},
+		{name: "complete target", state: datastore.ServingGroupRunning, complete: true},
+		{name: "missing history", state: datastore.ServingGroupCreating, missingHistory: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := context.Background()
+			ms := mergeReadyModelServing("protected-history-gap", 1, 3)
+			ms.Spec.RolloutStrategy.RoleCoordination = nil
+			ms.Spec.Template.Roles = ms.Spec.Template.Roles[:1]
+			role := &ms.Spec.Template.Roles[0]
+			role.Partition = &intstr.IntOrString{Type: intstr.Int, IntVal: 1}
+			role.EntryTemplate.Spec.Containers[0].Image = "image:target"
+			old := ms.DeepCopy()
+			old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "image:previous"
+			baseline, target := utils.ModelServingRevision(old), utils.ModelServingRevision(ms)
+			ms.Status.CurrentRevision, ms.Status.UpdateRevision = baseline, target
+			c := newRevisionTestController(t, ms)
+			require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, target), metav1.DeleteOptions{}))
+			recordTestRevision(t, c.kubeClientSet, ms, target)
+			if !scenario.missingHistory {
+				recordTestRevision(t, c.kubeClientSet, old, baseline)
+			}
+			key, group := utils.GetNamespaceName(ms), ms.Name+"-0"
+			c.store.AddServingGroup(key, 0, baseline)
+			survivors := make(map[string]types.UID)
+			first := 1
+			if scenario.complete {
+				first = 0
+			}
+			for ordinal := first; ordinal < 3; ordinal++ {
+				pod := addMergeReadyInstance(t, c, ms, group, *role, ordinal, target, target, utils.CalRoleTemplateHash(*role))[0]
+				survivors[pod.Name] = pod.UID
+			}
+			require.NoError(t, c.store.UpdateServingGroupStatus(key, group, scenario.state))
+			require.NoError(t, c.updateModelServingStatusInRound(ctx, ms, target, nil))
+			observed, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			wantRevision := baseline
+			if scenario.complete {
+				wantRevision = target
+			}
+			require.Equal(t, wantRevision, observed.Status.CurrentRevision)
+			require.Equal(t, target, observed.Status.UpdateRevision)
+			require.NoError(t, c.modelServingsInformer.GetIndexer().Update(observed))
+			instances, err := c.store.GetRoleList(key, group, role.Name)
+			require.NoError(t, err)
+			err = c.scaleUpRoles(ctx, observed, group, *role, instances, 3, 0, target, true)
+			if scenario.missingHistory {
+				require.Error(t, err, "missing history must not be replaced by the target template")
+			} else {
+				require.NoError(t, err)
+			}
+			pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			wantCount := 3
+			if scenario.missingHistory {
+				wantCount = 2
+			}
+			require.Len(t, pods.Items, wantCount)
+			for _, pod := range pods.Items {
+				if uid, survived := survivors[pod.Name]; survived {
+					require.Equal(t, uid, pod.UID)
+					require.Equal(t, "image:target", pod.Spec.Containers[0].Image)
+					require.Equal(t, target, utils.ObjectRevision(&pod))
+				} else {
+					require.Equal(t, utils.GeneratePodName(group, role.Name+"-0", 0), pod.Name)
+					require.Equal(t, "image:previous", pod.Spec.Containers[0].Image)
+					require.Equal(t, baseline, utils.ObjectRevision(&pod))
+				}
+			}
+		})
+	}
+}
 
 func TestCoordinatedRoundReusesReadsAndRefreshesLiveFactsBetweenRounds(t *testing.T) {
 	ms := mergeReadyModelServing("round-facts", 1, 1)
