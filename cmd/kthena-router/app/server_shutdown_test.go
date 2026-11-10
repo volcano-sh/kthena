@@ -130,6 +130,9 @@ func streamingUpstream(t *testing.T, chunks int, interval time.Duration) *url.UR
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		// Read the whole request, so that the server notices when the router
+		// cancels it.
+		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
 		for i := 1; i <= chunks; i++ {
@@ -330,6 +333,32 @@ func TestServerRunForceClosesRequestsAfterDrainTimeout(t *testing.T) {
 
 	body, _ := io.ReadAll(reader)
 	require.NotContains(t, string(body), "data: [DONE]", "the stream should be cut at the drain timeout")
+}
+
+// TestServerRunForceClosesPipelinedRequest checks that the forced close at the
+// drain timeout also ends a request whose client has pipelined more bytes.
+// net/http stops watching such a connection, so closing it does not cancel the
+// request by itself.
+func TestServerRunForceClosesPipelinedRequest(t *testing.T) {
+	const drainTimeout = 300 * time.Millisecond
+	// One chunk, then nothing for a minute: only cancelling the request ends it.
+	upstream := streamingUpstream(t, 1, time.Minute)
+	tr := startShutdownTestRouter(t, drainTimeout.String(), upstream)
+	conn, err := net.Dial("tcp", strings.TrimPrefix(tr.baseURL, "http://"))
+	require.NoError(t, err)
+	defer conn.Close()
+	body := `{"model":"demo","prompt":"hi","stream":true}`
+	_, err = fmt.Fprintf(conn, "POST /v1/completions HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return redisOnFlightTotal(t, tr.redis) == 1 },
+		5*time.Second, 10*time.Millisecond, "the request never reached the upstream")
+	// The handler has read the body, so this byte starts a pipelined request.
+	_, err = conn.Write([]byte("G"))
+	require.NoError(t, err)
+
+	tr.cancel()
+	onFlight := tr.waitForRun(t, 10*time.Second)
+	require.Zero(t, onFlight, "the Redis on-flight count must be released before Server.Run returns")
 }
 
 // TestServerRunAdmitsQueuedRequestsWhileDraining checks that a request still
