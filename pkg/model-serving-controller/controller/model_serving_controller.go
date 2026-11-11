@@ -751,8 +751,21 @@ func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, m
 		if partitionErr != nil {
 			return fmt.Errorf("failed to calculate partition: %v", partitionErr)
 		}
-		if maxSurge > 0 && !c.updatesInPlace(ms) && c.hasUpdateableOutdatedServingGroup(ctx, ms, servingGroupList, newRevision, partition) {
-			expectedCount += maxSurge
+		if err := c.adoptServingGroupSurge(ctx, ms, servingGroupList); err != nil {
+			return fmt.Errorf("failed to adopt surge ServingGroups: %v", err)
+		}
+		surge, err := c.surgeServingGroups(ms, servingGroupList)
+		if err != nil {
+			return fmt.Errorf("failed to list surge ServingGroups: %v", err)
+		}
+		if maxSurge > 0 || surge.Len() > 0 {
+			if c.hasUpdateableOutdatedServingGroup(ctx, ms, servingGroupList, newRevision, partition) {
+				if !c.updatesInPlace(ms) {
+					expectedCount += maxSurge
+				}
+			} else {
+				expectedCount = expectedWithSurge(replicas, maxSurge, len(servingGroupList), surge.Len())
+			}
 		}
 	}
 
@@ -938,7 +951,11 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 			scaleUpErr = err
 			return false
 		}
-		if err := c.CreatePodsForServingGroup(ctx, workload, ordinal, revision, workload.Spec.Template.Roles); err != nil {
+		createCtx := ctx
+		if servingGroupRollout(ms) && ordinal >= modelServingReplicas(ms) {
+			createCtx = withSurgeScope(ctx, surgeServingGroup)
+		}
+		if err := c.CreatePodsForServingGroup(createCtx, workload, ordinal, revision, workload.Spec.Template.Roles); err != nil {
 			scaleUpErr = err
 			return false
 		}
@@ -1201,6 +1218,9 @@ func (c *ModelServingController) scaleUpRoles(
 		if roleCoordination(ms) != nil && ordinal >= roleReplicas(targetRole) {
 			createCtx = context.WithValue(createCtx, coordinatedSurgeKey{}, true)
 		}
+		if independentRoleRollout(ms) && ordinal >= roleReplicas(targetRole) {
+			createCtx = withSurgeScope(createCtx, surgeRole)
+		}
 		appliedHash, err := c.createPodsByRole(createCtx, *roleToApply.DeepCopy(), ms, ordinal, servingGroupOrdinal, revision, roleTemplateHash)
 		if err != nil {
 			return fmt.Errorf("create role %s for ServingGroup %s failed: %v", utils.GenerateRoleID(targetRole.Name, ordinal), groupName, err)
@@ -1322,6 +1342,10 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			c.enqueueModelServingAfter(ms, enqueueAfter)
 			return err
 		}
+	} else if independentRoleRollout(ms) {
+		if err := c.adoptRoleSurge(ctx, ms, groupName, targetRole, roleList); err != nil {
+			return err
+		}
 	}
 	expectedCount := roleReplicas(targetRole)
 	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate &&
@@ -1331,6 +1355,18 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			klog.Errorf("manageRoleReplicasPerGroup: failed to calculate maxSurge for role %s in ServingGroup %s: %v", targetRole.Name, groupName, err)
 		} else {
 			expectedCount += maxSurge
+		}
+	} else if independentRoleRollout(ms) {
+		surge, err := c.surgeRoles(ms, groupName, targetRole, roleList)
+		if err != nil {
+			return err
+		}
+		if surge.Len() > 0 && !c.hasUpdateableOutdatedRoleInRound(ctx, ms, groupName, targetRole, roleList) {
+			maxSurge, err := utils.GetMaxSurgeForRole(targetRole)
+			if err != nil {
+				return err
+			}
+			expectedCount = expectedWithSurge(expectedCount, maxSurge, len(roleList), surge.Len())
 		}
 	}
 	// Explicit shrink remains possible even when legacy DNS blocks Role sync.
@@ -1710,6 +1746,9 @@ func (c *ModelServingController) manageRollingUpdateWithPolicy(
 		// removed without reducing availability; an unavailable new-revision group
 		// contributes nothing and may naturally reduce maxScaleDown to zero.
 		maxScaleDown = len(servingGroupList) - minAvailable - newServingGroupUnavailableCount
+		if len(runningOutdatedGroups)+len(notRunningOutdatedGroups) == 0 {
+			return c.retireSurgeServingGroups(ctx, ms, servingGroupList, maxScaleDown, minAvailable)
+		}
 
 		// TODO(hzxuzhonghu): reuse calMaxScaleDown
 		if maxScaleDown <= 0 {
@@ -1806,6 +1845,12 @@ func (c *ModelServingController) deleteOutdatedRoles(
 				}
 			}
 			klog.V(2).Infof("Role %s/%s in ServingGroup %s will be terminated for update", role.roleName, role.roleID, sg.Name)
+			if role.surge {
+				if err := c.DeleteRole(actionCtx, ms, sg.Name, role.roleName, role.roleID); err != nil {
+					return updateCount, err
+				}
+				continue
+			}
 			if err := c.updateRole(actionCtx, ms, sg.Name, role.roleName, role.roleID, revision); err != nil {
 				return updateCount, err
 			}
@@ -1827,6 +1872,8 @@ func (c *ModelServingController) updateServingGroupRevisionIfNoOutdatedRoles(ms 
 type roleToDelete struct {
 	roleName string
 	roleID   string
+	// surge marks temporary rollout capacity, which is deleted rather than updated.
+	surge bool
 }
 
 func (c *ModelServingController) rolesToDeleteForRoleRollingUpdateInRound(ctx context.Context,
@@ -1861,9 +1908,14 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdateInRound(ctx co
 				hasOutdatedRoles = true
 			}
 		}
+		// Includes instances that are still terminating, which outdatedRolesInRound skips.
+		outdated := sets.New[string]()
 		for _, instance := range roleList {
-			if c.compareRoleTemplate(ctx, ms, sg, roleSpec.Name, instance) == templateUnknown {
+			switch c.compareRoleTemplate(ctx, ms, sg, roleSpec.Name, instance) {
+			case templateUnknown:
 				hasOutdatedRoles = true
+			case templateDifferent:
+				outdated.Insert(instance.Name)
 			}
 		}
 		outdatedRoles, newUnavailable := c.outdatedRolesInRound(ctx, ms, sg, roleSpec, roleList)
@@ -1912,12 +1964,29 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdateInRound(ctx co
 			hasOutdatedRoles = true
 		}
 
+		surge := sets.New[string]()
 		if len(outdatedRoles) == 0 {
-			continue
+			if surge, err = c.surgeRoles(ms, sg.Name, roleSpec, roleList); err != nil {
+				return nil, false, err
+			}
+			if surge.Len() == 0 {
+				continue
+			}
+			// The Role is not at the target layout until its surge is retired.
+			hasOutdatedRoles = true
+			// As for ServingGroups, the surge stays until every outdated
+			// instance is gone, not merely deleting.
+			if outdated.Difference(protected).Len() > 0 {
+				continue
+			}
 		}
 		budget, budgetErr := roleRolloutBudget(roleSpec, roleList, newUnavailable)
 		if budgetErr != nil {
 			klog.ErrorS(budgetErr, "Invalid Role rollout budget", "role", roleSpec.Name, "group", sg.Name)
+			continue
+		}
+		if len(outdatedRoles) == 0 {
+			rolesToDelete = append(rolesToDelete, surgeRolesToRetire(roleSpec.Name, roleList, surge, budget)...)
 			continue
 		}
 		localCandidates, err := c.selectRoleRolloutCandidates(ctx, ms, sg, roleSpec, roleList, outdatedRoles, budget, groupPolicy)
@@ -2589,7 +2658,13 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 		revisionCount := make(map[string]int)
 		referencedRevisions := make([]string, 0, len(groups))
 		roleCountsComplete := true
-		rolloutActive := c.hasUpdateableOutdatedServingGroup(ctx, latestMS, groups, revision, partition)
+		// The last outdated unit can leave the store before its ordinal is
+		// recreated. The surge still to retire keeps the rollout open then.
+		pendingSurge, err := c.hasPendingSurge(latestMS, groups)
+		if err != nil {
+			return fmt.Errorf("observe surge of %s: %w", utils.GetNamespaceName(latestMS), err)
+		}
+		rolloutActive := pendingSurge || c.hasUpdateableOutdatedServingGroup(ctx, latestMS, groups, revision, partition)
 		for index := range groups {
 			group := groups[index]
 			_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
@@ -2650,7 +2725,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 				revisionCount[group.Revision]++
 			}
 		}
-		progressActive := len(progressingGroups) > 0 || len(groups) != replicas || available != replicas
+		progressActive := pendingSurge || len(progressingGroups) > 0 || len(groups) != replicas || available != replicas
 
 		copy := latestMS.DeepCopy()
 		shouldUpdate := utils.SetConditionWithRolloutAndProgressState(
@@ -2665,7 +2740,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 		// A replacement gap must not discard the baseline used by protected slots.
 		updateRevision := revision
 		var currentRevision string
-		rolloutComplete := roleCountsComplete && updated == replicas && available == replicas && len(groups) == replicas
+		rolloutComplete := !pendingSurge && roleCountsComplete && updated == replicas && available == replicas && len(groups) == replicas
 
 		if copy.Status.CurrentRevision != "" {
 			currentRevision = copy.Status.CurrentRevision
@@ -3101,6 +3176,8 @@ func (c *ModelServingController) createPod(
 		if temporary {
 			setSurgeScope(pod, surgeRole)
 		}
+	} else if scope, ok := ctx.Value(surgeScopeKey{}).(string); ok {
+		setSurgeScope(pod, scope)
 	}
 	_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
