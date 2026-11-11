@@ -1837,6 +1837,120 @@ func TestRouter_HandlerFunc_DisaggregatedMode(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `data: {"id":"decode-resp"}`)
 }
 
+func TestRouter_HandlerFunc_FairnessChargesUserTokenUsage(t *testing.T) {
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var reqBody ModelRequest
+		_ = json.Unmarshal(body, &reqBody)
+		if _, hasStream := reqBody["stream"]; !hasStream {
+			// PD prefill request: the router strips stream.
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"id":"prefill-resp"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"id\":\"resp\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"resp\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"total_tokens\":12}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+
+	tests := []struct {
+		name    string
+		pdGroup *aiv1alpha1.PDGroup
+		pods    map[string]map[string]string // pod name -> labels
+	}{
+		{
+			name: "aggregated",
+			pods: map[string]map[string]string{"pod-1": nil},
+		},
+		{
+			name: "pd disaggregated",
+			pdGroup: &aiv1alpha1.PDGroup{
+				GroupKey:      "group",
+				DecodeLabels:  map[string]string{"app": "decode"},
+				PrefillLabels: map[string]string{"app": "prefill"},
+			},
+			pods: map[string]map[string]string{
+				"decode-pod-1":  {"app": "decode", "group": "test-group"},
+				"prefill-pod-1": {"app": "prefill", "group": "test-group"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prevEnableFairness := EnableFairnessScheduling
+			EnableFairnessScheduling = true
+			defer func() { EnableFairnessScheduling = prevEnableFairness }()
+
+			router, store, backend := setupTestRouter(t, backendHandler)
+			defer backend.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			store.Run(ctx)
+
+			backendURL, _ := url.Parse(backend.URL)
+			backendPort, _ := strconv.Atoi(backendURL.Port())
+			modelServer := &aiv1alpha1.ModelServer{
+				ObjectMeta: v1.ObjectMeta{Name: "ms-1", Namespace: "default"},
+				Spec: aiv1alpha1.ModelServerSpec{
+					Model:           func(s string) *string { return &s }("test-model-base"),
+					WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+					InferenceEngine: "vLLM",
+				},
+			}
+			if tt.pdGroup != nil {
+				modelServer.Spec.WorkloadSelector = &aiv1alpha1.WorkloadSelector{PDGroup: tt.pdGroup}
+			}
+			podNames := sets.New[types.NamespacedName]()
+			for name := range tt.pods {
+				podNames.Insert(types.NamespacedName{Namespace: "default", Name: name})
+			}
+			require.NoError(t, store.AddOrUpdateModelServer(modelServer, podNames))
+			for name, podLabels := range tt.pods {
+				pod := &corev1.Pod{
+					ObjectMeta: v1.ObjectMeta{Name: name, Namespace: "default", Labels: podLabels},
+					Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+				}
+				require.NoError(t, store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer}))
+			}
+			require.NoError(t, store.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+				ObjectMeta: v1.ObjectMeta{Name: "mr-1", Namespace: "default"},
+				Spec: aiv1alpha1.ModelRouteSpec{
+					ModelName: "test-model",
+					Rules:     []*aiv1alpha1.Rule{{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-1"}}}},
+				},
+			}))
+
+			w := connectors.CreateTestResponseRecorder()
+			c, _ := gin.CreateTestContext(w)
+			reqBody := `{"model":"test-model","messages":[{"role":"user","content":"hello"}],"stream":true}`
+			c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(reqBody))
+			c.Request.Header.Set("Content-Type", "application/json")
+			accessCtx := accesslog.NewAccessLogContext("fairness-request", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "")
+			c.Set(accesslog.AccessLogContextKey, accessCtx)
+			// The JWT authenticator sets the user ID from the token subject.
+			c.Set(common.UserIdKey, "heavy-user")
+
+			router.HandlerFunc()(c)
+			require.Equal(t, http.StatusOK, w.Code)
+
+			usage, err := store.GetTokenCount("heavy-user", "test-model")
+			require.NoError(t, err)
+			assert.Greater(t, usage, 0.0, "served request must be charged to the user's fairness usage")
+
+			heavyPriority, err := datastore.CalculateFairnessPriority(store, "heavy-user", "test-model", 1, 0)
+			require.NoError(t, err)
+			newPriority, err := datastore.CalculateFairnessPriority(store, "new-user", "test-model", 1, 0)
+			require.NoError(t, err)
+			assert.Greater(t, heavyPriority, newPriority, "a user with recent usage must queue behind a user without any")
+
+			assert.Equal(t, 7, accessCtx.OutputTokens)
+		})
+	}
+}
+
 // --- OpenAI Responses API (/v1/responses) end-to-end routing ---
 
 // responsesSSE builds a minimal Responses SSE stream ending in the given terminal

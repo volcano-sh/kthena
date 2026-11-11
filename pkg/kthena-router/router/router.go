@@ -1602,6 +1602,18 @@ func (r *Router) proxyToPDDisaggregated(
 			metricsRecorder.RecordOutputTokens(outputTokens)
 		}
 
+		// Update access log with output tokens
+		inputTokens := 0
+		if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
+			inputTokens = accessCtx.InputTokens
+			accessCtx.SetTokenCounts(inputTokens, outputTokens)
+		}
+
+		// Charge the user's token usage for fairness scheduling
+		if userID := c.GetString(common.UserIdKey); userID != "" && ctx.Model != "" {
+			_ = r.store.UpdateTokenCount(userID, ctx.Model, float64(inputTokens), float64(outputTokens))
+		}
+
 		// Record successful operation in cache
 		r.scheduler.RunPostHooks(ctx, i)
 
