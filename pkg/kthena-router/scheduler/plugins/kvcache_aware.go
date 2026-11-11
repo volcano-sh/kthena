@@ -458,10 +458,8 @@ func (t *KVCacheAware) queryRedisForBlocks(blockHashes []uint64, modelName strin
 		klog.V(2).Infof("KVCacheAware.queryRedis: sample keys [0]=%s, [last]=%s", keys[0], keys[len(keys)-1])
 	}
 
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		klog.Warningf("KVCacheAware.queryRedis: pipeline exec failed: %v", err)
-		return nil, err
+	if _, err := pipe.Exec(ctx); err != nil {
+		klog.Warningf("KVCacheAware.queryRedis: pipeline exec had partial errors: %v", err)
 	}
 
 	// Process results and extract pod names
