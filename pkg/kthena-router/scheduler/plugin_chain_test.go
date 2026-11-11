@@ -296,13 +296,13 @@ func TestChainNeedsOnFlightSync(t *testing.T) {
 	store := datastore.New()
 	newScore := func(t *testing.T, name string) *scorePlugin {
 		t.Helper()
-		p, err := plugins.SchedulerPlugins[name].NewScore(store, runtime.RawExtension{})
+		p, err := plugins.SchedulerPlugins[name].NewScore(plugins.BuildContext{}, store, runtime.RawExtension{})
 		require.NoError(t, err)
 		return &scorePlugin{plugin: p}
 	}
 	newFilter := func(t *testing.T, name string) framework.FilterPlugin {
 		t.Helper()
-		f, err := plugins.SchedulerPlugins[name].NewFilter(runtime.RawExtension{})
+		f, err := plugins.SchedulerPlugins[name].NewFilter(plugins.BuildContext{}, runtime.RawExtension{})
 		require.NoError(t, err)
 		return f
 	}

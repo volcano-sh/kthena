@@ -34,7 +34,7 @@ type LoraAffinity struct {
 
 var _ framework.FilterPlugin = &LoraAffinity{}
 
-func NewLoraAffinity() *LoraAffinity {
+func NewLoraAffinity(_ BuildContext) *LoraAffinity {
 	return &LoraAffinity{
 		name: LoraAffinityPluginName,
 	}

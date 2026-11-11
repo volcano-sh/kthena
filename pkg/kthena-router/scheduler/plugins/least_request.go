@@ -65,7 +65,7 @@ func ValidateLeastRequestArgs(pluginArg runtime.RawExtension) error {
 	return nil
 }
 
-func NewLeastRequest(pluginArg runtime.RawExtension) *LeastRequest {
+func NewLeastRequest(_ BuildContext, pluginArg runtime.RawExtension) *LeastRequest {
 	var leastRequestArgs LeastRequestArgs
 	if pluginArg.Raw == nil || yaml.Unmarshal(pluginArg.Raw, &leastRequestArgs) != nil {
 		klog.Errorf("Unmarshal LeastRequestArgs error, setting default value")

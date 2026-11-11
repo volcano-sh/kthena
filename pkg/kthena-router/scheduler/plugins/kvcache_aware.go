@@ -39,6 +39,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
+
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/tokenization"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 	corev1 "k8s.io/api/core/v1"
@@ -126,6 +127,7 @@ type KVCacheAware struct {
 	indexMode        string
 	redisClient      *redis.Client
 	memoryIndex      *KVBlockMemoryIndex
+	BuildContext     BuildContext
 	processor        *TokenBlockProcessor
 	tokenizerManager *tokenization.TokenizerManager
 	gcCursor         uint64
@@ -162,7 +164,7 @@ func (b KVCacheAwareBlock) String(prefix string) string {
 	return fmt.Sprintf("%s%s@%d", prefix, b.ModelName, b.ChunkHash)
 }
 
-func NewKVCacheAware(store datastore.Store, pluginArg runtime.RawExtension) (*KVCacheAware, error) {
+func NewKVCacheAware(bc BuildContext, store datastore.Store, pluginArg runtime.RawExtension) (*KVCacheAware, error) {
 	klog.Infof("KVCacheAware: initializing plugin, raw args length=%d", len(pluginArg.Raw))
 
 	var args KVCacheAwareArgs
@@ -205,6 +207,7 @@ func NewKVCacheAware(store datastore.Store, pluginArg runtime.RawExtension) (*KV
 		maxBlocksToMatch: maxBlocksToMatch,
 		keyPrefix:        kvCacheKeyPrefix,
 		indexMode:        indexMode,
+		BuildContext:     bc,
 		processor:        &TokenBlockProcessor{blockSize: blockSizeToHash},
 		tokenizerManager: manager,
 	}
@@ -219,10 +222,9 @@ func NewKVCacheAware(store datastore.Store, pluginArg runtime.RawExtension) (*KV
 
 	redisClient := utils.TryGetRedisClient()
 	if redisClient == nil {
-		klog.Warningf("KVCacheAware: Redis client is nil — kvcache-aware scoring will not work")
-	} else {
-		klog.Infof("KVCacheAware: Redis client initialized successfully")
+		return nil, fmt.Errorf("redis mode requires a reachable Redis; set indexMode to %q if Redis is not deployed", kvCacheIndexModeMemory)
 	}
+	klog.Infof("KVCacheAware: Redis client initialized successfully")
 	plugin.redisClient = redisClient
 	plugin.startGC()
 	return plugin, nil
@@ -253,7 +255,13 @@ func (t *KVCacheAware) startMemoryMode(store datastore.Store, args KVCacheAwareA
 		return fmt.Errorf("invalid runtimePort %d, must be within [1, %d]", runtimePort, maxTokenizerPort)
 	}
 
-	subscriber := newKVEventSubscriber(store, t.memoryIndex, routerInstanceID(), runtimePort)
+	// Profile chains register with a per-chain router id so a rebuilt chain
+	// never kicks the streams of the draining old chain.
+	routerID := routerInstanceID()
+	if !t.BuildContext.IsGlobal() {
+		routerID = routerChainInstanceID(t.BuildContext.Profile)
+	}
+	subscriber := newKVEventSubscriber(store, t.memoryIndex, t.BuildContext.Profile, routerID, runtimePort)
 	ctx, cancel := context.WithCancel(context.Background())
 	unregister := store.RegisterCallback("Pod", subscriber.onPodEvent)
 	go subscriber.run(ctx)
@@ -262,8 +270,8 @@ func (t *KVCacheAware) startMemoryMode(store datastore.Store, args KVCacheAwareA
 		cancel()
 		unregister()
 	}
-	klog.Infof("KVCacheAware: memory mode active, runtimePort=%d, maxBlocksPerPod=%d",
-		runtimePort, t.memoryIndex.maxBlocksPerOwner)
+	klog.Infof("KVCacheAware: memory mode active, routerID=%s, runtimePort=%d, maxBlocksPerPod=%d",
+		routerID, runtimePort, t.memoryIndex.maxBlocksPerOwner)
 	return nil
 }
 

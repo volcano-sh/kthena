@@ -33,7 +33,7 @@ type GPUCacheUsage struct {
 	name string
 }
 
-func NewGPUCacheUsage() *GPUCacheUsage {
+func NewGPUCacheUsage(_ BuildContext) *GPUCacheUsage {
 	return &GPUCacheUsage{
 		name: GPUCacheUsagePluginName,
 	}
