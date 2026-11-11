@@ -1628,14 +1628,18 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 	}
 }
 
-func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
+func TestValidateEvictionStrategyBudget(t *testing.T) {
 	replicas := int32(3)
 	roleReplicas := int32(2)
 	tests := []struct {
 		name              string
 		protection        workloadv1alpha1.ProtectionLevelType
+		replicas          *int32
+		roleReplicas      *int32
 		minAvailable      *intstr.IntOrString
+		maxUnavailable    *intstr.IntOrString
 		roleMinAvail      map[string]intstr.IntOrString
+		roleMaxUnavail    map[string]intstr.IntOrString
 		wantAllowed       bool
 		wantMessage       string
 		useEmptyRoleMap   bool
@@ -1645,7 +1649,7 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 			name:        "reject servingGroup without minAvailable",
 			protection:  workloadv1alpha1.ProtectionLevelServingGroup,
 			wantAllowed: false,
-			wantMessage: "minAvailable is required when evictionStrategy.protectionLevel is ServingGroup",
+			wantMessage: "one of minAvailable or maxUnavailable is required when evictionStrategy.protectionLevel is ServingGroup",
 		},
 		{
 			name:         "valid servingGroup integer minAvailable",
@@ -1658,6 +1662,39 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 			protection:   workloadv1alpha1.ProtectionLevelServingGroup,
 			minAvailable: intstrPtr(intstr.FromString("67%")),
 			wantAllowed:  true,
+		},
+		{
+			name:           "valid servingGroup integer maxUnavailable",
+			protection:     workloadv1alpha1.ProtectionLevelServingGroup,
+			maxUnavailable: intstrPtr(intstr.FromInt(1)),
+			wantAllowed:    true,
+		},
+		{
+			name:           "valid servingGroup percent maxUnavailable",
+			protection:     workloadv1alpha1.ProtectionLevelServingGroup,
+			maxUnavailable: intstrPtr(intstr.FromString("34%")),
+			wantAllowed:    true,
+		},
+		{
+			name:           "reject servingGroup minAvailable with maxUnavailable",
+			protection:     workloadv1alpha1.ProtectionLevelServingGroup,
+			minAvailable:   intstrPtr(intstr.FromInt(2)),
+			maxUnavailable: intstrPtr(intstr.FromInt(1)),
+			wantAllowed:    false,
+			wantMessage:    "minAvailable and maxUnavailable are mutually exclusive",
+		},
+		{
+			name:           "allow servingGroup maxUnavailable above replicas",
+			protection:     workloadv1alpha1.ProtectionLevelServingGroup,
+			maxUnavailable: intstrPtr(intstr.FromInt(4)),
+			wantAllowed:    true,
+		},
+		{
+			name:           "allow servingGroup maxUnavailable when scaled to zero",
+			protection:     workloadv1alpha1.ProtectionLevelServingGroup,
+			replicas:       ptr.To(int32(0)),
+			maxUnavailable: intstrPtr(intstr.FromInt(1)),
+			wantAllowed:    true,
 		},
 		{
 			name:         "reject servingGroup minAvailable above replicas",
@@ -1685,7 +1722,7 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 			name:        "reject role without roleMinAvailable",
 			protection:  workloadv1alpha1.ProtectionLevelRole,
 			wantAllowed: false,
-			wantMessage: "roleMinAvailable is required when evictionStrategy.protectionLevel is Role",
+			wantMessage: "one of roleMinAvailable or roleMaxUnavailable is required when evictionStrategy.protectionLevel is Role",
 		},
 		{
 			name:            "reject role with empty roleMinAvailable",
@@ -1693,7 +1730,7 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 			roleMinAvail:    map[string]intstr.IntOrString{},
 			useEmptyRoleMap: true,
 			wantAllowed:     false,
-			wantMessage:     "roleMinAvailable is required when evictionStrategy.protectionLevel is Role",
+			wantMessage:     "one of roleMinAvailable or roleMaxUnavailable is required when evictionStrategy.protectionLevel is Role",
 		},
 		{
 			name:       "reject unknown role key",
@@ -1731,6 +1768,51 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 			wantAllowed: true,
 		},
 		{
+			name:       "valid role integer maxUnavailable",
+			protection: workloadv1alpha1.ProtectionLevelRole,
+			roleMaxUnavail: map[string]intstr.IntOrString{
+				"decode": intstr.FromInt(1),
+			},
+			wantAllowed: true,
+		},
+		{
+			name:       "valid role percent maxUnavailable",
+			protection: workloadv1alpha1.ProtectionLevelRole,
+			roleMaxUnavail: map[string]intstr.IntOrString{
+				"decode": intstr.FromString("50%"),
+			},
+			wantAllowed: true,
+		},
+		{
+			name:       "reject role minAvailable with maxUnavailable",
+			protection: workloadv1alpha1.ProtectionLevelRole,
+			roleMinAvail: map[string]intstr.IntOrString{
+				"decode": intstr.FromInt(1),
+			},
+			roleMaxUnavail: map[string]intstr.IntOrString{
+				"decode": intstr.FromInt(1),
+			},
+			wantAllowed: false,
+			wantMessage: "roleMinAvailable and roleMaxUnavailable are mutually exclusive",
+		},
+		{
+			name:       "allow role maxUnavailable above role replicas",
+			protection: workloadv1alpha1.ProtectionLevelRole,
+			roleMaxUnavail: map[string]intstr.IntOrString{
+				"decode": intstr.FromInt(3),
+			},
+			wantAllowed: true,
+		},
+		{
+			name:         "allow role maxUnavailable when scaled to zero",
+			protection:   workloadv1alpha1.ProtectionLevelRole,
+			roleReplicas: ptr.To(int32(0)),
+			roleMaxUnavail: map[string]intstr.IntOrString{
+				"decode": intstr.FromInt(1),
+			},
+			wantAllowed: true,
+		},
+		{
 			name:         "role ignores global minAvailable",
 			protection:   workloadv1alpha1.ProtectionLevelRole,
 			minAvailable: intstrPtr(intstr.FromInt(4)),
@@ -1743,7 +1825,7 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 			name:              "empty protectionLevel defaults to servingGroup and requires minAvailable",
 			omitProtectionVal: true,
 			wantAllowed:       false,
-			wantMessage:       "minAvailable is required when evictionStrategy.protectionLevel is ServingGroup",
+			wantMessage:       "one of minAvailable or maxUnavailable is required when evictionStrategy.protectionLevel is ServingGroup",
 		},
 		{
 			name:         "reject invalid servingGroup percent",
@@ -1763,9 +1845,20 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			currentReplicas := replicas
+			if tt.replicas != nil {
+				currentReplicas = *tt.replicas
+			}
+			currentRoleReplicas := roleReplicas
+			if tt.roleReplicas != nil {
+				currentRoleReplicas = *tt.roleReplicas
+			}
+
 			strategy := &workloadv1alpha1.EvictionStrategySpec{
-				MinAvailable:     tt.minAvailable,
-				RoleMinAvailable: tt.roleMinAvail,
+				MinAvailable:       tt.minAvailable,
+				MaxUnavailable:     tt.maxUnavailable,
+				RoleMinAvailable:   tt.roleMinAvail,
+				RoleMaxUnavailable: tt.roleMaxUnavail,
 			}
 			if !tt.omitProtectionVal {
 				strategy.ProtectionLevel = tt.protection
@@ -1776,13 +1869,13 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 
 			ms := &workloadv1alpha1.ModelServing{
 				Spec: workloadv1alpha1.ModelServingSpec{
-					Replicas: &replicas,
+					Replicas: &currentReplicas,
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 						EvictionStrategy: strategy,
 					},
 					Template: workloadv1alpha1.ServingGroup{
 						Roles: []workloadv1alpha1.Role{
-							{Name: "decode", Replicas: &roleReplicas},
+							{Name: "decode", Replicas: &currentRoleReplicas},
 						},
 					},
 				},
