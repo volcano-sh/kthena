@@ -68,10 +68,10 @@ func (p *LWSLabelsPlugin) OnPodCreate(_ context.Context, req *HookRequest) error
 		return err
 	}
 
-	groupSize, err := getGroupSize(req)
-	if err != nil {
-		return err
+	if req.Role == nil {
+		return fmt.Errorf("missing role for LWS pod %s", req.Pod.Name)
 	}
+	groupSize := int(req.Role.WorkerReplicas) + 1
 	leaderHostname := fmt.Sprintf("%s-%d", lwsName, groupIndex)
 	groupKey := lwsutils.Sha1Hash(fmt.Sprintf("%s/%s", req.Pod.Namespace, leaderHostname))
 
@@ -93,6 +93,7 @@ func (p *LWSLabelsPlugin) OnPodCreate(_ context.Context, req *HookRequest) error
 		req.Pod.Annotations[leaderworkerset.LeaderPodNameAnnotationKey] = leaderHostname
 	}
 	req.Pod.Spec.Subdomain = lwsName
+	req.lwsPodDNS = true
 
 	return lwspodutils.AddLWSVariables(req.Pod)
 }
@@ -139,13 +140,4 @@ func deriveWorkerIndex(isEntry bool, podName string) (int, error) {
 		return 0, fmt.Errorf("invalid worker-index %d derived from pod name %q", n, podName)
 	}
 	return n, nil
-}
-
-func getGroupSize(req *HookRequest) (int, error) {
-	for _, role := range req.ModelServing.Spec.Template.Roles {
-		if role.Name == req.RoleName {
-			return int(role.WorkerReplicas) + 1, nil
-		}
-	}
-	return 0, fmt.Errorf("role %q not found in modelServing %s/%s", req.RoleName, req.ModelServing.Namespace, req.ModelServing.Name)
 }

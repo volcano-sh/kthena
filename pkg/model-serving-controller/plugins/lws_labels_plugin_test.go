@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -42,11 +43,16 @@ func TestLWSLabelsPluginRuntimeCompatibility(t *testing.T) {
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Template: workloadv1alpha1.ServingGroup{
-				Roles: []workloadv1alpha1.Role{{Name: "default", WorkerReplicas: 2}},
+				Roles: []workloadv1alpha1.Role{{Name: "default", WorkerReplicas: 2, WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}}},
 			},
 		},
 	}
-	plugin := &LWSLabelsPlugin{name: LWSLabelsPluginName}
+	chain, err := NewChain(DefaultRegistry, []workloadv1alpha1.PluginSpec{
+		{Name: LWSLabelsPluginName, Type: workloadv1alpha1.PluginTypeBuiltIn},
+		{Name: HeadlessServicePluginName, Type: workloadv1alpha1.PluginTypeBuiltIn},
+	})
+	require.NoError(t, err)
+	client := fake.NewSimpleClientset()
 	dynamoArgs := []string{
 		"--dist-init-addr=$(LWS_LEADER_ADDRESS):29500",
 		"--nnodes=$(LWS_GROUP_SIZE)",
@@ -77,10 +83,13 @@ func TestLWSLabelsPluginRuntimeCompatibility(t *testing.T) {
 			ModelServing: ms,
 			ServingGroup: "sample-1",
 			RoleName:     "default",
+			RoleID:       "default-0",
+			Role:         &ms.Spec.Template.Roles[0],
+			KubeClient:   client,
 			IsEntry:      isEntry,
 			Pod:          pod,
 		}
-		require.NoError(t, plugin.OnPodCreate(context.Background(), req))
+		require.NoError(t, chain.OnPodCreate(context.Background(), req))
 		pods = append(pods, pod)
 
 		expectedHostname := "sample-1"
@@ -97,7 +106,7 @@ func TestLWSLabelsPluginRuntimeCompatibility(t *testing.T) {
 		assertEnv(t, pod.Spec.Containers[0], lwsv1.LwsLeaderAddress, "sample-1.sample.default")
 		assertEnv(t, pod.Spec.Containers[0], lwsv1.LwsGroupSize, "3")
 		assertEnv(t, pod.Spec.Containers[0], lwsv1.LwsWorkerIndex, fmt.Sprint(workerIndex))
-		assertEnv(t, pod.Spec.Containers[0], workloadv1alpha1.EntryAddressEnv, "existing-entry")
+		assertEnv(t, pod.Spec.Containers[0], workloadv1alpha1.EntryAddressEnv, "sample-1-default-0-0.default")
 		assertEnv(t, pod.Spec.InitContainers[0], lwsv1.LwsLeaderAddress, "sample-1.sample.default")
 	}
 
