@@ -29,6 +29,7 @@ import (
 
 	leaderworkerset "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	lwsutils "sigs.k8s.io/lws/pkg/utils"
+	lwspodutils "sigs.k8s.io/lws/pkg/utils/pod"
 )
 
 const LWSLabelsPluginName = "lws-standard-labels"
@@ -67,7 +68,12 @@ func (p *LWSLabelsPlugin) OnPodCreate(_ context.Context, req *HookRequest) error
 		return err
 	}
 
-	groupKey := lwsutils.Sha1Hash(fmt.Sprintf("%s-%d", lwsName, groupIndex))
+	if req.Role == nil {
+		return fmt.Errorf("missing role for LWS pod %s", req.Pod.Name)
+	}
+	groupSize := int(req.Role.WorkerReplicas) + 1
+	leaderHostname := fmt.Sprintf("%s-%d", lwsName, groupIndex)
+	groupKey := lwsutils.Sha1Hash(fmt.Sprintf("%s/%s", req.Pod.Namespace, leaderHostname))
 
 	if req.Pod.Labels == nil {
 		req.Pod.Labels = map[string]string{}
@@ -76,8 +82,20 @@ func (p *LWSLabelsPlugin) OnPodCreate(_ context.Context, req *HookRequest) error
 	req.Pod.Labels[leaderworkerset.GroupIndexLabelKey] = strconv.Itoa(groupIndex)
 	req.Pod.Labels[leaderworkerset.WorkerIndexLabelKey] = strconv.Itoa(workerIndex)
 	req.Pod.Labels[leaderworkerset.GroupUniqueHashLabelKey] = groupKey
+	if req.Pod.Annotations == nil {
+		req.Pod.Annotations = map[string]string{}
+	}
+	req.Pod.Annotations[leaderworkerset.SizeAnnotationKey] = strconv.Itoa(groupSize)
 
-	return nil
+	req.Pod.Spec.Hostname = leaderHostname
+	if workerIndex > 0 {
+		req.Pod.Spec.Hostname = fmt.Sprintf("%s-%d", leaderHostname, workerIndex)
+		req.Pod.Annotations[leaderworkerset.LeaderPodNameAnnotationKey] = leaderHostname
+	}
+	req.Pod.Spec.Subdomain = lwsName
+	req.lwsPodDNS = true
+
+	return lwspodutils.AddLWSVariables(req.Pod)
 }
 
 func (p *LWSLabelsPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {

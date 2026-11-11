@@ -85,16 +85,14 @@ kubectl exec -n dynamo-demo <leader-pod> -- env | grep -E '^(ENTRY_ADDRESS|LWS_)
 kubectl exec -n dynamo-demo <worker-pod> -- env | grep -E '^(ENTRY_ADDRESS|LWS_)'
 ```
 
-Kthena's `headless-service` plugin supplies `ENTRY_ADDRESS` for the Entry Pod of
-each Role instance and a separate discovery subdomain for member DNS. It does
-not itself inject `LWS_LEADER_ADDRESS`, `LWS_GROUP_SIZE`, or `LWS_WORKER_INDEX`.
-The `lws-standard-labels` plugin supplies identity labels, not these environment
-variables. Native LWS environment and hostname compatibility must be verified
-separately for the Dynamo backend being deployed.
+The leader and workers receive `LWS_LEADER_ADDRESS`, `LWS_GROUP_SIZE`, and
+`LWS_WORKER_INDEX`, including in init containers. The per-Role Entry Service
+continues to supply `ENTRY_ADDRESS`.
 
 Check the generated Services and actual Pod network identities:
 
 ```bash
+kubectl get service -n dynamo-demo <lws-name> -o yaml
 kubectl get services -n dynamo-demo \
   -l modelserving.volcano.sh/name=<lws-name> -o yaml
 kubectl get pods -n dynamo-demo \
@@ -102,22 +100,14 @@ kubectl get pods -n dynamo-demo \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.hostname}{"."}{.spec.subdomain}{"\n"}{end}'
 ```
 
-The two plugin-managed Services have `clusterIP: None` and
-`publishNotReadyAddresses: true`: the Entry Service selects only the Entry,
-while the discovery Service selects Entry and Worker Pods. Use the observed
-hostname and subdomain to query individual Pod DNS records.
-
-Earlier versions of this guide described native LWS shared-subdomain names
-such as `<lws-name>-0.<lws-name>.<namespace>`. The generic Kthena plugin does not
-establish that layout. In particular, Dynamo TRT-LLM's derivation of Worker
-hosts from a native LWS leader address must not be assumed to work from
-`ENTRY_ADDRESS`. Validate the backend's address requirements before using this
-integration; this headless-Service change does not implement a separate LWS
-network protocol.
+The shared headless Service has the same name as the LWS and publishes member
+addresses before readiness. For group 0, the leader address is
+`<lws-name>-0.<lws-name>.<namespace>` and the first worker address is
+`<lws-name>-0-1.<lws-name>.<namespace>`.
 
 ## Compatibility scope
 
-- Conversion to ModelServing and Kthena Role DNS do not establish native LWS shared-subdomain parity. `networkConfig.subdomainPolicy: UniquePerReplica` is not supported.
+- Kthena supports the default shared LWS subdomain. `networkConfig.subdomainPolicy: UniquePerReplica` is not supported.
 - Do not run the native LWS controller or webhook alongside Kthena.
 - The Kthena workload webhook must remain enabled for Dynamo-generated LWS resources.
 - New generated ModelServings declare the headless plugin at creation, including LWS size 1. Existing children without it require migration because their plugin chain is immutable; see [plugin migration](../user-guide/modelserving-plugin-framework.md#upgrade-and-migration).
