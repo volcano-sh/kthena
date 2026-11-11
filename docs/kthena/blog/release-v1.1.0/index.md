@@ -10,9 +10,9 @@ date: 2026-11-11
 
 We are excited to announce **Kthena v1.1.0**. Building on the production-readiness work in v1.0.0, this release widens what the Kthena Router can front and makes ModelServing runs safer and more stable.
 
-On the router side, Kthena can now route to **third-party model APIs** through the new `ExternalModelProvider` resource, pin multi-turn conversations to a backend with **session sticky routing**, run **without a Kubernetes API server**, and score KV cache locality through an **in-memory index** and a **dedicated tokenizer service**. On the ModelServing side, rolling updates gain **`maxSurge`**, **in-place image updates**, **coordinated Role rollouts**, per-Role **partition**, and **eviction protection**.
+On the router side, Kthena can now route to **third-party model Providers** through the new `ExternalModelProvider` resource, pin multi-turn conversations to a backend with **session sticky routing**, run **without a Kubernetes API server**, and score KV cache locality through an **in-memory index** and a **dedicated tokenizer service**. On the ModelServing side, rolling updates gain **`maxSurge`**, **in-place image updates**, **coordinated Role rollouts**, per-Role **partition**, and **eviction protection**.
 
-This release also changes a few defaults compared with v1.0.0, most notably the router `/metrics` port, the opt-in `headless-service` plugin, and the `recoveryPolicy: None` semantics. Please read the Upgrade Notes before upgrading. The `ModelBooster` API is deprecated; new deployments should use `ModelServing` together with `ModelRoute` and `ModelServer`.
+This release also changes a few defaults compared with v1.0.0, most notably the router `/metrics` port, the opt-in `headless-service` plugin, and the `recoveryPolicy: None` semantics. Please read the Upgrade Notes before upgrading. The `ModelBooster` API is deprecated; new deployments should use `ModelServing` together with `ModelRoute` and `ModelServer` to replace the functionality of `ModelBooster`.
 
 <!-- truncate -->
 
@@ -39,7 +39,7 @@ Key capabilities:
 - Anthropic Messages API: `/v1/messages`.
 - Streaming SSE passthrough, with native request bodies (tools, multimodal fields) forwarded unchanged.
 - Credentials are referenced from Kubernetes Secrets that carry the label `networking.serving.volcano.sh/external-model-provider-credential: "true"`.
-- Provider credentials and headers are validated at admission.
+- Credential reference fields (Secret name, key, and scheme) and headers are validated at admission. Admission does not check the referenced Secret itself: a missing Secret or key still passes, and the router reports it afterwards through the `CredentialsResolved=False` condition on the `ExternalModelProvider`.
 
 Note: `ExternalModelProvider` can forward a Secret value to the configured `baseURL`. Grant write access only to cluster administrators and restrict router egress.
 
@@ -161,8 +161,7 @@ spec:
     roles:
     - name: prefill
       replicas: 2
-      maxUnavailable: 0
-      maxSurge: 1
+      maxUnavailable: 1
       # entryTemplate and workerTemplate omitted
 ```
 
@@ -317,17 +316,17 @@ Related changes:
 - Refilled deleted Pods for `RecoveryPolicy=None`, retried failed headless Service creation, and guarded Pod deletion by UID. [#1669](https://github.com/volcano-sh/kthena/pull/1669), [#1408](https://github.com/volcano-sh/kthena/pull/1408), [#1427](https://github.com/volcano-sh/kthena/pull/1427)
 - Fixed condition reason, message, and timestamp refresh when a condition is superseded, and `graceMap` cleanup when `markPodUnavailable` fails. [#1744](https://github.com/volcano-sh/kthena/pull/1744), [#1742](https://github.com/volcano-sh/kthena/pull/1742)
 - Stopped the `LeaderWorkerSet` integration from rewriting a `ModelServing` it does not own, and allowed the controller to delete old `ModelServing`, `ModelServer`, and `ModelRoute` objects under RBAC. [#1917](https://github.com/volcano-sh/kthena/pull/1917), [#1623](https://github.com/volcano-sh/kthena/pull/1623), [#1646](https://github.com/volcano-sh/kthena/pull/1646)
-- Allowed a role with zero replicas under `RoleRollingUpdate` in the webhook and tolerated a missing ServingGroup entry during rolling update. [#1750](https://github.com/volcano-sh/kthena/pull/1750), [#1757](https://github.com/volcano-sh/kthena/pull/1757)
+- Allowed a role with zero replicas under `RoleRollingUpdate` in the webhook and tolerated a missing ServingGroup entry during rolling update. [#1750](https://github.com/volcano-sh/kthena/pull/1750)
 - Autoscaler: fixed heterogeneous scale-down getting stuck, target distinction by namespace, ratio aggregation across heterogeneous backends, pod metric sums, and ready-pod metric preservation during mixed readiness. [#1700](https://github.com/volcano-sh/kthena/pull/1700), [#1445](https://github.com/volcano-sh/kthena/pull/1445), [#1272](https://github.com/volcano-sh/kthena/pull/1272), [#1843](https://github.com/volcano-sh/kthena/pull/1843), [#1405](https://github.com/volcano-sh/kthena/pull/1405)
 - ModelBooster: fixed `spec.name` routing lookup, engine port propagation, negative `workerReplicas` for vLLM, and rejected inconsistent PD `kv_connector` configs. [#1490](https://github.com/volcano-sh/kthena/pull/1490), [#1446](https://github.com/volcano-sh/kthena/pull/1446), [#1629](https://github.com/volcano-sh/kthena/pull/1629), [#1455](https://github.com/volcano-sh/kthena/pull/1455)
-- Required `workloadPort` in `ModelServer` and validated the `ModelServer` workload selector. [#1635](https://github.com/volcano-sh/kthena/pull/1635), [#1287](https://github.com/volcano-sh/kthena/pull/1287)
+- Required `workloadPort` in `ModelServer` unless every static endpoint sets its own port, and validated the `ModelServer` workload selector. [#1635](https://github.com/volcano-sh/kthena/pull/1635), [#1287](https://github.com/volcano-sh/kthena/pull/1287)
 - Helm and downloader: fixed the router TLS chart mount path, Redis password key lookup, controller manager webhook toggle, downloader lock inode stability, and S3 credential failures. [#1351](https://github.com/volcano-sh/kthena/pull/1351), [#1683](https://github.com/volcano-sh/kthena/pull/1683), [#1662](https://github.com/volcano-sh/kthena/pull/1662), [#1715](https://github.com/volcano-sh/kthena/pull/1715), [#1596](https://github.com/volcano-sh/kthena/pull/1596)
 
 ## Security
 
 ### Unauthenticated KV event ingestion in the in-memory index (fixed before release)
 
-The in-memory KV cache index introduced in [#1725](https://github.com/volcano-sh/kthena/pull/1725) originally had runtime sidecars push KV events to a router `POST /kvcache/event` endpoint. That endpoint had no authentication, and the router trusted the `pod_identifier` and `model_name` supplied by the sender. Any client able to reach the endpoint could impersonate an inference Pod, register a large number of fabricated KV cache blocks for it, and make `kvcache-aware` scoring route requests to a backend of its choosing.
+The in-memory KV cache index introduced in [#1725](https://github.com/volcano-sh/kthena/pull/1725) originally had runtime sidecars push KV events to a router `kvcache/events` endpoint. That endpoint had no authentication, and the router trusted the `pod_identifier` and `model_name` supplied by the sender. Any client able to reach the endpoint could impersonate an inference Pod, register a large number of fabricated KV cache blocks for it, and make `kvcache-aware` scoring route requests to a backend of its choosing.
 
 This was fixed by [#1867](https://github.com/volcano-sh/kthena/pull/1867). The router no longer exposes an events endpoint. Instead, it opens a connection to the runtime sidecar of each selected Pod and the sidecar streams KV events back on that connection, so events are always attributed to the Pod the router dialed and nothing in a stream can claim another Pod's identity. Store times are capped at the time of receipt, and each Pod can hold at most `maxBlocksPerPod` blocks.
 
@@ -341,9 +340,10 @@ Thanks to [@btxu-db](https://github.com/btxu-db) for reporting this vulnerabilit
 
 - **Router metrics moved off the inference port.** `/metrics` is now served on a dedicated port (`--metrics-port`, default `9090`; Helm `networking.kthenaRouter.metrics.port`) and exposed through the new `kthena-router-metrics` ClusterIP Service. It is no longer served on the public inference listener by default. Update Prometheus scrape configs, or set `networking.kthenaRouter.metrics.exposeOnRouterPort: true` (`--expose-metrics-on-router-port`) for legacy compatibility.
 - **`headless-service` is an explicit plugin.** v1.0.0 created Entry Services and injected `ENTRY_ADDRESS` without any plugin. In v1.1, a `ModelServing` receives these generated DNS settings only if it declares `plugins: [{name: headless-service, type: BuiltIn}]`. Existing objects without it stop getting them when Pods are recreated, and `plugins` is immutable, so migrate by creating a new object.
-- **`recoveryPolicy: None` no longer deletes Pods.** It previously followed default Pod or Deployment behavior; now a failed or restarted Pod is never deleted by the controller and is left to the kubelet. `restartGracePeriodSeconds: -1` is now accepted and tolerates failed Pods indefinitely (values below `-1` are rejected). A Pod deleted by others is still recreated.
+- **`recoveryPolicy: None` no longer deletes Pods.** It previously followed default Pod or Deployment behavior; now a failed or restarted Pod is never deleted by the controller and is left to the kubelet. A Pod deleted by others is still recreated. **Breaking change for `restartGracePeriodSeconds: -1`:** in v1.0.0 this value triggered immediate recovery; in v1.1 it disables controller recovery for failed or restarted Pods, so existing `RoleRecreate` or `ServingGroupRecreate` deployments using it lose automatic recovery after upgrading. Replace `-1` with `0` to keep immediate recovery. Values below `-1` are rejected.
 - **`partition` uses absolute ordinals.** It protects replicas with ordinal in `[0, partition)` even when the ordinal set is sparse.
-- **Stricter admission.** `ModelServer.spec.workloadPort` is required; score plugin weights must be positive, and `maxWaitingRequests` for `least-request` must not be negative; invalid `ExternalModelProvider` headers are rejected; webhooks validate immutable `ModelServing` updates and rollout budgets in both rollout modes. Existing manifests that violate these rules fail on the next update.
+- **Stricter admission.** `ModelServer.spec.workloadPort` is required unless every entry in `spec.endpoints` sets its own port; invalid `ExternalModelProvider` headers are rejected; webhooks validate immutable `ModelServing` updates and rollout budgets in both rollout modes. Existing manifests that violate these rules fail on the next update.
+- **Stricter router scheduler configuration.** The router validates its `routerConfiguration` at startup and exits on an invalid one, so a v1.0 custom configuration that omits `weight` (previously treated as `0`) or sets a non-positive weight on a score plugin, or sets a negative `maxWaitingRequests` for `least-request`, makes the upgraded router crash-loop. Fix any custom `routerConfiguration` before upgrading. The default Helm configuration is not affected.
 - **Router upstream connection pool is larger.** The idle connections per backend default to `64` (Go's default is `2`); tune it per `ModelServer` with `trafficPolicy.connectionPool`.
 - **Scheduling and routing results can differ.** The `least-latency` plugin uses a new cold-start default score, so scale-out Pods receive traffic more fairly. Pods that no score plugin scores are now still selectable. A matched route returns `503` when no backend is available. Unregistered models are rejected before fairness or session-boost queuing. The router readiness probe now uses `/readyz`.
 - **Helm.** The router Service type is now configurable (default remains `LoadBalancer`), `tolerations` and `replicas` values were added, the unused top-level `webhook` values were removed, and the Redis password is read from the `REDIS_PASSWORD` Secret key. Re-apply the CRDs because they changed.
@@ -351,7 +351,7 @@ Thanks to [@btxu-db](https://github.com/btxu-db) for reporting this vulnerabilit
 
 ### Opt-in features
 
-The following features are **Alpha**: `ExternalModelProvider`, `rolloutStrategy.updateMethod: InPlace`, `rolloutStrategy.roleCoordination`, the tokenizer service, `indexMode: memory`, and the standalone router (`--config-source=file`). They are disabled or unused by default, and their APIs, fields, flags, and behavior may change in future releases. Review them before enabling in production. All other features in this release are not Alpha.
+The following features are **Alpha**: `ExternalModelProvider`, `rolloutStrategy.updateMethod: InPlace`, `rolloutStrategy.roleCoordination`, `rolloutStrategy.evictionStrategy` (and its webhook), the tokenizer service, `indexMode: memory`, and the standalone router (`--config-source=file`). They are disabled or unused by default, and their APIs, fields, flags, and behavior may change in future releases. Review them before enabling in production. All other features in this release are not Alpha.
 
 `rolloutStrategy.updateMethod: InPlace`, `rolloutStrategy.evictionStrategy` (and its webhook), `roleCoordination`, `maxSurge`, `ExternalModelProvider`, session sticky, the tokenizer service, and `indexMode: memory` are opt-in. Existing behavior is unchanged when they are not configured. `maxUnavailable` may be `0` only when `maxSurge` resolves above `0`.
 
