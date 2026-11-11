@@ -157,6 +157,15 @@ func (c *GatewayController) syncHandler(key string) error {
 		return err
 	}
 
+	// Check GatewayClassName after lister lookup: the informer filter only
+	// fires OnDelete(old) when a Gateway is switched away from our class, so
+	// the object retrieved from the lister may belong to another controller.
+	// Without this check, we would write status onto a Gateway we no longer own.
+	if string(gateway.Spec.GatewayClassName) != DefaultGatewayClassName {
+		_ = c.store.DeleteGateway(key)
+		return nil
+	}
+
 	// Store the Gateway
 	if err := c.store.AddOrUpdateGateway(gateway); err != nil {
 		return err
