@@ -314,6 +314,7 @@ func (m *ProfileChainManager) onProfileEvent(data datastore.EventData) {
 func (m *ProfileChainManager) buildChain(profile *aiv1alpha1.SchedulerProfile) (chain *PluginChain, buildErr error) {
 	var filters []framework.FilterPlugin
 	var scores []*scorePlugin
+	bc := plugins.BuildContext{Profile: types.NamespacedName{Namespace: profile.Namespace, Name: profile.Name}}
 	//If chain construction fails, close the already constructed plugin instance.
 	defer func() {
 		if chain == nil {
@@ -347,7 +348,7 @@ func (m *ProfileChainManager) buildChain(profile *aiv1alpha1.SchedulerProfile) (
 			return nil, fmt.Errorf("plugins.Filter.enabled[%d]: duplicate plugin %q", i, name)
 		}
 		seenFilters.Insert(name)
-		f, err := meta.NewFilter(argsByPlugin[name])
+		f, err := meta.NewFilter(bc, argsByPlugin[name])
 		if err != nil {
 			return nil, fmt.Errorf("plugins.Filter.enabled[%d] (%s): %w", i, name, err)
 		}
@@ -368,7 +369,7 @@ func (m *ProfileChainManager) buildChain(profile *aiv1alpha1.SchedulerProfile) (
 		if pw.Weight <= 0 {
 			return nil, fmt.Errorf("plugins.Score.enabled[%d] (%s): weight must be greater than 0, got %d", i, pw.Name, pw.Weight)
 		}
-		sc, err := meta.NewScore(m.store, argsByPlugin[pw.Name])
+		sc, err := meta.NewScore(bc, m.store, argsByPlugin[pw.Name])
 		if err != nil {
 			return nil, fmt.Errorf("plugins.Score.enabled[%d] (%s): %w", i, pw.Name, err)
 		}

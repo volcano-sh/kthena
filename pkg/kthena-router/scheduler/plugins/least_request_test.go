@@ -105,7 +105,7 @@ func TestLeastRequestScore(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plugin := NewLeastRequest(runtime.RawExtension{Raw: []byte(`{}`)})
+			plugin := NewLeastRequest(BuildContext{}, runtime.RawExtension{Raw: []byte(`{}`)})
 			scores := plugin.Score(nil, tt.pods)
 
 			for _, pod := range tt.pods {
@@ -153,7 +153,7 @@ func TestLeastRequestFilterMaxWaitingRequests(t *testing.T) {
 				makePodWithWaiting("busy", 50),
 			}
 
-			plugin := NewLeastRequest(runtime.RawExtension{Raw: []byte(tt.args)})
+			plugin := NewLeastRequest(BuildContext{}, runtime.RawExtension{Raw: []byte(tt.args)})
 			got := plugin.Filter(nil, pods)
 
 			gotNames := make([]string, 0, len(got))

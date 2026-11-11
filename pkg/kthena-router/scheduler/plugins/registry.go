@@ -21,6 +21,7 @@ import (
 	"slices"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
@@ -30,8 +31,18 @@ import (
 // role it serves, and how to validate its configured arguments.
 type schedulerPlugin struct {
 	ValidateArgs func(runtime.RawExtension) error
-	NewScore     func(datastore.Store, runtime.RawExtension) (framework.ScorePlugin, error)
-	NewFilter    func(args runtime.RawExtension) (framework.FilterPlugin, error)
+	NewScore     func(BuildContext, datastore.Store, runtime.RawExtension) (framework.ScorePlugin, error)
+	NewFilter    func(BuildContext, runtime.RawExtension) (framework.FilterPlugin, error)
+}
+
+type BuildContext struct {
+	Profile types.NamespacedName
+}
+
+// IsGlobal reports whether this context builds plugins for the global
+// scheduler configuration rather than a specific SchedulerProfile.
+func (bc BuildContext) IsGlobal() bool {
+	return bc.Profile == types.NamespacedName{}
 }
 
 // SchedulerPlugins registers every scheduler plugin with its builders and
@@ -39,47 +50,47 @@ type schedulerPlugin struct {
 var SchedulerPlugins = map[string]schedulerPlugin{
 	GPUCacheUsagePluginName: {
 		ValidateArgs: ValidateGPUCacheUsageArgs,
-		NewScore: func(_ datastore.Store, _ runtime.RawExtension) (framework.ScorePlugin, error) {
-			return NewGPUCacheUsage(), nil
+		NewScore: func(bc BuildContext, _ datastore.Store, _ runtime.RawExtension) (framework.ScorePlugin, error) {
+			return NewGPUCacheUsage(bc), nil
 		},
 	},
 	LeastLatencyPluginName: {
 		ValidateArgs: ValidateLeastLatencyArgs,
-		NewScore: func(_ datastore.Store, args runtime.RawExtension) (framework.ScorePlugin, error) {
-			return NewLeastLatency(args), nil
+		NewScore: func(bc BuildContext, _ datastore.Store, args runtime.RawExtension) (framework.ScorePlugin, error) {
+			return NewLeastLatency(bc, args), nil
 		},
 	},
 	LeastRequestPluginName: {
 		ValidateArgs: ValidateLeastRequestArgs,
-		NewScore: func(store datastore.Store, args runtime.RawExtension) (framework.ScorePlugin, error) {
-			return NewLeastRequest(args), nil
+		NewScore: func(bc BuildContext, _ datastore.Store, args runtime.RawExtension) (framework.ScorePlugin, error) {
+			return NewLeastRequest(bc, args), nil
 		},
-		NewFilter: func(args runtime.RawExtension) (framework.FilterPlugin, error) {
-			return NewLeastRequest(args), nil
+		NewFilter: func(bc BuildContext, args runtime.RawExtension) (framework.FilterPlugin, error) {
+			return NewLeastRequest(bc, args), nil
 		},
 	},
 	RandomPluginName: {
 		ValidateArgs: ValidateRandomArgs,
-		NewScore: func(_ datastore.Store, args runtime.RawExtension) (framework.ScorePlugin, error) {
-			return NewRandom(args), nil
+		NewScore: func(bc BuildContext, _ datastore.Store, args runtime.RawExtension) (framework.ScorePlugin, error) {
+			return NewRandom(bc, args), nil
 		},
 	},
 	PrefixCachePluginName: {
 		ValidateArgs: ValidatePrefixCacheArgs,
-		NewScore: func(store datastore.Store, args runtime.RawExtension) (framework.ScorePlugin, error) {
-			return NewPrefixCache(store, args), nil
+		NewScore: func(bc BuildContext, store datastore.Store, args runtime.RawExtension) (framework.ScorePlugin, error) {
+			return NewPrefixCache(bc, store, args), nil
 		},
 	},
 	KVCacheAwarePluginName: {
 		ValidateArgs: ValidateKVCacheAwareArgs,
-		NewScore: func(store datastore.Store, args runtime.RawExtension) (framework.ScorePlugin, error) {
-			return NewKVCacheAware(store, args)
+		NewScore: func(bc BuildContext, store datastore.Store, args runtime.RawExtension) (framework.ScorePlugin, error) {
+			return NewKVCacheAware(bc, store, args)
 		},
 	},
 	LoraAffinityPluginName: {
 		ValidateArgs: ValidateLoraAffinityArgs,
-		NewFilter: func(args runtime.RawExtension) (framework.FilterPlugin, error) {
-			return NewLoraAffinity(), nil
+		NewFilter: func(bc BuildContext, args runtime.RawExtension) (framework.FilterPlugin, error) {
+			return NewLoraAffinity(bc), nil
 		},
 	},
 }

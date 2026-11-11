@@ -62,7 +62,12 @@ func TestRegisterDefaultPlugins(t *testing.T) {
 		assert.NotNil(t, builder, "Score plugin builder for %s should not be nil", pluginName)
 
 		// Test that the builder actually creates a plugin
-		plugin, _ := builder(store, runtime.RawExtension{})
+		// Redis mode fails the build without Redis; use memory mode here.
+		args := runtime.RawExtension{}
+		if pluginName == plugins.KVCacheAwarePluginName {
+			args = runtime.RawExtension{Raw: []byte(`{"indexMode": "memory"}`)}
+		}
+		plugin, _ := builder(plugins.BuildContext{}, store, args)
 		assert.NotNil(t, plugin, "Plugin %s should be created successfully", pluginName)
 		assert.Equal(t, pluginName, plugin.Name(), "Plugin name should match")
 	}
@@ -79,7 +84,7 @@ func TestRegisterDefaultPlugins(t *testing.T) {
 		assert.NotNil(t, builder, "Filter plugin builder for %s should not be nil", pluginName)
 
 		// Test that the builder actually creates a plugin
-		plugin, _ := builder(runtime.RawExtension{})
+		plugin, _ := builder(plugins.BuildContext{}, runtime.RawExtension{})
 		assert.NotNil(t, plugin, "Plugin %s should be created successfully", pluginName)
 		assert.Equal(t, pluginName, plugin.Name(), "Plugin name should match")
 	}

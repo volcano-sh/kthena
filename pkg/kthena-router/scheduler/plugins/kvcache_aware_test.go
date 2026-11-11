@@ -2718,7 +2718,7 @@ func BenchmarkCalculatePodScores(b *testing.B) {
 func TestKVCacheAware_Close(t *testing.T) {
 	t.Run("memory mode stops workers and unregisters", func(t *testing.T) {
 		store := datastore.New()
-		plugin, err := SchedulerPlugins[KVCacheAwarePluginName].NewScore(store, runtime.RawExtension{
+		plugin, err := SchedulerPlugins[KVCacheAwarePluginName].NewScore(BuildContext{}, store, runtime.RawExtension{
 			Raw: []byte(`{"indexMode": "memory"}`),
 		})
 		if err != nil {

@@ -29,7 +29,7 @@ import (
 )
 
 func TestRandom_Name(t *testing.T) {
-	plugin := NewRandom(runtime.RawExtension{})
+	plugin := NewRandom(BuildContext{}, runtime.RawExtension{})
 	expected := RandomPluginName
 	if plugin.Name() != expected {
 		t.Errorf("Expected plugin name %s, got %s", expected, plugin.Name())
@@ -37,7 +37,7 @@ func TestRandom_Name(t *testing.T) {
 }
 
 func TestRandom_Score(t *testing.T) {
-	plugin := NewRandom(runtime.RawExtension{})
+	plugin := NewRandom(BuildContext{}, runtime.RawExtension{})
 
 	// Test with empty pods
 	ctx := &framework.Context{}
@@ -93,7 +93,7 @@ func TestRandom_Score(t *testing.T) {
 // TestRandom_ConcurrentScore exercises Score from multiple goroutines, the way
 // concurrent requests reach the single plugin instance the router builds once.
 func TestRandom_ConcurrentScore(t *testing.T) {
-	plugin := NewRandom(runtime.RawExtension{})
+	plugin := NewRandom(BuildContext{}, runtime.RawExtension{})
 	ctx := &framework.Context{}
 	pods := []*datastore.PodInfo{
 		{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1"}}},

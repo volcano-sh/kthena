@@ -26,8 +26,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
-type ScorePluginBuilder = func(store datastore.Store, arg runtime.RawExtension) (framework.ScorePlugin, error)
-type FilterPluginBuilder = func(arg runtime.RawExtension) (framework.FilterPlugin, error)
+type ScorePluginBuilder = func(bc plugins.BuildContext, store datastore.Store, arg runtime.RawExtension) (framework.ScorePlugin, error)
+type FilterPluginBuilder = func(bc plugins.BuildContext, arg runtime.RawExtension) (framework.FilterPlugin, error)
 
 // PluginRegistry manages the registration and retrieval of scheduler plugins
 type PluginRegistry struct {
@@ -87,7 +87,7 @@ func getFilterPlugins(registry *PluginRegistry, filterPlugins []string, pluginsA
 			klog.Errorf("Failed to get plugin %s.", pluginName)
 			continue
 		}
-		plugin, err := builderFunc(pluginsArgMap[pluginName])
+		plugin, err := builderFunc(plugins.BuildContext{}, pluginsArgMap[pluginName])
 		if err != nil {
 			return nil, fmt.Errorf("failed to build filter plugin %s: %w", pluginName, err)
 		}
@@ -113,7 +113,7 @@ func getScorePlugins(registry *PluginRegistry, store datastore.Store, scorePlugi
 			klog.Errorf("Failed to get plugin %s.", pluginName)
 			continue
 		}
-		plugin, err := builderFunc(store, pluginsArgMap[pluginName])
+		plugin, err := builderFunc(plugins.BuildContext{}, store, pluginsArgMap[pluginName])
 		if err != nil {
 			return nil, fmt.Errorf("failed to build score plugin %s: %w", pluginName, err)
 		}

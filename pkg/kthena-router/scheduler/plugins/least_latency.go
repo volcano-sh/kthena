@@ -74,7 +74,7 @@ func ValidateLeastLatencyArgs(pluginArg runtime.RawExtension) error {
 	return nil
 }
 
-func NewLeastLatency(pluginArg runtime.RawExtension) *LeastLatency {
+func NewLeastLatency(_ BuildContext, pluginArg runtime.RawExtension) *LeastLatency {
 	leastLatencyArgs := LeastLatencyArgs{
 		TTFTTPOTWeightFactor: defaultTTFTTPOTWeightFactor,
 	}

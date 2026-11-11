@@ -38,7 +38,7 @@ type Random struct {
 	name string
 }
 
-func NewRandom(pluginArg runtime.RawExtension) *Random {
+func NewRandom(_ BuildContext, pluginArg runtime.RawExtension) *Random {
 	return &Random{
 		name: RandomPluginName,
 	}
