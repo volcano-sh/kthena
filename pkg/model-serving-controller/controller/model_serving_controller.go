@@ -1382,7 +1382,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			c.revisionHistory(ctx, ms).recordComparisonError(groupName+"/"+roleObj.Name, err)
 			historyErrors = append(historyErrors, err)
 			if roleObj.Status == datastore.RoleRunning {
-				if statusErr := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleObj.Name, datastore.RoleCreating); statusErr != nil {
+				if statusErr := c.updateRoleStatus(ms, groupName, targetRole.Name, roleObj.Name, datastore.RoleCreating); statusErr != nil {
 					klog.Warningf("cannot invalidate readiness of Role %s/%s: %v", targetRole.Name, roleObj.Name, statusErr)
 				}
 			}
@@ -1435,7 +1435,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			status = datastore.RoleRunning
 		}
 		if roleObj.Status != status {
-			if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleObj.Name, status); err != nil {
+			if err := c.updateRoleStatus(ms, groupName, targetRole.Name, roleObj.Name, status); err != nil {
 				klog.Warningf("cannot update readiness of Role %s/%s: %v", targetRole.Name, roleObj.Name, err)
 				continue
 			}
@@ -1524,6 +1524,27 @@ func (c *ModelServingController) emitRoleStatusEvent(
 		return
 	}
 	c.recorder.Event(ms, eventType, reason, message)
+}
+
+// updateRoleStatus records a Role status change and emits the matching Event.
+// Reconciliation reaches the same transitions as the Pod handlers do, so both
+// have to report them or the Event stream depends on which path saw it first.
+func (c *ModelServingController) updateRoleStatus(
+	ms *workloadv1alpha1.ModelServing,
+	groupName, roleName, roleID string,
+	status datastore.RoleStatus,
+) error {
+	name := utils.GetNamespaceName(ms)
+	previous := c.store.GetRoleStatus(name, groupName, roleName, roleID)
+	if err := c.store.UpdateRoleStatus(name, groupName, roleName, roleID, status); err != nil {
+		return err
+	}
+	if previous == status {
+		return nil
+	}
+	message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now %s", roleName, roleID, groupName, status)
+	c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "Role"+string(status), message)
+	return nil
 }
 
 func (c *ModelServingController) getModelServingAndResourceDetails(resource metav1.Object) (*workloadv1alpha1.ModelServing, string, string, string) {
