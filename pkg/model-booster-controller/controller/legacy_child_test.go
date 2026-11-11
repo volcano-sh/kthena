@@ -122,3 +122,32 @@ func TestModelBoosterLegacyUnusedWorkerTemplateDoesNotBlockSync(t *testing.T) {
 		assert.NotEqual(t, "delete", action.GetVerb())
 	}
 }
+
+// A child created by an older controller can differ from what the current
+// converter generates, for example in the preStop script or the runtime image.
+// That must not fail the sync of a ModelBooster the user did not change.
+func TestModelBoosterLegacyChildFromOlderConverterSyncsUnchanged(t *testing.T) {
+	model := loadYaml[workload.ModelBooster](t, "../convert/testdata/input/model.yaml")
+	old, err := convert.BuildModelServing(model)
+	require.NoError(t, err)
+	old.Spec.Plugins = nil
+	entry := &old.Spec.Template.Roles[0].EntryTemplate.Spec
+	for i := range entry.Containers {
+		entry.Containers[i].Image += "-older"
+	}
+	original := old.DeepCopy()
+	client := kthenafake.NewSimpleClientset(old)
+	controller := NewModelBoosterController(fake.NewClientset(), client)
+	require.NoError(t, controller.modelServingInformer.GetIndexer().Add(old))
+
+	require.NoError(t, controller.createOrUpdateModelServing(context.Background(), model))
+
+	for _, action := range client.Actions() {
+		if action.GetResource().Resource == "modelservings" {
+			assert.NotContains(t, []string{"create", "update", "delete"}, action.GetVerb())
+		}
+	}
+	current, err := client.WorkloadV1alpha1().ModelServings(old.Namespace).Get(context.Background(), old.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, original.Spec, current.Spec)
+}

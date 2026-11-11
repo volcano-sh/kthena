@@ -55,28 +55,30 @@ func (mc *ModelBoosterController) createOrUpdateModelServing(ctx context.Context
 			klog.Errorf("failed to create ModelServing %s: %v", klog.KObj(modelServing), err)
 			return err
 		}
+	} else if oldModelServing.Labels[utils.RevisionLabelKey] == modelServing.Labels[utils.RevisionLabelKey] {
+		// The revision label is derived from the ModelBooster, so an equal label
+		// means the user changed nothing. Skip the legacy-child check here: the
+		// converter's output can differ between controller versions, and that
+		// difference is not a change the user asked for.
+		klog.Infof("ModelServing %s of model %s does not need to update", modelServing.Name, model.Name)
 	} else {
 		preserveLegacyTemplateRevision(oldModelServing, modelServing)
 		if err := msplugins.PreserveChildPluginConfiguration(oldModelServing, modelServing); err != nil {
 			return err
 		}
-		if oldModelServing.Labels[utils.RevisionLabelKey] != modelServing.Labels[utils.RevisionLabelKey] {
-			updated := oldModelServing.DeepCopy()
-			updated.Spec = modelServing.Spec
-			if updated.Labels == nil {
-				updated.Labels = make(map[string]string)
-			}
-			for key, value := range modelServing.Labels {
-				updated.Labels[key] = value
-			}
-			if _, err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
-				klog.Errorf("failed to update ModelServing %s: %v", klog.KObj(modelServing), err)
-				return err
-			}
-			klog.V(4).Infof("Updated ModelServing %s for model %s", modelServing.Name, model.Name)
-		} else {
-			klog.Infof("ModelServing %s of model %s does not need to update", modelServing.Name, model.Name)
+		updated := oldModelServing.DeepCopy()
+		updated.Spec = modelServing.Spec
+		if updated.Labels == nil {
+			updated.Labels = make(map[string]string)
 		}
+		for key, value := range modelServing.Labels {
+			updated.Labels[key] = value
+		}
+		if _, err := mc.client.WorkloadV1alpha1().ModelServings(model.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+			klog.Errorf("failed to update ModelServing %s: %v", klog.KObj(modelServing), err)
+			return err
+		}
+		klog.V(4).Infof("Updated ModelServing %s for model %s", modelServing.Name, model.Name)
 	}
 
 	// Delete old ModelServings that are not the current one
