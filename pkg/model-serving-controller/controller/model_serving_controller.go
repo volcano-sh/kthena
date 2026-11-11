@@ -1179,6 +1179,19 @@ func (c *ModelServingController) scaleUpRoles(
 		return err
 	}
 
+	chainsByRevision := make(map[string]*plugins.Chain)
+	getChain := func(rev string, workload *workloadv1alpha1.ModelServing) (*plugins.Chain, error) {
+		if ch, ok := chainsByRevision[rev]; ok {
+			return ch, nil
+		}
+		ch, err := c.buildPluginChain(workload)
+		if err != nil {
+			return nil, err
+		}
+		chainsByRevision[rev] = ch
+		return ch, nil
+	}
+
 	// Helper function to create a Role
 	createRole := func(ordinal int, revision string) error {
 		workload, err := c.revisionHistory(ctx, ms).workload(ctx, revision)
@@ -1201,13 +1214,16 @@ func (c *ModelServingController) scaleUpRoles(
 		if roleCoordination(ms) != nil && ordinal >= roleReplicas(targetRole) {
 			createCtx = context.WithValue(createCtx, coordinatedSurgeKey{}, true)
 		}
-		appliedHash, err := c.createPodsByRole(createCtx, *roleToApply.DeepCopy(), ms, ordinal, servingGroupOrdinal, revision, roleTemplateHash)
+		chain, err := getChain(revision, workload)
 		if err != nil {
-			return fmt.Errorf("create role %s for ServingGroup %s failed: %v", utils.GenerateRoleID(targetRole.Name, ordinal), groupName, err)
+			return err
+		}
+		if err := c.createPodsByRoleWithContext(createCtx, roleToApply, workload, ordinal, servingGroupOrdinal, revision, roleTemplateHash, chain); err != nil {
+			return fmt.Errorf("create role %s for ServingGroup %s failed: %w", utils.GenerateRoleID(targetRole.Name, ordinal), groupName, err)
 		}
 		// Insert new Role to global storage
 		roleID := utils.GenerateRoleID(targetRole.Name, ordinal)
-		c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleID, revision, appliedHash)
+		c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleID, revision, roleTemplateHash)
 		if roleCoordination(ms) != nil {
 			c.enqueueModelServingAfter(ms, enqueueAfter)
 		}
@@ -1353,6 +1369,19 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			return err
 		}
 	}
+	chainsByRevision := make(map[string]*plugins.Chain)
+	getApplicableChain := func(rev string, appl *workloadv1alpha1.ModelServing) (*plugins.Chain, error) {
+		if ch, ok := chainsByRevision[rev]; ok {
+			return ch, nil
+		}
+		ch, err := c.buildPluginChain(appl)
+		if err != nil {
+			return nil, err
+		}
+		chainsByRevision[rev] = ch
+		return ch, nil
+	}
+
 	for _, roleObj := range roleList {
 		if roleCoordination(ms) != nil {
 			live, _, err := c.coordinatedLiveRole(ctx, ms, groupName, targetRole.Name, roleObj)
@@ -1426,7 +1455,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 		if err != nil {
 			return err
 		}
-		applicableChain, err := c.buildPluginChain(applicable)
+		applicableChain, err := getApplicableChain(revisionToUse, applicable)
 		if err != nil {
 			return err
 		}
@@ -2969,19 +2998,30 @@ func (c *ModelServingController) runRoleDeletePlugins(ctx context.Context, ms *w
 
 func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupIndex int, revision string, roles []workloadv1alpha1.Role) error {
 	servingGroupName := utils.GenerateServingGroupName(ms.Name, servingGroupIndex)
+	applicable, err := c.modelServingForRevision(ctx, ms, revision)
+	if err != nil {
+		return err
+	}
+	chain, err := c.buildPluginChain(applicable)
+	if err != nil {
+		return err
+	}
 	for _, role := range roles {
-		roleTemplateHash, err := utils.RoleRevisionHash(ms, role.Name)
+		roleTemplateHash, err := utils.RoleRevisionHash(applicable, role.Name)
+		if err != nil {
+			return err
+		}
+		roleToApply, err := historicalRole(applicable, role.Name, revision)
 		if err != nil {
 			return err
 		}
 		replicas := int(*role.Replicas)
 		for i := 0; i < replicas; i++ {
-			appliedHash, err := c.createPodsByRole(ctx, *role.DeepCopy(), ms, i, servingGroupIndex, revision, roleTemplateHash)
-			if err != nil {
+			if err := c.createPodsByRoleWithContext(ctx, roleToApply, applicable, i, servingGroupIndex, revision, roleTemplateHash, chain); err != nil {
 				return err
 			}
 			roleID := utils.GenerateRoleID(role.Name, i)
-			c.store.AddRole(utils.GetNamespaceName(ms), servingGroupName, role.Name, roleID, revision, appliedHash)
+			c.store.AddRole(utils.GetNamespaceName(ms), servingGroupName, role.Name, roleID, revision, roleTemplateHash)
 			// Emit event for new role entering Creating state
 			message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", role.Name, roleID, servingGroupName)
 			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)

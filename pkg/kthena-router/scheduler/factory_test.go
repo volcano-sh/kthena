@@ -49,6 +49,7 @@ func TestRegisterDefaultPlugins(t *testing.T) {
 	// Test that all expected score plugins are registered
 	expectedScorePlugins := []string{
 		plugins.GPUCacheUsagePluginName,
+		plugins.KVCacheUsagePluginName,
 		plugins.LeastLatencyPluginName,
 		plugins.LeastRequestPluginName,
 		plugins.RandomPluginName,

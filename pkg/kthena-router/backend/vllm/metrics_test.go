@@ -113,6 +113,25 @@ func TestGetCountMetricsInfo(t *testing.T) {
 				utils.RequestRunningNum: 7.0,
 			},
 		},
+		{
+			name: "falls back to legacy vllm:gpu_cache_usage_perc when vllm:kv_cache_usage_perc is absent",
+			allMetrics: map[string]*dto.MetricFamily{
+				LegacyGPUCacheUsage: gaugeMetricFamily(0.42),
+			},
+			want: map[string]float64{
+				utils.KVCacheUsage: 0.42,
+			},
+		},
+		{
+			name: "prefers vllm:kv_cache_usage_perc when both current and legacy series are present",
+			allMetrics: map[string]*dto.MetricFamily{
+				KVCacheUsage:        gaugeMetricFamily(0.65),
+				LegacyGPUCacheUsage: gaugeMetricFamily(0.25),
+			},
+			want: map[string]float64{
+				utils.KVCacheUsage: 0.65,
+			},
+		},
 	}
 
 	for _, tt := range tests {

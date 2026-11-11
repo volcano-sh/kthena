@@ -84,6 +84,7 @@ type PodInfo struct {
 }
 
 type Metrics struct {
+	KVCacheUsage      float64 `json:"kvCacheUsage"`
 	GPUCacheUsage     float64 `json:"gpuCacheUsage"`
 	RequestWaitingNum float64 `json:"requestWaitingNum"`
 	RequestRunningNum float64 `json:"requestRunningNum"`
@@ -481,8 +482,10 @@ func (h *DebugHandler) convertPodInfoToResponse(namespacedName types.NamespacedN
 	response.ModelServers = msNames
 
 	// Add metrics
+	kvCacheUsage := podInfo.GetGPUCacheUsage()
 	response.Metrics = &Metrics{
-		GPUCacheUsage:     podInfo.GetGPUCacheUsage(),
+		KVCacheUsage:      kvCacheUsage,
+		GPUCacheUsage:     kvCacheUsage,
 		RequestWaitingNum: podInfo.GetRequestWaitingNum(),
 		RequestRunningNum: podInfo.GetRequestRunningNum(),
 		TPOT:              podInfo.GetTPOT(),

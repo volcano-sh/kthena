@@ -69,6 +69,9 @@ func registerDefaultPlugins(registry *PluginRegistry) {
 	registry.registerScorePlugin(plugins.GPUCacheUsagePluginName, func(_ datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
 		return plugins.NewGPUCacheUsage()
 	})
+	registry.registerScorePlugin(plugins.KVCacheUsagePluginName, func(_ datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
+		return plugins.NewKVCacheUsage()
+	})
 	registry.registerScorePlugin(plugins.LeastLatencyPluginName, func(_ datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
 		return plugins.NewLeastLatency(args)
 	})
