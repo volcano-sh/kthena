@@ -28,6 +28,7 @@ import (
 	msplugins "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -60,7 +61,7 @@ func TestLWSLegacyChildUpdates(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lws := &lwsv1.LeaderWorkerSet{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: "default", UID: "parent"}, Spec: lwsv1.LeaderWorkerSetSpec{Replicas: ptr.To[int32](3), LeaderWorkerTemplate: lwsv1.LeaderWorkerTemplate{Size: ptr.To[int32](2), WorkerTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "old"}}}}}}}
-			c := &LWSController{}
+			c := &LWSController{kubeClient: kubefake.NewSimpleClientset()}
 			lws.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.Containers[0].Ports = []corev1.ContainerPort{{ContainerPort: 8100}}
 			old := c.constructModelServing(lws).DeepCopy()
 			old.Spec.Plugins = []workload.PluginSpec{{Name: msplugins.LWSLabelsPluginName, Type: workload.PluginTypeBuiltIn}}

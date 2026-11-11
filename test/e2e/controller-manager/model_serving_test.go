@@ -1081,13 +1081,20 @@ func TestLWSAPIBasic(t *testing.T) {
 
 	// Verify LWS standard labels are injected by kthena plugin
 	expectedGroupIndex := "0"
-	expectedGroupKey := lwsutils.Sha1Hash(lwsName + "-0")
+	// Native LWS derives the group key from namespace/leaderPodName.
+	expectedGroupKey := lwsutils.Sha1Hash(fmt.Sprintf("%s/%s-0", testNamespace, lwsName))
 	expectedWorkerIndexSet := map[string]bool{"0": true, "1": true}
 	for _, pod := range podList.Items {
 		assert.Equal(t, lwsName, pod.Labels[lwsv1.SetNameLabelKey], "pod %s should have LWS name label", pod.Name)
 		assert.Equal(t, expectedGroupIndex, pod.Labels[lwsv1.GroupIndexLabelKey], "pod %s should have LWS group-index label", pod.Name)
 
 		workerIndex := pod.Labels[lwsv1.WorkerIndexLabelKey]
+		hostname := lwsName + "-0"
+		if workerIndex != "0" {
+			hostname += "-" + workerIndex
+		}
+		assert.Equal(t, hostname, pod.Spec.Hostname)
+		assert.Equal(t, lwsName, pod.Spec.Subdomain)
 		assert.True(t, expectedWorkerIndexSet[workerIndex], "pod %s should have LWS worker-index label in {0,1}, got %q", pod.Name, workerIndex)
 
 		assert.Equal(t, expectedGroupKey, pod.Labels[lwsv1.GroupUniqueHashLabelKey], "pod %s should have correct LWS group-key label", pod.Name)
