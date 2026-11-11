@@ -438,6 +438,8 @@ spec:
 A ModelServing with a single `ServingGroup` and a single Role replica (`replicas: 1` and the Role's `replicas: 1`) is also supported. An in-place update takes that `ServingGroup` out of service, so the service is unavailable until it is Ready on the new image. If this interruption is not acceptable, set `maxUnavailable: 0` and `maxSurge: 1` so that the `ServingGroup` is recreated next to a surge `ServingGroup` instead, or run more than one `ServingGroup`.
 :::
 
+For a step-by-step walkthrough, fallback reasons, and troubleshooting, see the [In-place Update](./inplace-update.md) guide.
+
 ## Gang Scheduling and Network Topology
 
 Gang scheduling is a feature that allows pods to be scheduled together. This is useful when you have a set of pods that need to be scheduled together. For example, you may have a set of pods that need to be scheduled together because they are pods of the same model.
