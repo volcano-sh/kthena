@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
@@ -38,6 +39,9 @@ import (
 	controllerutils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
+
+// surgeAnnotationKey marks Pods of temporary maxSurge capacity.
+const surgeAnnotationKey = "modelserving.volcano.sh/surge"
 
 func TestModelServingRollingUpdateMaxUnavailable(t *testing.T) {
 	ctx, kthenaClient, _ := setupControllerManagerE2ETest(t)
@@ -164,8 +168,7 @@ func TestModelServingRollingUpdateMaxSurge(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify that one additional Running ServingGroup becomes available while
-	// old and new revisions coexist. Ordinals do not identify surge capacity:
-	// binpack scale-down may leave any ordinal in the final replica set. Use a
+	// old and new revisions coexist. Use a
 	// watch started before the update because the new group becoming Ready
 	// immediately triggers deletion of an old group, making this window too
 	// short to observe reliably with periodic List calls.
@@ -234,6 +237,47 @@ func TestModelServingRollingUpdateMaxSurge(t *testing.T) {
 	assert.Equal(t, replicas, finalMS.Status.AvailableReplicas)
 	assert.Equal(t, replicas, finalMS.Status.UpdatedReplicas)
 	assert.Equal(t, finalMS.Status.UpdateRevision, finalMS.Status.CurrentRevision)
+	waitForRolloutOrdinalsContracted(t, ctx, kubeClient, modelServing.Name, workload.GroupNameLabelKey, modelServing.Name, replicas)
+}
+
+// waitForRolloutOrdinalsContracted waits until the live Pods selected by the
+// ModelServing name occupy exactly the ordinals [0, replicas) of parent under
+// labelKey and none still carries the temporary surge marker. A rollout must
+// retire its surge capacity instead of leaving sparse ordinals behind.
+func waitForRolloutOrdinalsContracted(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset,
+	msName, labelKey, parent string, replicas int32) {
+	t.Helper()
+
+	want := sets.New[int]()
+	for i := 0; i < int(replicas); i++ {
+		want.Insert(i)
+	}
+	require.Eventually(t, func() bool {
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: modelServingLabelSelector(msName)})
+		if err != nil {
+			t.Logf("Failed to list Pods: %v", err)
+			return false
+		}
+		got := sets.New[int]()
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp != nil {
+				continue
+			}
+			if scope, ok := pod.Annotations[surgeAnnotationKey]; ok {
+				t.Logf("Pod %s still carries surge marker %q", pod.Name, scope)
+				return false
+			}
+			name, ordinal := controllerutils.GetParentNameAndOrdinal(pod.Labels[labelKey])
+			if name == parent && ordinal >= 0 {
+				got.Insert(ordinal)
+			}
+		}
+		if !got.Equal(want) {
+			t.Logf("%s ordinals: %v (expecting %v)", parent, sets.List(got), sets.List(want))
+			return false
+		}
+		return true
+	}, 2*time.Minute, time.Second, "rollout surge capacity was not retired to ordinals [0, %d)", replicas)
 }
 
 // TestModelServingRollingUpdateMaxSurgeWithPartition verifies that maxSurge capacity
@@ -373,6 +417,7 @@ func TestModelServingRollingUpdateMaxSurgeWithPartition(t *testing.T) {
 		require.NoError(t, err, "partition-protected Pod %s should still exist", name)
 		assert.Equal(t, uid, string(pod.UID), "partition-protected Pod %s should not be recreated", name)
 	}
+	waitForRolloutOrdinalsContracted(t, ctx, kubeClient, modelServing.Name, workload.GroupNameLabelKey, modelServing.Name, replicas)
 }
 
 // TestModelServingRollingUpdateMaxUnavailableWithBadImage tests maxUnavailable constraint when transitioning to bad image
@@ -1416,6 +1461,7 @@ func TestModelServingRoleRollingUpdateMaxSurge(t *testing.T) {
 		}
 		return true
 	}, 2*time.Minute, time.Second, "expected Role surge capacity to contract after rollout")
+	waitForRolloutOrdinalsContracted(t, ctx, kubeClient, modelServing.Name, workload.RoleIDKey, "prefill", prefillReplicas)
 
 	decodePods, err = kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: decodeSelector})
 	require.NoError(t, err)
