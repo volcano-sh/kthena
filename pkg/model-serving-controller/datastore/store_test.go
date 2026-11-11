@@ -241,6 +241,53 @@ func TestUpdateRoleStatus(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestTransitionRoleStatus(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
+	newStore := func(status RoleStatus) *store {
+		return &store{
+			servingGroup: map[types.NamespacedName]map[string]*ServingGroup{
+				key: {
+					"group0": &ServingGroup{
+						Name: "group0",
+						roles: map[string]map[string]*Role{
+							"prefill": {
+								"prefill-0": &Role{Name: "prefill-0", Status: status},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name        string
+		from, to    RoleStatus
+		wantChanged bool
+		wantStatus  RoleStatus
+	}{
+		{name: "creating role becomes running", from: RoleCreating, to: RoleRunning, wantChanged: true, wantStatus: RoleRunning},
+		{name: "running role goes back to creating", from: RoleRunning, to: RoleCreating, wantChanged: true, wantStatus: RoleCreating},
+		{name: "same status is not a change", from: RoleRunning, to: RoleRunning, wantChanged: false, wantStatus: RoleRunning},
+		{name: "deleting role is left alone", from: RoleDeleting, to: RoleRunning, wantChanged: false, wantStatus: RoleDeleting},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newStore(tt.from)
+			changed, err := s.TransitionRoleStatus(key, "group0", "prefill", "prefill-0", tt.to)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantChanged, changed)
+			assert.Equal(t, tt.wantStatus, s.GetRoleStatus(key, "group0", "prefill", "prefill-0"))
+		})
+	}
+
+	t.Run("missing role returns an error", func(t *testing.T) {
+		changed, err := newStore(RoleCreating).TransitionRoleStatus(key, "group0", "prefill", "prefill-1", RoleRunning)
+		assert.Error(t, err)
+		assert.False(t, changed)
+	})
+}
+
 func TestDeleteRole(t *testing.T) {
 	key := types.NamespacedName{Namespace: "ns1", Name: "model1"}
 
