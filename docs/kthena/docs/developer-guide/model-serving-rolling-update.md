@@ -29,7 +29,7 @@ spec:
       partition: 0
 ```
 
-With `replicas: 4` and `maxSurge: 1`, the controller temporarily changes the expected ServingGroup count from four to five while an updateable outdated ServingGroup exists. Normal replica synchronization creates or removes the required capacity; rolling-update reconciliation only selects outdated groups within the availability budget.
+With `replicas: 4` and `maxSurge: 1`, the controller temporarily changes the expected ServingGroup count from four to five while an updateable outdated ServingGroup exists. Normal replica synchronization creates the required capacity; rolling-update reconciliation selects outdated groups, and afterwards the surge groups, within the availability budget.
 
 The controller always enforces these bounds:
 
@@ -41,9 +41,13 @@ $$
 N_{available} \geq replicas - maxUnavailable
 $$
 
-An unready additional ServingGroup counts toward the replica ceiling but does not contribute to availability. If it cannot be scheduled, the rollout waits without deleting available capacity. No rollout lifecycle label or status journal is required because the expected count is derived from the observed revisions on every reconciliation.
+An unready additional ServingGroup counts toward the replica ceiling but does not contribute to availability. If it cannot be scheduled, the rollout waits without deleting available capacity. Temporary instances created beyond the desired ordinal range carry a controller-managed `modelserving.volcano.sh/surge` Pod annotation. The annotation is separate from the template and revision hash and lets the controller finish cleanup after a restart.
 
-Ordinal values do not identify surge capacity. Binpack scale-down can leave sparse ordinals or an ordinal greater than `replicas`, and that ServingGroup remains a normal replica. When the update finishes, the expected count returns to `replicas` and the regular ModelServing binpack scale-down policy selects excess groups using readiness and deletion cost. Changing `replicas` or `maxSurge` during rollout therefore changes only the target count; it does not force deletion of high ordinals. Partition protection remains ordinal-based and independent of the current replica count.
+After the last eligible outdated ServingGroup is removed, the marked surge groups stay in the expected count. Replica synchronization therefore recreates the ordinal vacated by the last replaced group, within `replicas + maxSurge`, and the rolling update then deletes the marked groups within the `maxUnavailable` budget. With `maxUnavailable: 0`, a Ready surge group stays until the recreated group is Ready; with a larger budget it can be deleted earlier. A rollout starting with `0..replicas-1` therefore returns to that ordinal range before it reports completion.
+
+Unmarked sparse or high ordinals left by ordinary binpack scale-down remain normal replicas. Increasing `replicas` to include a surge ordinal makes that group a normal replica: its Pods are kept and the annotation is removed, and a rollout that is still in progress creates a new surge group above the new range. Decreasing `replicas` uses the ordinary scale-down order over all groups and may remove a surge group. Lowering `maxSurge` stops further creation. If a surge group loses all its Pods but is itself kept (`RoleRecreate` or `None` recovery policy), the recreated Pods are not marked and the group becomes a normal replica, so that rollout can still end with a sparse ordinal. Unmarked instances from an older controller are not treated as surge.
+
+Returning to the original ordinals means a rollout with `maxSurge` starts and deletes `maxSurge` more ServingGroups than the number it replaces and takes one more step. The annotation is controller-managed; do not set it by hand.
 
 In the following we'll show how rolling update processes for a `ModelServing` with four replicas. Three Replica status are simulated here:
 
@@ -88,8 +92,8 @@ spec:
 
 Kthena evaluates Role updates across all `ServingGroups`. Because each `ServingGroup` applies the per-Role availability budget independently, `RoleRollingUpdate` is recommended for a ModelServing with a single `ServingGroup`.
 
-While an updateable outdated Role replica exists, the controller temporarily changes that Role's expected replica count from `replicas` to `replicas + maxSurge`. Normal Role replica synchronization creates and later removes the additional capacity, while rolling-update reconciliation only selects outdated replicas within the `maxUnavailable` budget. An unready new replica consumes availability budget and can naturally block further deletion.
+While an updateable outdated Role replica exists, the controller temporarily changes that Role's expected replica count from `replicas` to `replicas + maxSurge`. Normal Role replica synchronization creates the additional capacity, while rolling-update reconciliation selects outdated replicas, and afterwards the surge replicas, within the `maxUnavailable` budget. An unready new replica consumes availability budget and can naturally block further deletion.
 
-Role ordinals do not identify surge capacity. Binpack scale-down may retain sparse or high Role ordinals as normal replicas. When the update finishes, the expected count returns to `replicas`, and the existing Role scale-down policy selects excess replicas using readiness and deletion cost.
+Role rollout follows the same rules within each ServingGroup: marked surge Role instances stay in the expected count until the vacated Role ordinal is recreated, and are then deleted within that Role's budgets. Entry and worker Pods carry the marker, so the rollout finishes the same way after a controller restart. Unmarked binpack survivors keep their identities; a replica increase that covers a surge Role instance removes its annotation without changing its Pod UIDs.
 
 If `recoveryPolicy` is `ServingGroupRecreate`, deleting an outdated Role triggers recreation of its entire `ServingGroup`, which removes the resource-saving benefit of `RoleRollingUpdate`. Use `RoleRecreate` when only the outdated Role should be rebuilt.

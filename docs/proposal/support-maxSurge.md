@@ -17,9 +17,9 @@ creation-date: 2026-08-11
 
 This proposal adds `maxSurge` support to both `ServingGroupRollingUpdate` and `RoleRollingUpdate`. During an update, the ModelServing controller may temporarily create additional ServingGroups or Role replicas before deleting outdated replicas, reducing service disruption and enabling create-before-delete updates when `maxUnavailable` is zero.
 
-The implementation is count-driven and stateless. It does not introduce a dedicated surge pool, a surge lifecycle phase, or a surge identity on individual resources. While an updateable outdated replica exists, the controller temporarily raises the expected replica count from the declared replica count to `replicas + maxSurge`. Existing replica synchronization creates or removes capacity to satisfy that count, and existing rolling-update reconciliation decides which outdated resources may be deleted within the availability budget.
+The implementation is count-driven. It does not introduce a dedicated surge pool, a surge lifecycle phase, or a persisted rollout journal. While an updateable outdated replica exists, the controller temporarily raises the expected replica count from the declared replica count to `replicas + maxSurge`. Existing replica synchronization creates or removes capacity to satisfy that count, and existing rolling-update reconciliation decides which outdated resources, and afterwards which surge resources, may be deleted within the availability budget.
 
-Ordinal values identify resources but do not identify surge capacity. Kthena's binpack scale-down may leave sparse or high ordinals in the final replica set, so rollout progress is derived from observed replica counts, revisions, Role template hashes, deletion state, and readiness rather than from an ordinal boundary or persisted rollout state.
+Ordinal values identify resources but do not by themselves identify surge capacity, because Kthena's binpack scale-down may leave sparse or high ordinals in the final replica set. Instead, Pods created beyond the desired ordinal range carry a controller-managed `modelserving.volcano.sh/surge` annotation. After the outdated replicas are replaced, the marked replicas stay in the expected count until the vacated ordinals are recreated, and the rolling update then deletes them within the availability budget, so a rollout that starts from `[0, replicas)` returns to that range.
 
 ### Motivation
 
@@ -36,13 +36,13 @@ Users with spare cluster capacity should be able to create updated capacity firs
 - Preserve Kthena's existing binpack scale-down behavior, including sparse and high ordinals.
 - Preserve partition protection and historical-template recovery.
 - Recover rollout progress from observed resources after controller restart without persisting a rollout phase.
+- Return a rollout that starts from the ordinal range `[0, replicas)` to that range when it completes.
 - Keep existing behavior unchanged when `maxSurge` is omitted or resolves to zero.
 
 #### Non-Goals
 
-- Assigning a persistent surge identity to particular ServingGroups or Roles.
 - Reserving high ordinals exclusively for temporary replicas.
-- Restoring a contiguous ordinal range after rollout.
+- Compacting sparse ordinals outside a rollout. Unmarked sparse or high ordinals left by binpack scale-down or by an older controller stay as they are until the next rollout replaces them.
 - Retaining one explicitly identified surge replica for the full rollout.
 - Redesigning ControllerRevision or adding user-facing rollback support.
 - Defining traffic routing, connection draining, or request-level readiness semantics.
@@ -143,19 +143,25 @@ This model means `maxSurge` is an upper bound on temporary additional capacity, 
 
 ### Identity and Ordinals
 
-The controller does not classify replicas as stable or surge by ordinal. In particular, it does not apply the rule that ordinals below `replicas` are stable and ordinals at or above `replicas` are surge.
+The controller does not classify replicas as stable or surge by ordinal alone. Unmarked replicas are normal replicas regardless of their ordinal, so sparse or high ordinals left by binpack scale-down remain in service while no rollout runs. A rollout replaces every updateable replica and creates the replacements at the lowest missing ordinals, so it also ends a sparse layout at `[0, replicas)`.
 
-Replica synchronization fills missing ordinals in `[0, expectedCount)` when creating capacity. This normally creates a high ordinal when the existing set is contiguous, but it may fill a lower ordinal hole instead. During scale-down, existing readiness, deletion cost, partition protection, and ordinal tie-breaking select the excess resource to remove.
+Replica synchronization fills the lowest missing ordinals in `[0, expectedCount)` when creating capacity. A ServingGroup or Role instance created with an ordinal at or above the desired count carries the `modelserving.volcano.sh/surge` Pod annotation (`serving-group` or `role`) on its entry and worker Pods. This only happens while `maxSurge` raises the expected count. The annotation is not part of the template or the revision hash. An instance is surge capacity while one of its Pods carries the annotation and its ordinal is at or above the desired count.
 
-As a result, after rollout:
+Surge instances are temporary:
 
-- ordinal values may be sparse;
-- a high ordinal may remain as a normal replica;
-- a lower ordinal may have been removed;
-- the controller does not recreate resources solely to restore `[0, replicas)`;
-- no resource label or status field identifies which capacity was temporarily added.
+- once no updateable outdated replica remains, they stay in the expected count, bounded by `replicas + maxSurge`, so the ordinals vacated by the rollout are recreated;
+- the rolling update then deletes them: an unready one at once, a Ready one only while Ready capacity stays within `maxUnavailable`;
+- they keep the rollout in progress until they are deleted;
+- increasing `replicas` so that the desired range includes a surge ordinal makes the instance a normal replica: the annotation is removed and its Pods are kept. A rollout still in progress creates a new surge instance above the new range.
 
-This behavior is required to remain compatible with Kthena's binpack scale-down policy.
+As a result, a rollout that starts with `[0, replicas)` returns to that range. An explicit replica decrease keeps the existing order over all instances (NotReady first, then lower deletion cost, then the highest ordinal) and may remove a surge instance or leave sparse ordinals; the controller does not recreate unmarked resources solely to restore `[0, replicas)`. Two cases still end like a rollout without the marker, with the surge instance kept as a normal replica:
+
+- an instance created by an older controller, which has no annotation;
+- a surge instance that loses all its Pods while the instance itself is kept, because the recreated Pods are not marked. This is a surge ServingGroup under the `RoleRecreate` or `None` recovery policy and a surge Role instance under `None`. Where recovery recreates the whole instance (`ServingGroupRecreate`, or a Role instance under `RoleRecreate`), it is created marked again.
+
+Restoring the ordinals has a cost. A rollout with `maxSurge` creates and deletes `maxSurge` more replicas than before and takes one more step. With `maxUnavailable` of one or more, a surge replica can be deleted before the recreated ordinal is Ready, so Ready capacity stays at `replicas - maxUnavailable` during that step; `maxUnavailable: 0` keeps the surge replica until the recreated ordinal is Ready.
+
+The annotation is controller-managed and must not be set by hand: a replica that carries it beyond the desired range is deleted as surge capacity even when no rollout is running. An annotation of the other rollout type is ignored. Removing the annotation after a replica increase is retried until it succeeds and does not delay scaling.
 
 ### ServingGroupRollingUpdate
 
@@ -196,14 +202,13 @@ There is no additional gate that requires the number of new replicas to equal `m
 
 #### Convergence
 
-Once no updateable outdated ServingGroup remains, replica synchronization derives `N_expected = R`. If extra ServingGroups still exist, ordinary ServingGroup scale-down selects excess groups using:
+Once no updateable outdated ServingGroup remains, the expected count is `R` plus the surge ServingGroups, bounded by `R + maxSurge`:
 
-1. readiness priority, with non-ready groups removed first;
-2. lower deletion cost;
-3. higher ordinal as a tie-breaker;
-4. partition protection, with non-protected groups removed before protected groups.
+1. replica synchronization recreates the ordinals the rollout vacated;
+2. the rolling update deletes the surge ServingGroups: an unready one at once, a Ready one while Ready capacity stays at or above `R - maxUnavailable`;
+3. a ServingGroup that is being deleted still occupies capacity and does not count as available.
 
-The selected group is not necessarily the one that was created while `maxSurge` was active. This is intentional because no surge identity exists.
+With `maxUnavailable: 0`, a Ready surge ServingGroup stays until the recreated group is Ready. If the unmarked ServingGroups alone exceed `R`, which is an explicit replica decrease, the expected count is `R` and ordinary scale-down selects the excess using readiness, deletion cost, ordinal tie-breaking, and partition protection.
 
 For `replicas: 4`, `maxUnavailable: 0`, and `maxSurge: 1`, a typical count progression is:
 
@@ -212,11 +217,10 @@ For `replicas: 4`, `maxUnavailable: 0`, and `maxSurge: 1`, a typical count progr
 | Initial | 4 | 0 | 4 | All declared capacity is old. |
 | Extra capacity creating | 4 | 1 unready | 5 | The ceiling is reached, but old capacity is retained. |
 | Extra capacity ready | 4 | 1 ready | 5 | Availability permits deletion of an old group. |
-| Replacement in progress | 3 | 1 | 4 | One old group is deleted and its ordinal may be recreated. |
+| Replacement in progress | 3 | 1 | 4 | One old group is deleted and its ordinal is recreated with the new revision. |
 | Subsequent reconciliation | decreases | increases | 4 or 5 | Replica sync and rolling update continue from observed state. |
-| Converged | 0 | 4 | 4 | Expected count returns to the declared replicas. |
-
-The exact ordinal sequence and whether a particular temporary replica remains are deliberately unspecified.
+| Surge completion | 0 | 5 | 5 | The vacated ordinal is recreated; the surge group is deleted once the budget allows. |
+| Converged | 0 | 4 | 4 | Ordinals `[0, 4)` remain and the rollout completes. |
 
 ### RoleRollingUpdate
 
@@ -242,7 +246,7 @@ $$
 
 A ready additional Role increases this budget, while a Creating or Deleting new Role contributes to `newUnavailable` and can block further deletion. When a new Role becomes Running but the ServingGroup is still not Ready because the temporary Role count exceeds the declared count, the controller re-enqueues the ModelServing so rolling-update reconciliation can spend the newly available deletion budget.
 
-After no updateable outdated Role remains, its expected count returns to $R_r$. Existing Role scale-down removes excess instances according to readiness, deletion cost, ordinal tie-breaking, and partition protection. Role ordinals do not identify temporary capacity and may remain sparse or high after convergence.
+After no updateable outdated Role remains, the same rules apply within each ServingGroup: surge Role instances stay in the expected count until the vacated Role ordinals are recreated, and are then deleted within that Role's budgets. Unmarked Role instances retain their identities, including sparse or high ordinals left by binpack scale-down.
 
 A ServingGroup is not considered Running while a Role's instance count differs from that Role's declared replicas. Therefore final readiness occurs only after Role temporary capacity has contracted to the declared count.
 
@@ -318,7 +322,7 @@ Budgets and expected counts are recalculated from the latest spec on every recon
 - changing `maxUnavailable` immediately changes the deletion budget;
 - changing the template changes `UpdateRevision` or Role template hash and makes observed older resources outdated.
 
-There is no promotion or reclassification operation for high ordinals. Existing replicas simply participate in count reconciliation and rollout selection according to their observed revision, readiness, deletion cost, and partition protection.
+The only reclassification is adoption: when `replicas` grows to include a surge ordinal, the controller removes the surge annotation and the instance becomes a normal replica without Pod replacement. Otherwise, existing replicas participate in count reconciliation and rollout selection according to their observed revision, readiness, deletion cost, and partition protection.
 
 ### Failure Behavior
 
@@ -327,7 +331,8 @@ There is no promotion or reclassification operation for high ordinals. Existing 
 - **A resource is manually deleted:** normal reconciliation recreates missing required capacity while an update remains active or converges to the declared count after the update.
 - **Deletion is in progress:** deleting resources continue to occupy datastore identity until deletion is observed, preventing ordinal reuse and duplicate creation.
 - **The template changes again:** the latest revision or Role template hash becomes the target and expected counts are re-derived from current observations.
-- **The controller restarts:** rollout progress is reconstructed without a persisted surge identity or phase.
+- **The controller restarts:** rollout progress is reconstructed from observed resources and surge annotations, without a persisted phase.
+- **A surge instance loses all its Pods but is itself kept:** the recreated Pods are not marked, so the instance becomes a normal replica and that rollout can end with a sparse ordinal, as it did before surge instances were marked. See Identity and Ordinals for the recovery policies this applies to.
 
 ### Backward Compatibility
 
@@ -341,7 +346,7 @@ The field is optional, so existing API clients remain source compatible. Adding 
 - Webhook tests for malformed values, negative values, rollout granularity, and the `maxUnavailable == 0 && maxSurge == 0` rule.
 - Controller tests for temporary ServingGroup and Role expected counts.
 - Controller tests proving ready additional capacity increases deletion budget and unready additional capacity blocks deletion.
-- Controller tests proving high or sparse ordinals may remain after binpack scale-down.
+- Controller tests proving unmarked high or sparse ordinals remain after binpack scale-down, and that surge replicas are retired after the vacated ordinals are recreated.
 - Controller tests for status counts and revision promotion after capacity contracts.
 - Controller tests for partition-protected historical template recovery.
 - E2E for `ServingGroupRollingUpdate` with `maxUnavailable: 0` and `maxSurge: 1`, validating temporary extra capacity, coexistence of old and new revisions, and final contraction.
@@ -361,11 +366,11 @@ A status journal could store a baseline replica count, temporary replica identit
 
 #### Classify high ordinals as surge replicas
 
-The controller could define ordinals at or above the desired count as temporary and always delete them after rollout. That conflicts with binpack scale-down, where high or sparse ordinals are valid normal replicas, and would force unnecessary recreation solely to restore names. The implementation therefore does not infer lifecycle identity from ordinal values.
+The controller could define ordinals at or above the desired count as temporary and always delete them after rollout. That conflicts with binpack scale-down, where high or sparse ordinals are valid normal replicas, and would force unnecessary recreation solely to restore names. The implementation therefore marks only the replicas it creates as surge capacity and does not infer lifecycle identity from ordinal values alone.
 
 #### Retain a dedicated surge pool through the full rollout
 
-An explicit pool could guarantee that the same additional replicas remain until all lower ordinals are replaced. It would require stable/surge identity, separate readiness rules, cleanup phases, and more complex recovery semantics. The implemented design instead temporarily changes the expected count and lets ordinary synchronization and deletion policy select resources from current state.
+An explicit pool could guarantee that the same additional replicas remain until all lower ordinals are replaced. It would require separate readiness rules, cleanup phases, and more complex recovery semantics. The implemented design instead temporarily changes the expected count, marks the replicas it creates beyond the desired range, and lets ordinary synchronization and the rolling update select resources from current state.
 
 #### Continue using only maxUnavailable
 
