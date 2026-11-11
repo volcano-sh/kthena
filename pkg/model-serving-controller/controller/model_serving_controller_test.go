@@ -8144,7 +8144,8 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 			}
 
 			groups := append(tt.runningOutdatedGroups, tt.notRunningOutdatedGroups...)
-			result, err := controller.deleteOutdatedServingGroups(context.Background(), ms, tt.maxScaleDown, groups, utils.ModelServingRevision(ms))
+			budget := rolloutBudget{total: tt.maxScaleDown, healthy: tt.maxScaleDown}
+			result, err := controller.deleteOutdatedServingGroups(context.Background(), ms, budget, groups, utils.ModelServingRevision(ms))
 
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedUpdateCount, result)
@@ -8535,7 +8536,7 @@ func TestServingGroupUpdateCreatesSurgeWithoutStoredPhase(t *testing.T) {
 	assert.Equal(t, "new", groups[2].Revision)
 }
 
-func TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups(t *testing.T) {
+func TestServingGroupRollingUpdateCountsUnavailableProtectedGroups(t *testing.T) {
 	controller, err := NewModelServingController(
 		kubefake.NewSimpleClientset(),
 		kthenafake.NewSimpleClientset(),
@@ -8577,7 +8578,58 @@ func TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups(t *testing.T
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, group.ordinal), group.status))
 	}
 	require.NoError(t, controller.manageRollingUpdateWithPolicy(context.Background(), ms, "new", &roleRolloutPolicy{}))
-	assert.Equal(t, datastore.ServingGroupNotFound, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 2)))
+	// API contract 2.3: protected faults consume actual healthy-delete credit;
+	// maxScaleDown alone is not permission to cross the Ready floor.
+	assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 2)))
+}
+
+func TestServingGroupRollingUpdateAvailabilityLedger(t *testing.T) {
+	// API v2.11 section 2.3: Q is total cleanup allowance, B is healthy deletion
+	// allowance; existing deletions spend Q exactly once and never supply Ready.
+	for _, tc := range []struct {
+		name      string
+		budget    int
+		partition int
+		statuses  []datastore.ServingGroupStatus
+		target    []int
+		deleted   []int
+	}{
+		{"protected fault leaves no healthy credit", 1, 1, []datastore.ServingGroupStatus{"Creating", "Running", "Running"}, nil, nil},
+		{"old low fault precedes healthy high candidate", 1, 0, []datastore.ServingGroupStatus{"Creating", "Running", "Running"}, nil, []int{0}},
+		{"current unready target holds its allowance", 1, 0, []datastore.ServingGroupStatus{"Creating", "Running", "Running"}, []int{0}, nil},
+		{"low deletion cannot be issued again to high faults", 2, 0, []datastore.ServingGroupStatus{"Running", "Running", "Deleting", "Creating", "Creating"}, nil, []int{4}},
+		{"all old faults recover within total allowance", 2, 0, []datastore.ServingGroupStatus{"Creating", "Creating", "Creating", "Creating", "Creating"}, nil, []int{3, 4}},
+		{"one target Ready releases one allowance without batch barrier", 2, 0, []datastore.ServingGroupStatus{"Running", "Running", "Running", "Creating", "Running"}, []int{3, 4}, []int{2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := semanticRevisionTestModelServing("availability", "target")
+			ms.Spec.Replicas = ptr.To(int32(len(tc.statuses)))
+			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					MaxUnavailable: ptr.To(intstr.FromInt(tc.budget)), Partition: ptr.To(intstr.FromInt(tc.partition)),
+				}}
+			c := newRevisionTestController(t, ms)
+			recordDifferentRevision(t, c, ms, "old")
+			revision, key := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms)
+			for ordinal, status := range tc.statuses {
+				applied := "old"
+				if slices.Contains(tc.target, ordinal) {
+					applied = revision
+				}
+				c.store.AddServingGroup(key, ordinal, applied)
+				require.NoError(t, c.store.UpdateServingGroupStatus(key, fmt.Sprintf("availability-%d", ordinal), status))
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				require.NoError(t, c.manageRollingUpdate(context.Background(), ms, revision))
+				for ordinal, status := range tc.statuses {
+					if slices.Contains(tc.deleted, ordinal) {
+						status = datastore.ServingGroupNotFound
+					}
+					require.Equal(t, status, c.store.GetServingGroupStatus(key, fmt.Sprintf("availability-%d", ordinal)), "ordinal %d, retry %d", ordinal, attempt)
+				}
+			}
+		})
+	}
 }
 
 func TestSyncServingGroupReplicasHonorsReducedMaxSurge(t *testing.T) {

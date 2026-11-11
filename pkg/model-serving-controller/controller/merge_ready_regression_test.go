@@ -26,6 +26,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -85,6 +86,115 @@ func requireNoMergeReadyPodMutations(t *testing.T, actions []clienttesting.Actio
 		}
 		require.Contains(t, []string{"get", "list", "watch"}, action.GetVerb(), "unexpected Pod mutation during observation: %s", action.GetVerb())
 	}
+}
+
+func TestServingGroupRolloutRechecksCompleteLiveMembers(t *testing.T) {
+	for _, variant := range []string{"complete", "worker unready", "worker missing", "worker terminating", "foreign worker", "replacement target"} {
+		t.Run(variant, func(t *testing.T) {
+			ms := semanticRevisionTestModelServing("live-budget", "target")
+			ms.ResourceVersion = "1"
+			ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &api.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(0)), MaxSurge: ptr.To(intstr.FromInt(1))}}
+			ms.Spec.Template.Roles[0].WorkerReplicas = 1
+			ms.Spec.Template.Roles[0].WorkerTemplate = ms.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+			c := newRevisionTestController(t, ms)
+			old := ms.DeepCopy()
+			old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old"
+			recordTestRevision(t, c.kubeClientSet, old, "old")
+			key, target := utils.GetNamespaceName(ms), utils.ModelServingRevision(ms)
+			var instances [][]*corev1.Pod
+			for ordinal, revision := range []string{"old", target} {
+				group, role := fmt.Sprintf("%s-%d", ms.Name, ordinal), ms.Spec.Template.Roles[0]
+				if ordinal == 0 {
+					role = old.Spec.Template.Roles[0]
+				}
+				c.store.AddServingGroup(key, ordinal, revision)
+				instances = append(instances, addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role)))
+				require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+			}
+			worker := instances[1][1].DeepCopy()
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			switch variant {
+			case "worker unready":
+				worker.Status.Conditions[0].Status = corev1.ConditionFalse
+				_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(context.Background(), worker, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			case "worker missing":
+				require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(context.Background(), worker.Name, metav1.DeleteOptions{}))
+			case "worker terminating":
+				worker.DeletionTimestamp = ptr.To(metav1.Now())
+				_, err := client.CoreV1().Pods(ms.Namespace).Update(context.Background(), worker, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			case "foreign worker":
+				worker.OwnerReferences[0].UID = "another-owner"
+				_, err := client.CoreV1().Pods(ms.Namespace).Update(context.Background(), worker, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			case "replacement target":
+				for _, pod := range instances[0] {
+					replacement := pod.DeepCopy()
+					replacement.UID += "-replacement"
+					replacement.Labels[api.RevisionLabelKey] = target
+					require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(context.Background(), pod.Name, metav1.DeleteOptions{}))
+					_, err := client.CoreV1().Pods(ms.Namespace).Create(context.Background(), replacement, metav1.CreateOptions{})
+					require.NoError(t, err)
+				}
+			}
+			// Deliberately leave informer/store Ready, revision and UID stale.
+			client.ClearActions()
+			require.NoError(t, c.manageRollingUpdate(context.Background(), ms, target))
+			if variant == "complete" {
+				_, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), instances[0][0].Name, metav1.GetOptions{})
+				require.True(t, apierrors.IsNotFound(err), "complete surge supplies one healthy-delete allowance")
+			} else {
+				requireNoMergeReadyPodMutations(t, client.Actions())
+				actual, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), instances[0][0].Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				if variant == "replacement target" {
+					require.NotEqual(t, instances[0][0].UID, actual.UID)
+				} else {
+					require.Equal(t, instances[0][0].UID, actual.UID)
+				}
+			}
+		})
+	}
+}
+
+func TestOrdinaryReadinessLossEnqueuesWithoutRecovery(t *testing.T) {
+	ms := semanticRevisionTestModelServing("probe-readiness", "target")
+	ms.ResourceVersion = "1"
+	ms.Status.CurrentRevision = utils.ModelServingRevision(ms)
+	c := newRevisionTestController(t, ms)
+	c.initialSync.Store(true)
+	key, group, revision := utils.GetNamespaceName(ms), ms.Name+"-0", utils.ModelServingRevision(ms)
+	c.store.AddServingGroup(key, 0, revision)
+	pod := addMergeReadyInstance(t, c, ms, group, ms.Spec.Template.Roles[0], 0, revision, revision, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]))[0]
+	require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	for _, ready := range []bool{false, true, false} {
+		updated := pod.DeepCopy()
+		updated.Status.Conditions[0].Status = corev1.ConditionFalse
+		if ready {
+			updated.Status.Conditions[0].Status = corev1.ConditionTrue
+		}
+		_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(context.Background(), updated, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		require.NoError(t, c.podsInformer.GetIndexer().Update(updated))
+		client.ClearActions()
+		c.updatePod(pod, updated)
+		require.NotZero(t, c.workqueue.Len(), "both directions must reconcile complete availability")
+		require.NoError(t, c.syncModelServing(context.Background(), ms.Namespace+"/"+ms.Name))
+		actual, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(context.Background(), ms.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		if ready {
+			require.EqualValues(t, 1, actual.Status.AvailableReplicas)
+		} else {
+			require.Zero(t, actual.Status.AvailableReplicas)
+		}
+		requireNoMergeReadyPodMutations(t, client.Actions())
+	}
+	require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupDeleting))
+	require.NoError(t, c.handleReadyPod(ms, group, pod))
+	require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(key, group))
 }
 
 func TestCoordinatedStableReconcileReadsDoNotGrowPerInstance(t *testing.T) {
