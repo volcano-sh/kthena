@@ -136,7 +136,7 @@ For each in-scope Role instance with a `workerTemplate`, the plugin maintains tw
 | Entry Service | Only the Entry Pod | Preserves the existing Service name and `ENTRY_ADDRESS=<entry-service>.<namespace>`; workers resolve the Entry address rather than the whole member set |
 | Discovery Service | Entry and all Worker Pods in the same Role instance | Provides individual Pod records under a separate, stable Service name |
 
-The plugin sets each newly created Pod's hostname to its generated Pod name and its subdomain to the discovery Service. A member's address is `<pod-hostname>.<discovery-service>.<namespace>`. Services publish addresses before readiness so members can initialize together. Inspect the Pod's `spec.subdomain` for the generated discovery name rather than deriving it from `ENTRY_ADDRESS`.
+For LWS-converted workloads, the plugin preserves the shared subdomain and hostnames set by the LWS plugin. For other workloads, it sets each newly created Pod's hostname to its generated Pod name and its subdomain to the discovery Service. A member's address is `<pod-hostname>.<discovery-service>.<namespace>`. Services publish addresses before readiness so members can initialize together. Inspect the Pod's `spec.subdomain` for the generated discovery name rather than deriving it from `ENTRY_ADDRESS`.
 
 The plugin accepts `scope.roles`; `scope.target` must be omitted or `All`. A Role without `workerTemplate` gets neither these Services nor the generated DNS settings. A non-nil `workerTemplate` still qualifies when `workerReplicas` is zero. Desired Services are recovered after accidental deletion. They are auxiliary resources: their presence, absence, or terminating state does not establish whether a Role or ServingGroup exists.
 

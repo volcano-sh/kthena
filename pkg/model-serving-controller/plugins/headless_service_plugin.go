@@ -81,8 +81,10 @@ func (p *HeadlessServicePlugin) OnPodCreate(ctx context.Context, req *HookReques
 		return err
 	}
 	entry := utils.GeneratePodName(req.ServingGroup, req.RoleID, 0)
-	req.Pod.Spec.Hostname = req.Pod.Name
-	req.Pod.Spec.Subdomain = DiscoveryServiceName(entry)
+	if !req.lwsPodDNS {
+		req.Pod.Spec.Hostname = req.Pod.Name
+		req.Pod.Spec.Subdomain = DiscoveryServiceName(entry)
+	}
 	utils.AddPodEnvVars(req.Pod, corev1.EnvVar{Name: workloadv1alpha1.EntryAddressEnv, Value: entry + "." + req.ModelServing.Namespace})
 	return nil
 }

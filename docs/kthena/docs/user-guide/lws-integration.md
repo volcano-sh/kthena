@@ -44,14 +44,13 @@ When Kthena's LWS integration is enabled:
 
 ### DNS and existing generated objects
 
-The generated Role retains its worker template even at size 1. The
-`headless-service` plugin therefore maintains an entry-only Service and a
-separate member-discovery Service for that Role, injects `ENTRY_ADDRESS`, and
-sets generated Pod hostname/subdomain fields. This is Kthena's per-Role DNS
-layout; it does not provide the native LWS shared `<lws-name>` subdomain,
-`<lws-name>-<group-index>` leader hostname, or `LWS_LEADER_ADDRESS` by itself.
-Applications that derive worker hostnames from native LWS addresses need that
-separate integration verified before deployment.
+The LWS controller creates a shared headless Service named after the LWS.
+New Pods use this Service as their subdomain. Leader hostnames are
+`<lws-name>-<group-index>` and worker hostnames append `-<worker-index>`.
+The LWS plugin injects `LWS_LEADER_ADDRESS`, `LWS_GROUP_SIZE`, and
+`LWS_WORKER_INDEX` into containers and init containers. Existing Pods retain
+their DNS settings until replaced. The per-Role headless plugin continues
+to supply the Entry Service and `ENTRY_ADDRESS`, including at size 1.
 
 ModelServing plugin chains are immutable. An existing generated ModelServing
 without `headless-service` cannot acquire it through an LWS size update or a

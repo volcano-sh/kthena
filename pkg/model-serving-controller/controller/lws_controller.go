@@ -475,7 +475,7 @@ func projectLWSConditions(lws *lwsv1.LeaderWorkerSet, ms *workloadv1alpha1.Model
 		string(lwsv1.LeaderWorkerSetUpdateInProgress): {},
 	}
 
-	conditions := make([]metav1.Condition, 0, len(ms.Status.Conditions))
+	var conditions []metav1.Condition
 	for _, condition := range lws.Status.Conditions {
 		if _, managed := managedTypes[condition.Type]; !managed {
 			conditions = append(conditions, condition)

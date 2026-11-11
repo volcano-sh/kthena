@@ -38,6 +38,8 @@ type HookRequest struct {
 	Pod           *corev1.Pod
 	KubeClient    kubernetes.Interface
 	ServiceLister listerv1.ServiceLister
+	// lwsPodDNS records that the LWS plugin configured this Pod for its shared Service.
+	lwsPodDNS bool
 	// Cleanup retains auxiliary UID targets across retries of one Role deletion.
 	Cleanup *RoleCleanup
 }
