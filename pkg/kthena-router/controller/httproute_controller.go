@@ -392,9 +392,11 @@ func (c *HTTPRouteController) updateHTTPRouteStatus(httpRoute *gatewayv1.HTTPRou
 	now := metav1.Now()
 	controllerName := gatewayv1.GatewayController(ControllerName)
 
-	var desiredParents []gatewayv1.RouteParentStatus
+	// Build our desired parent status entries, keyed by parent reference identity.
+	desiredByParent := make(map[string]gatewayv1.RouteParentStatus)
 	for _, parentRef := range acceptedParentRefs {
-		desiredParents = append(desiredParents, gatewayv1.RouteParentStatus{
+		key := parentRefKey(parentRef)
+		desiredByParent[key] = gatewayv1.RouteParentStatus{
 			ParentRef:      parentRef,
 			ControllerName: controllerName,
 			Conditions: []metav1.Condition{
@@ -415,35 +417,94 @@ func (c *HTTPRouteController) updateHTTPRouteStatus(httpRoute *gatewayv1.HTTPRou
 					Message:            "All backend references are resolved",
 				},
 			},
-		})
-	}
-
-	// Check if status is already correct
-	if len(current.Status.Parents) == len(desiredParents) {
-		allCorrect := true
-		for i, p := range current.Status.Parents {
-			accepted := apimeta.FindStatusCondition(p.Conditions, string(gatewayv1.RouteConditionAccepted))
-			resolved := apimeta.FindStatusCondition(p.Conditions, string(gatewayv1.RouteConditionResolvedRefs))
-			if accepted == nil || accepted.Status != metav1.ConditionTrue ||
-				resolved == nil || resolved.Status != metav1.ConditionTrue {
-				allCorrect = false
-				break
-			}
-			_ = i
-		}
-		if allCorrect {
-			return nil
 		}
 	}
 
+	// Merge: preserve foreign controller entries, update only our own.
 	updated := current.DeepCopy()
-	updated.Status.Parents = desiredParents
+	var newParents []gatewayv1.RouteParentStatus
+	ourEntriesSet := make(map[string]bool)
+
+	for _, existing := range updated.Status.Parents {
+		if existing.ControllerName != controllerName {
+			// Keep entries from other controllers untouched.
+			newParents = append(newParents, existing)
+			continue
+		}
+		// This is our entry — check if we still manage this parent.
+		key := parentRefKey(existing.ParentRef)
+		if desired, ok := desiredByParent[key]; ok {
+			// Still ours and accepted — update conditions.
+			newParents = append(newParents, desired)
+			ourEntriesSet[key] = true
+		}
+		// If not in desiredByParent, we drop the entry (route no longer accepted
+		// by this parent, or parent was removed).
+	}
+
+	// Add any desired entries we haven't already written.
+	for key, desired := range desiredByParent {
+		if !ourEntriesSet[key] {
+			newParents = append(newParents, desired)
+		}
+	}
+
+	// Check if anything actually changed.
+	if routeStatusEqual(updated.Status.Parents, newParents) {
+		return nil
+	}
+
+	updated.Status.Parents = newParents
 
 	_, err = c.gatewayClient.GatewayV1().HTTPRoutes(httpRoute.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to update httproute status: %w", err)
 	}
 
-	klog.V(2).Infof("Updated HTTPRoute %s/%s status: Accepted=True, ResolvedRefs=True (%d parents)", httpRoute.Namespace, httpRoute.Name, len(desiredParents))
+	klog.V(2).Infof("Updated HTTPRoute %s/%s status: %d parents (Accepted=True, ResolvedRefs=True)", httpRoute.Namespace, httpRoute.Name, len(newParents))
 	return nil
+}
+
+// parentRefKey builds a string identity for a ParentReference so we can
+// match our desired entries against existing ones.
+func parentRefKey(ref gatewayv1.ParentReference) string {
+	ns := ""
+	if ref.Namespace != nil {
+		ns = string(*ref.Namespace)
+	}
+	kind := ""
+	if ref.Kind != nil {
+		kind = string(*ref.Kind)
+	}
+	return fmt.Sprintf("%s/%s/%s", ns, ref.Name, kind)
+}
+
+// routeStatusEqual checks if two []RouteParentStatus slices are equivalent
+// by comparing controller name, parent ref, and condition status.
+func routeStatusEqual(a, b []gatewayv1.RouteParentStatus) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ControllerName != b[i].ControllerName {
+			return false
+		}
+		if a[i].ParentRef.Name != b[i].ParentRef.Name {
+			return false
+		}
+		for _, condType := range []string{
+			string(gatewayv1.RouteConditionAccepted),
+			string(gatewayv1.RouteConditionResolvedRefs),
+		} {
+			ac := apimeta.FindStatusCondition(a[i].Conditions, condType)
+			bc := apimeta.FindStatusCondition(b[i].Conditions, condType)
+			if (ac == nil) != (bc == nil) {
+				return false
+			}
+			if ac != nil && ac.Status != bc.Status {
+				return false
+			}
+		}
+	}
+	return true
 }

@@ -217,6 +217,9 @@ func (c *GatewayController) updateGatewayStatus(gateway *gatewayv1.Gateway) erro
 	apimeta.SetStatusCondition(&updated.Status.Conditions, acceptedCondition)
 	apimeta.SetStatusCondition(&updated.Status.Conditions, programmedCondition)
 
+	// Populate per-listener status for each listener in the Gateway spec.
+	updated.Status.Listeners = buildListenerStatuses(gateway)
+
 	_, err = c.gatewayClient.GatewayV1().Gateways(gateway.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to update gateway status: %w", err)
@@ -224,6 +227,93 @@ func (c *GatewayController) updateGatewayStatus(gateway *gatewayv1.Gateway) erro
 
 	klog.V(2).Infof("Updated Gateway %s/%s status: Accepted=True, Programmed=True", gateway.Namespace, gateway.Name)
 	return nil
+}
+
+// buildListenerStatuses constructs per-listener status for each listener in the Gateway spec.
+// Each listener gets Accepted=True, Programmed=True, ResolvedRefs=True, Conflicted=False,
+// supportedKinds based on protocol, and attachedRoutes count.
+func buildListenerStatuses(gateway *gatewayv1.Gateway) []gatewayv1.ListenerStatus {
+	var listenerStatuses []gatewayv1.ListenerStatus
+
+	for _, listener := range gateway.Spec.Listeners {
+		ls := gatewayv1.ListenerStatus{
+			Name:           listener.Name,
+			SupportedKinds: supportedKindsForListener(listener),
+			AttachedRoutes: 0, // Updated by httproute controller if needed
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(gatewayv1.ListenerConditionAccepted),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: gateway.Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             string(gatewayv1.ListenerReasonAccepted),
+					Message:            "Listener is accepted",
+				},
+				{
+					Type:               string(gatewayv1.ListenerConditionProgrammed),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: gateway.Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             string(gatewayv1.ListenerReasonProgrammed),
+					Message:            "Listener is programmed",
+				},
+				{
+					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: gateway.Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
+					Message:            "All references resolved",
+				},
+				{
+					Type:               string(gatewayv1.ListenerConditionConflicted),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gateway.Generation,
+					LastTransitionTime: metav1.Now(),
+					Reason:             string(gatewayv1.ListenerReasonNoConflicts),
+					Message:            "No conflicts",
+				},
+			},
+		}
+		listenerStatuses = append(listenerStatuses, ls)
+	}
+
+	return listenerStatuses
+}
+
+// groupNamePtr returns a pointer to the given Group string.
+func groupNamePtr(name string) *gatewayv1.Group {
+	return (*gatewayv1.Group)(&name)
+}
+
+// supportedKindsForListener returns the Route kinds supported by a listener
+// based on its protocol.
+func supportedKindsForListener(listener gatewayv1.Listener) []gatewayv1.RouteGroupKind {
+	switch listener.Protocol {
+	case gatewayv1.HTTPProtocolType:
+		return []gatewayv1.RouteGroupKind{
+			{Group: groupNamePtr(gatewayv1.GroupName), Kind: "HTTPRoute"},
+		}
+	case gatewayv1.HTTPSProtocolType:
+		return []gatewayv1.RouteGroupKind{
+			{Group: groupNamePtr(gatewayv1.GroupName), Kind: "HTTPRoute"},
+			{Group: groupNamePtr(gatewayv1.GroupName), Kind: "GRPCRoute"},
+		}
+	case gatewayv1.TLSProtocolType:
+		return []gatewayv1.RouteGroupKind{
+			{Group: groupNamePtr(gatewayv1.GroupName), Kind: "TLSRoute"},
+		}
+	case gatewayv1.TCPProtocolType:
+		return []gatewayv1.RouteGroupKind{
+			{Group: groupNamePtr(gatewayv1.GroupName), Kind: "TCPRoute"},
+		}
+	case gatewayv1.UDPProtocolType:
+		return []gatewayv1.RouteGroupKind{
+			{Group: groupNamePtr(gatewayv1.GroupName), Kind: "UDPRoute"},
+		}
+	default:
+		return nil
+	}
 }
 
 func (c *GatewayController) enqueueGateway(obj interface{}) {
