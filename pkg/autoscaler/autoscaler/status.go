@@ -30,7 +30,7 @@ type Status struct {
 }
 
 func NewStatus(behavior *v1alpha1.AutoscalingPolicyBehavior) *Status {
-	panicModeHoldMilliseconds := int64(0)
+	panicModeHoldMilliseconds := int64(60000) // 60 seconds default
 	if behavior.ScaleUp.PanicPolicy.PanicModeHold != nil {
 		panicModeHoldMilliseconds = behavior.ScaleUp.PanicPolicy.PanicModeHold.Milliseconds()
 	}
