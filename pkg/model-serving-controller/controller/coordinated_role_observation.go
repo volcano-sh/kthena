@@ -98,7 +98,7 @@ func (c *ModelServingController) refreshCoordinatedAvailabilityInRound(ctx conte
 						return err
 					}
 				}
-				if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), group.Name, name, instance.Name, status); err != nil {
+				if err := c.updateRoleStatus(ms, group.Name, name, instance.Name, status); err != nil {
 					return err
 				}
 			}
