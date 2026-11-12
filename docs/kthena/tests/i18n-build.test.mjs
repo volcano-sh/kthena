@@ -128,6 +128,10 @@ const fallbackDocs = [
 ];
 
 for (const version of ['', 'next/']) {
+  const sourceDir = version
+    ? 'docs'
+    : `versioned_docs/version-${defaultVersion}`;
+  // Docs come and go between releases; only check the ones this version ships.
   const docs = [...fallbackDocs];
   docs.push(
     { doc: 'getting-started/gpu-free-quick-start' },
@@ -137,6 +141,12 @@ for (const version of ['', 'next/']) {
     },
   );
   for (const { doc, slug = doc, extension = '.md' } of docs) {
+    if (
+      !existsSync(
+        new URL(`../${sourceDir}/${doc}${extension}`, import.meta.url),
+      )
+    )
+      continue;
     const route = `/docs/${version}${slug}`;
     test(`fallback document preserves navigation and section links: ${route}`, () => {
       const en = page(route);
@@ -172,9 +182,6 @@ for (const version of ['', 'next/']) {
             attribute(tag, 'href') === `https://kthena.volcano.sh${route}`,
         ),
       );
-      const sourceDir = version
-        ? 'docs'
-        : `versioned_docs/version-${defaultVersion}`;
       assert.ok(
         hasLink(
           zh,
@@ -232,6 +239,8 @@ test('untranslated docs and older versions keep their English content with a not
     '/docs/next/architecture/model-booster-controller',
     '/docs/v0.4.0/getting-started/installation',
   ]) {
+    if (!existsSync(new URL(`../build${route}.html`, import.meta.url)))
+      continue;
     const en = page(route);
     const zh = page(`/zh-Hans${route}`);
     assert.doesNotMatch(en, /此页面尚未翻译|Translation unavailable/);

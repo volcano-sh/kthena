@@ -85,6 +85,17 @@ jobs:
         working-directory: ./docs/kthena
         run: npm run docusaurus docs:version "${{ github.ref_name }}"
 
+      # The i18n tests require every version to ship translated sidebar labels
+      # and a translated intro page. Seed them from the current translations;
+      # reviewers can refine them in the PR.
+      - name: Seed zh-Hans translations for the new version
+        if: steps.guard.outputs.skip == 'false' && steps.idempotency.outputs.skip == 'false'
+        working-directory: ./docs/kthena/i18n/zh-Hans/docusaurus-plugin-content-docs
+        run: |
+          cp current.json "version-${{ github.ref_name }}.json"
+          mkdir -p "version-${{ github.ref_name }}"
+          cp current/intro.md "version-${{ github.ref_name }}/intro.md"
+
       # --- Validate ---------------------------------------------------------
       # Run the same typecheck + build that CI uses for docs changes.
       - name: Validate generated documentation
@@ -118,5 +129,6 @@ jobs:
             - Added versioned snapshot under `docs/kthena/versioned_docs/version-${{ github.ref_name }}/`
             - Added sidebar config at `docs/kthena/versioned_sidebars/version-${{ github.ref_name }}-sidebars.json`
             - Updated `docs/kthena/versions.json`
+            - Seeded `docs/kthena/i18n/zh-Hans/docusaurus-plugin-content-docs/version-${{ github.ref_name }}*` from the current translations
           labels: documentation
           delete-branch: true
