@@ -1,0 +1,148 @@
+import LightboxImage from '@site/src/components/LightboxImage';
+import modelServing from '../assets/diagrams/model-serving.svg';
+
+# Model Serving Controller
+
+ModelServing Controller is the controller for the serving workload `ModelServing` in Kthena, which is used to reconcile `ModelServing` resources and manage the lifecycle of serving pods.
+
+## Model Serving Overview
+
+`ModelServing` represents the optimal deployment paradigm for distributed serving scenarios involving large models, offering flexible and user-friendly workload configurations with
+Prefill-Decode Disaggregation and parallel serving services like Pipeline Parallelism (PP) and Tensor Parallelism (TP).
+
+## Model Serving Architecture
+
+<LightboxImage src={modelServing} alt="modelServing.svg"/>
+
+The Custom Resource Definition (CRD) of `ModelServing` is primarily divided into three layers, namely:
+
+1. ModelServing
+
+`ModelServing` is a novel type of workload designed to define specific serving services. It manages a set of `ServingGroup` serving instances with consistent configurations
+
+- Supports topology aware and gang scheduling: It enables the simultaneous scheduling of serving pods within an `ServingGroup` to the same **HyperNode**, and allows for the configuration of gang scheduling parameters.
+  Scheduling is only permitted when the HyperNode meets the **minimum number** of pods required for the serving tasks.
+- Supports scaling and rolling upgrades: It provides scaling, rolling updates, and fault recovery at both the `ServingGroup` and `Role` levels. `ServingGroupRollingUpdate` uses the ModelServing-level rollout configuration, while `RoleRollingUpdate` uses the configuration defined on each Role.
+
+2. ServingGroup
+
+`ServingGroup` is a group of serving instances, representing the smallest unit capable of independently completing a single serving service.
+
+- Supports defining multiple serving roles: Based on `Role` to represent serving roles such as **Prefill** and **Decode**, enabling the management of complex serving scenarios like xPyD configurations.
+- Supports graceful reconstruction: During the execution of serving tasks, if a failure occurs, the system allows a configurable grace period for pods recovery before triggering rebuilding, minimizing service interruption.
+
+3. Role
+
+`Role` represents the smallest functional unit, which can correspond to specific instance types such as Prefill, Decode, Aggregated.
+
+- Supports double-Pod templates: Within a single `Role` instance, two distinct Pod templates can be defined as `Entry` Pod and `Worker` Pod. 
+`Entry` Pod serves as the entry point to receive serving requests and distribute tasks, while the `Worker` Pod is responsible for executing the actual serving computations.
+- Supports network topology aware scheduling: Enables the co-location scheduling of `Entry` Pods and `Worker` Pods within the same `Role` to the same **HyperNode**.
+
+## Revisions and conservative rolling updates
+
+The controller stores immutable **whole-ModelServing** snapshots in
+`ControllerRevision` objects. A Role template hash is derived from the fields
+applicable to that Role; it is not a separate Role revision history.
+
+Both ModelServing and Role comparisons use the same hash-plus-semantic comparison.
+Hashes are computed from normalized JSON, rather than the Go struct layout. When
+hashes or serialized representations differ, decoded Kubernetes semantic equality
+decides whether the effective workload changed. Hash drift alone does not trigger
+a rollout, and matching hashes do not conceal different data.
+
+| Input | Effect on rolling updates |
+| --- | --- |
+| Role names, entry templates, worker replica count | Included. The Role name set is immutable after creation; list order is normalized. Templates and worker counts may change. |
+| Worker templates | Contents are included when workers exist. Template presence is also included when the applicable headless plugin uses it for entry DNS. Full templates remain in snapshots. |
+| Pod-template labels, annotations and PodSpec | Included, except inputs overwritten by the controller as described below. |
+| Ordered plugins, their type, config and effective Entry/Worker scope | Stored in snapshots and included in each applicable Role's comparison. Substantive plugin updates are rejected by admission. Historical comparison remains necessary for recovery and older persisted objects. |
+| Top-level `schedulerName` | Stored in snapshots, but changing the effective scheduler is rejected by the update webhook. Omitting it defaults to `volcano` at admission; an explicit empty string uses Kubernetes `default-scheduler`. |
+| ModelServing/Role `replicas` and rollout controls (`partition`, `maxSurge`, `maxUnavailable`, rollout strategy) | Not template identity; applied as current scaling/rollout controls. |
+| `recoveryPolicy`, `revisionHistoryLimit`, ModelServing metadata/status, ServingGroup `restartGracePeriodSeconds`, `gangPolicy`, `networkTopology` | Not template identity. |
+| Nested Pod `schedulerName`, controller-owned `GROUP_SIZE` and `WORKER_INDEX` environment entries | Normalized because the controller overwrites them. `ENTRY_ADDRESS` is normalized only where the applicable headless-service plugin overwrites it. |
+
+Plugins are compared as ordered configuration inputs, not by executing hooks and
+comparing their output. Kubernetes Pod admission defaults are not broadly removed
+from templates: plugins may observe those inputs before Pod admission.
+
+The update webhook rejects adding, removing or changing plugins, including their
+order, config and scope, even at zero replicas. Equivalent representations remain
+allowed: omitted and empty lists, effective BuiltIn/All defaults, reordered or
+duplicated `scope.roles`, and JSON object key order or whitespace. JSON arrays
+retain their order; omitted config is not equivalent to an empty object. Changing
+plugins together with an image or replica count rejects the entire request. Use a
+new ModelServing when a different plugin configuration is required. Existing Role
+names may be reordered but cannot be added, removed or renamed, including Roles
+with zero replicas.
+
+Older Roles-only revisions do not contain scheduler/plugin snapshots. On the first
+upgrade, the controller creates a durable compatibility baseline from historical
+Roles and the current scheduler/plugins, retaining running Pods and their revision
+identities. The original revision data is not rewritten; a metadata annotation
+records its baseline. **Plugin changes persisted before the first migration cannot
+be reconstructed**, because the old snapshot lacks the previous plugin
+configuration. The immutable update webhook prevents new substantive plugin edits;
+historical comparison still detects differences from the stored baseline in older
+or admission-bypassed objects, including after restart. It does not repair a mixed
+workload that existed before enforcement.
+
+Missing, malformed, foreign-owned or unsupported history pauses affected
+template-driven creation/deletion and is retried; it is never evidence that a
+running replica should be replaced. A lost established baseline is not silently
+rebuilt from current plugins. Explicit replica scale-down remains a scaling action.
+
+Missing ordinals below `partition` are recreated from the historical snapshot,
+including historical plugins and worker layout, while current operational replica
+counts and rollout controls remain in effect. Revision cleanup preserves observed
+ServingGroup and Role references and is deferred while partitions, rollout,
+recovery or unresolved history remain, so missing protected ordinals can recover
+after controller restart without introducing a new status/CRD field.
+
+During a Role rollout that changes `workerReplicas`, old and new instances can
+have different sizes. The shared PodGroup temporarily uses the smallest complete
+applied Role template as its scheduling floor, with current replica counts and
+explicit gang minima. Losing a Pod does not lower this historical size. Unknown
+history leaves the existing PodGroup unchanged until it can be resolved. Once
+all instances use the target layout, the PodGroup uses that layout as well.
+This scheduling floor permits larger instances to bind partially; readiness and
+rollout availability still require every member of each instance's own revision.
+It does not express atomic scheduling of arbitrary heterogeneous resource sets.
+
+In-place image updates use the same resolved revision identities and effective
+Role comparisons, including scheduler and applicable plugin inputs. Completing
+an update requires observing all expected members, so an informer delay cannot
+advance the unit's revision while a historical worker is still missing.
+
+## Example
+
+Read the [examples](https://github.com/volcano-sh/kthena/tree/main/examples/model-serving/sample.yaml) to learn more.
+
+## Labels and Environment Variables
+
+### Labels
+
+| Key                                  | Description                              | Example    | Applies to  |
+|--------------------------------------|------------------------------------------|------------|-------------|
+| modelserving.volcano.sh/name       | The label key for the ModelServing name    | sample     | pod         |
+| modelserving.volcano.sh/group-name | The label key for the ServingGroup name    | sample-0   | pod,service |
+| modelserving.volcano.sh/role       | The label key for the Role name          | decode     | pod,service |
+| modelserving.volcano.sh/role-id    | The label key for the role serial number | decode-0   | pod,service |
+| modelserving.volcano.sh/revision   | The revision label for the modelServing   | 67b8d4b8c7 | pod         |
+| modelserving.volcano.sh/entry      | The entry pod label key                  | true       | pod         |
+
+
+### Environment Variables
+
+| Key           | Description                                                         | Example                                         | Applies to |
+|---------------|---------------------------------------------------------------------|-------------------------------------------------|------------|
+| GROUP_SIZE    | The environment variable for the serving Role instance size       | 4                                               | pod        |
+| ENTRY_ADDRESS | Entry-only Service address, injected by `headless-service` for Roles with a worker template | sample-0-decode-0-0.default | Entry and Worker Pods in plugin scope |
+| WORKER_INDEX  | The index or identity of the pod within the serving Role instance | 0                                               | pod        |
+
+The `headless-service` plugin also maintains a separate discovery Service for
+individual Entry and Worker DNS records. New Pods use their generated names as
+hostnames and that discovery Service as their subdomain. Both Services publish
+addresses before readiness. Configure the plugin at ModelServing creation;
+existing plugin chains cannot be added, removed, or substantively changed in
+place. See [plugin configuration and migration](../user-guide/modelserving-plugin-framework.md#upgrade-and-migration).

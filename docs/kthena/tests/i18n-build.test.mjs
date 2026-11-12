@@ -129,18 +129,13 @@ const fallbackDocs = [
 
 for (const version of ['', 'next/']) {
   const docs = [...fallbackDocs];
-  if (version === '')
-    docs.push({
-      doc: 'user-guide/prefill-decode-disaggregation/vllm-pd-disaggregation',
-    });
-  if (version === 'next/')
-    docs.push(
-      { doc: 'getting-started/gpu-free-quick-start' },
-      { doc: 'user-guide/external-model-provider' },
-      {
-        doc: 'user-guide/prefill-decode-disaggregation/modelserving-vllm-pd-disaggregation',
-      },
-    );
+  docs.push(
+    { doc: 'getting-started/gpu-free-quick-start' },
+    { doc: 'user-guide/external-model-provider' },
+    {
+      doc: 'user-guide/prefill-decode-disaggregation/modelserving-vllm-pd-disaggregation',
+    },
+  );
   for (const { doc, slug = doc, extension = '.md' } of docs) {
     const route = `/docs/${version}${slug}`;
     test(`fallback document preserves navigation and section links: ${route}`, () => {
@@ -227,7 +222,6 @@ test('links between fallback documents stay in the selected locale', () => {
 
 test('untranslated docs and older versions keep their English content with a notice', () => {
   for (const route of [
-    '/docs/faq',
     '/docs/general/faq',
     '/docs/next/general/faq',
     '/docs/developer-guide/ci',

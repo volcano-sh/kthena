@@ -1,0 +1,15 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: deepseek-r1-1-5b
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: deepseek-r1-1-5b
+  workloadPort:
+    port: 8000
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s

@@ -1,0 +1,682 @@
+# API Reference
+
+## Packages
+- [networking.serving.volcano.sh/v1alpha1](#networkingservingvolcanoshv1alpha1)
+
+
+## networking.serving.volcano.sh/v1alpha1
+
+
+### Resource Types
+- [ExternalModelProvider](#externalmodelprovider)
+- [ExternalModelProviderList](#externalmodelproviderlist)
+- [ModelRoute](#modelroute)
+- [ModelRouteList](#modelroutelist)
+- [ModelServer](#modelserver)
+- [ModelServerList](#modelserverlist)
+
+
+
+#### BodyMatch
+
+
+
+BodyMatch defines the predicate used to match request body content
+
+
+
+_Appears in:_
+- [ModelMatch](#modelmatch)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `model` _string_ | Model is the name of the model or lora adapter to match.<br />If this field is not specified, any model or lora adapter will be matched. |  |  |
+
+
+#### ConnectionPool
+
+
+
+ConnectionPool configures the HTTP connection pool for a ModelServer.
+
+
+
+_Appears in:_
+- [TrafficPolicy](#trafficpolicy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `maxIdleConnections` _integer_ | MaxIdleConnections is the total idle connections across all endpoints.<br />Defaults to 100 when omitted. |  | Minimum: 0 <br /> |
+| `maxIdleConnectionsPerHost` _integer_ | MaxIdleConnectionsPerHost is the idle connections per pod/endpoint.<br />Defaults to 64 when omitted. |  | Minimum: 0 <br /> |
+| `maxConnectionsPerHost` _integer_ | MaxConnectionsPerHost limits dialing, active and idle connections per host.<br />0 means unlimited. Defaults to 0 when omitted. |  | Minimum: 0 <br /> |
+
+
+#### Endpoint
+
+
+
+Endpoint describes a single statically configured model serving instance.
+
+
+
+_Appears in:_
+- [ModelServerSpec](#modelserverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name uniquely identifies the endpoint within the ModelServer. Together with<br />the ModelServer name it forms the instance identity in the router, for<br />example in metrics and debug output. |  | MaxLength: 253 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` <br />Required: \{\} <br /> |
+| `address` _string_ | Address is the IP address or DNS name of the model serving instance. |  | MaxLength: 253 <br />Required: \{\} <br /> |
+| `port` _integer_ | Port is the port the model serving instance listens on. It defaults to<br />`spec.workloadPort.port` when unset. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `labels` _object (keys:string, values:string)_ | Labels are attached to the endpoint. They do not select serving instances;<br />they are only matched against `workloadSelector.pdGroup` to assign the<br />endpoint a prefill or decode role, `pdGroup` being the sole<br />`workloadSelector` field that may be combined with `endpoints`. |  |  |
+
+
+#### ExternalModelProvider
+
+
+
+ExternalModelProvider is the Schema for the externalmodelproviders API.
+
+
+
+_Appears in:_
+- [ExternalModelProviderList](#externalmodelproviderlist)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `networking.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ExternalModelProvider` | | |
+| `spec` _[ExternalModelProviderSpec](#externalmodelproviderspec)_ |  |  |  |
+| `status` _[ExternalModelProviderStatus](#externalmodelproviderstatus)_ |  |  |  |
+
+
+#### ExternalModelProviderList
+
+
+
+ExternalModelProviderList contains a list of ExternalModelProvider.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `networking.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ExternalModelProviderList` | | |
+| `items` _[ExternalModelProvider](#externalmodelprovider) array_ |  |  |  |
+
+
+#### ExternalModelProviderSpec
+
+
+
+ExternalModelProviderSpec defines the desired state of ExternalModelProvider.
+
+
+
+_Appears in:_
+- [ExternalModelProvider](#externalmodelprovider)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `providerType` _[ExternalProviderType](#externalprovidertype)_ | ProviderType selects the protocol adapter used for this provider. | OpenAI | Enum: [OpenAI Anthropic] <br /> |
+| `model` _string_ | Model is the actual upstream model name. When set, it overwrites the<br />model in the request, matching ModelServer.Spec.Model behavior. |  | MaxLength: 256 <br /> |
+| `baseURL` _string_ | BaseURL is the provider endpoint root. External providers must use HTTPS.<br />Example: https://api.deepseek.com |  | MinLength: 1 <br />Pattern: `^https://.+` <br />Required: \{\} <br /> |
+| `insecureSkipVerify` _boolean_ | InsecureSkipVerify disables server certificate-chain and hostname<br />verification for HTTPS. It does not enable plain HTTP. | false |  |
+| `auth` _[ProviderAuth](#providerauth)_ | Auth references a credential Secret in the same namespace. |  |  |
+| `headers` _object (keys:string, values:string)_ | Non-sensitive static headers added to upstream requests. |  |  |
+
+
+#### ExternalModelProviderStatus
+
+
+
+ExternalModelProviderStatus defines the observed state of ExternalModelProvider.
+
+
+
+_Appears in:_
+- [ExternalModelProvider](#externalmodelprovider)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ |  |  |  |
+
+
+#### ExternalProviderType
+
+_Underlying type:_ _string_
+
+ExternalProviderType defines the protocol adapter used for an external provider.
+
+_Validation:_
+- Enum: [OpenAI Anthropic]
+
+_Appears in:_
+- [ExternalModelProviderSpec](#externalmodelproviderspec)
+
+| Field | Description |
+| --- | --- |
+| `OpenAI` | OpenAI selects the OpenAI-compatible API adapter.<br /> |
+| `Anthropic` | Anthropic selects the Anthropic-compatible Messages API adapter.<br /> |
+
+
+#### GlobalRateLimit
+
+
+
+GlobalRateLimit contains configuration for global rate limiting
+
+
+
+_Appears in:_
+- [RateLimit](#ratelimit)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `redis` _[RedisConfig](#redisconfig)_ | Redis contains configuration for Redis-based global rate limiting. |  |  |
+
+
+#### InferenceEngine
+
+_Underlying type:_ _string_
+
+InferenceEngine defines the inference framework used by the modelServer to serve LLM requests.
+
+_Validation:_
+- Enum: [vLLM SGLang]
+
+_Appears in:_
+- [ModelServerSpec](#modelserverspec)
+
+| Field | Description |
+| --- | --- |
+| `vLLM` | https://github.com/vllm-project/vllm<br /> |
+| `SGLang` | https://github.com/sgl-project/sglang<br /> |
+
+
+#### KVConnectorSpec
+
+
+
+KVConnectorSpec defines KV connector configuration for PD disaggregated routing
+
+
+
+_Appears in:_
+- [ModelServerSpec](#modelserverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[KVConnectorType](#kvconnectortype)_ | Type specifies the connector type.<br />If you do not know which type to use, please use "http" as default. | http | Enum: [http lmcache nixl mooncake] <br /> |
+
+
+#### KVConnectorType
+
+_Underlying type:_ _string_
+
+
+
+
+
+_Appears in:_
+- [KVConnectorSpec](#kvconnectorspec)
+
+| Field | Description |
+| --- | --- |
+| `http` |  |
+| `nixl` |  |
+| `lmcache` |  |
+| `mooncake` |  |
+
+
+#### ModelMatch
+
+
+
+ModelMatch defines the predicate used to match LLM inference requests to a given
+TargetModels. Multiple match conditions are ANDed together, i.e. the match will
+evaluate to true only if all conditions are satisfied.
+
+
+
+_Appears in:_
+- [ModelBoosterSpec](#modelboosterspec)
+- [Rule](#rule)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `headers` _object (keys:string, values:[StringMatch](#stringmatch))_ | Header to match: prefix, exact, regex<br />If unset, any header will be matched. |  |  |
+| `uri` _[StringMatch](#stringmatch)_ | URI to match: prefix, exact, regex<br />If this field is not specified, a default prefix match on the "/" path is provided. |  |  |
+| `body` _[BodyMatch](#bodymatch)_ | Body contains conditions to match request body content |  |  |
+
+
+#### ModelRoute
+
+
+
+ModelRoute is the Schema for the Modelroutes API.
+
+
+
+_Appears in:_
+- [ModelRouteList](#modelroutelist)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `networking.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ModelRoute` | | |
+| `spec` _[ModelRouteSpec](#modelroutespec)_ |  |  |  |
+| `status` _[ModelRouteStatus](#modelroutestatus)_ |  |  |  |
+
+
+#### ModelRouteList
+
+
+
+ModelRouteList contains a list of ModelRoute.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `networking.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ModelRouteList` | | |
+| `items` _[ModelRoute](#modelroute) array_ |  |  |  |
+
+
+#### ModelRouteSpec
+
+
+
+ModelRouteSpec defines the desired state of ModelRoute.
+
+
+
+_Appears in:_
+- [ModelRoute](#modelroute)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `modelName` _string_ | `model` in the LLM request, it could be a base model name, lora adapter name or even<br />a virtual model name. This field is used to match scenarios other than model adapter name and<br />this field could be empty, but it and `ModelAdapters` can't both be empty. |  |  |
+| `loraAdapters` _string array_ | `model` in the LLM request could be lora adapter name,<br />here is a list of Lora Adapter Names to match. |  | MaxItems: 10 <br /> |
+| `parentRefs` _ParentReference array_ | ParentRefs references the Gateways that this ModelRoute should be attached to.<br />If empty, the ModelRoute will be attached to all Gateways in the same namespace. |  |  |
+| `rules` _[Rule](#rule) array_ | An ordered list of route rules for LLM traffic. The first rule<br />matching an incoming request will be used.<br />If no rule is matched, an HTTP 404 status code MUST be returned. |  | MaxItems: 16 <br /> |
+| `rateLimit` _[RateLimit](#ratelimit)_ | Rate limit for the LLM request based on prompt tokens or output tokens.<br />There is no limitation if this field is not set. |  |  |
+
+
+#### ModelRouteStatus
+
+
+
+ModelRouteStatus defines the observed state of ModelRoute.
+
+
+
+_Appears in:_
+- [ModelRoute](#modelroute)
+
+
+
+#### ModelServer
+
+
+
+ModelServer is the Schema for the modelservers API.
+
+
+
+_Appears in:_
+- [ModelServerList](#modelserverlist)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `networking.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ModelServer` | | |
+| `spec` _[ModelServerSpec](#modelserverspec)_ |  |  |  |
+| `status` _[ModelServerStatus](#modelserverstatus)_ |  |  |  |
+
+
+#### ModelServerList
+
+
+
+ModelServerList contains a list of ModelServer.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `networking.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ModelServerList` | | |
+| `items` _[ModelServer](#modelserver) array_ |  |  |  |
+
+
+#### ModelServerSpec
+
+
+
+ModelServerSpec defines the desired state of ModelServer.
+
+
+
+_Appears in:_
+- [ModelServer](#modelserver)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `model` _string_ | The real model that the modelServers are running.<br />If the `model` in LLM inference request is different from this field, it should be overwritten by this field.<br />Otherwise, the `model` in LLM inference request will not be mutated. |  | MaxLength: 256 <br /> |
+| `inferenceEngine` _[InferenceEngine](#inferenceengine)_ | The inference engine used to serve the model. |  | Enum: [vLLM SGLang] <br />Required: \{\} <br /> |
+| `workloadSelector` _[WorkloadSelector](#workloadselector)_ | WorkloadSelector is used to match the model serving instances.<br />Currently, they must be pods within the same namespace as modelServer object.<br />`workloadSelector.matchLabels` and `endpoints` are mutually exclusive ways of<br />declaring the serving instances, so exactly one of them must be used.<br />`workloadSelector.pdGroup` does not select instances; it only assigns them<br />prefill and decode roles, and therefore is the sole `workloadSelector` field<br />that may also be combined with `endpoints`. |  |  |
+| `endpoints` _[Endpoint](#endpoint) array_ | Endpoints is a static list of model serving instances. It is intended for<br />deployments where the serving instances are not discoverable as pods of the<br />cluster the router runs in, for example when the router reads its<br />configuration from local files instead of the Kubernetes API server.<br />`endpoints` and `workloadSelector.matchLabels` are mutually exclusive;<br />exactly one of them must be specified. |  | MaxItems: 1024 <br /> |
+| `workloadPort` _[WorkloadPort](#workloadport)_ | WorkloadPort defines the port and protocol configuration for the model server.<br />It may be omitted only when every entry in `endpoints` declares its own<br />`port`; endpoints without an explicit `port` fall back to `workloadPort.port`. |  |  |
+| `trafficPolicy` _[TrafficPolicy](#trafficpolicy)_ | Traffic Policy for accessing the model server instance. |  |  |
+| `kvConnector` _[KVConnectorSpec](#kvconnectorspec)_ | KVConnector specifies the KV connector configuration for PD disaggregated routing |  |  |
+
+
+#### ModelServerStatus
+
+
+
+ModelServerStatus defines the observed state of ModelServer.
+
+
+
+_Appears in:_
+- [ModelServer](#modelserver)
+
+
+
+#### PDGroup
+
+
+
+PDGroup is used to specify the group key of PD instances.
+Also, the labels to match the model serving instances for prefill and decode.
+
+
+
+_Appears in:_
+- [WorkloadSelector](#workloadselector)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `groupKey` _string_ | GroupKey is the key to distinguish different PD groups.<br />Only PD instances with the same group key and value could be paired. |  |  |
+| `prefillLabels` _object (keys:string, values:string)_ | The labels to match the model serving instances for prefill. |  |  |
+| `decodeLabels` _object (keys:string, values:string)_ | The labels to match the model serving instances for decode. |  |  |
+
+
+#### ProviderAuth
+
+
+
+ProviderAuth defines how a provider credential is loaded and sent upstream.
+
+
+
+_Appears in:_
+- [ExternalModelProviderSpec](#externalmodelproviderspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `scheme` _[ProviderAuthScheme](#providerauthscheme)_ | Scheme overrides the protocol adapter's default authentication scheme.<br />OpenAI defaults to Bearer and Anthropic defaults to APIKey. |  | Enum: [Bearer APIKey] <br /> |
+| `secretRef` _[SecretKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#secretkeyselector-v1-core)_ | SecretRef references a credential Secret in the same namespace. |  | Required: \{\} <br /> |
+
+
+#### ProviderAuthScheme
+
+_Underlying type:_ _string_
+
+ProviderAuthScheme defines how a provider credential is sent upstream.
+
+_Validation:_
+- Enum: [Bearer APIKey]
+
+_Appears in:_
+- [ProviderAuth](#providerauth)
+
+| Field | Description |
+| --- | --- |
+| `Bearer` | ProviderAuthSchemeBearer sends the credential in the Authorization header.<br /> |
+| `APIKey` | ProviderAuthSchemeAPIKey sends the credential in the x-api-key header.<br /> |
+
+
+#### RateLimit
+
+
+
+
+
+
+
+_Appears in:_
+- [ModelRouteSpec](#modelroutespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `inputTokensPerUnit` _integer_ | InputTokensPerUnit is the maximum number of input tokens allowed per unit of time.<br />If this field is not set, there is no limit on input tokens. |  | Minimum: 1 <br /> |
+| `outputTokensPerUnit` _integer_ | OutputTokensPerUnit is the maximum number of output tokens allowed per unit of time.<br />If this field is not set, there is no limit on output tokens. |  | Minimum: 1 <br /> |
+| `unit` _[RateLimitUnit](#ratelimitunit)_ | Unit is the time unit for the rate limit. | second | Enum: [second minute hour day month] <br /> |
+| `global` _[GlobalRateLimit](#globalratelimit)_ | Global contains configuration for global rate limiting using distributed storage.<br />If this field is set, global rate limiting will be used; otherwise, local rate limiting will be used. |  |  |
+
+
+#### RateLimitUnit
+
+_Underlying type:_ _string_
+
+
+
+_Validation:_
+- Enum: [second minute hour day month]
+
+_Appears in:_
+- [RateLimit](#ratelimit)
+
+| Field | Description |
+| --- | --- |
+| `second` |  |
+| `minute` |  |
+| `hour` |  |
+| `day` |  |
+| `month` |  |
+
+
+#### RedisConfig
+
+
+
+RedisConfig contains Redis connection configuration
+
+
+
+_Appears in:_
+- [GlobalRateLimit](#globalratelimit)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `address` _string_ | Address is the Redis server address in the format "host:port". |  | Required: \{\} <br /> |
+
+
+#### Retry
+
+
+
+
+
+
+
+_Appears in:_
+- [TrafficPolicy](#trafficpolicy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `attempts` _integer_ | The maximum number of times an individual inference request to a model server should be retried.<br />If the maximum number of retries has been done without a successgful response, the request will be considered failed. |  |  |
+
+
+#### Rule
+
+
+
+
+
+
+
+_Appears in:_
+- [ModelRouteSpec](#modelroutespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the name of the rule. |  |  |
+| `modelMatch` _[ModelMatch](#modelmatch)_ | Match conditions to be satisfied for the rule to be activated.<br />Empty `modelMatch` means matching all requests. |  |  |
+| `targetModels` _[TargetModel](#targetmodel) array_ |  |  | MaxItems: 16 <br />MinItems: 1 <br /> |
+
+
+#### SessionKeySource
+
+
+
+SessionKeySource defines one session key extraction rule.
+
+
+
+_Appears in:_
+- [SessionSticky](#sessionsticky)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[SessionKeySourceType](#sessionkeysourcetype)_ |  |  | Enum: [Header Query Cookie JWTClaim] <br />Required: \{\} <br /> |
+| `name` _string_ | Name is the header name, query key, cookie name, or JWT claim name. |  | MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### SessionKeySourceType
+
+_Underlying type:_ _string_
+
+SessionKeySourceType identifies how a session key fragment is read.
+
+_Validation:_
+- Enum: [Header Query Cookie JWTClaim]
+
+_Appears in:_
+- [SessionKeySource](#sessionkeysource)
+
+| Field | Description |
+| --- | --- |
+| `Header` |  |
+| `Query` |  |
+| `Cookie` |  |
+| `JWTClaim` |  |
+
+
+#### SessionSticky
+
+
+
+SessionSticky configures per-ModelServer session key extraction and binding TTL.
+The backing store (memory vs Redis) is configured in the router process, not here.
+
+
+
+_Appears in:_
+- [TrafficPolicy](#trafficpolicy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `sessionAffinitySeconds` _integer_ | SessionAffinitySeconds is binding TTL in seconds.<br />Once the session has been idle for more than the specified duration, the session becomes invalid.<br />When unset, the default is 300 (5 minutes). |  | Minimum: 1 <br /> |
+| `sources` _[SessionKeySource](#sessionkeysource) array_ | Sources are evaluated in order; the first non-empty extracted value is the session key. |  | MaxItems: 16 <br /> |
+
+
+#### StringMatch
+
+
+
+StringMatch defines the matching conditions for string fields.
+Only one of the fields may be set.
+
+
+
+_Appears in:_
+- [ModelMatch](#modelmatch)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `exact` _string_ |  |  |  |
+| `prefix` _string_ |  |  |  |
+| `regex` _string_ |  |  |  |
+
+
+#### TargetModel
+
+
+
+LLM inference traffic target model.
+
+
+
+_Appears in:_
+- [Rule](#rule)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `modelServerName` _string_ | ModelServerName is used to specify the correlated modelServer within the same namespace.<br />It is mutually exclusive with ExternalModelProviderName. |  |  |
+| `externalModelProviderName` _string_ | ExternalModelProviderName is used to specify the correlated ExternalModelProvider within the same namespace.<br />It is mutually exclusive with ModelServerName. |  |  |
+| `weight` _integer_ | Weight is used to specify the percentage of traffic should be sent to the target model.<br />The value should be in the range of [0, 100]. | 100 | Maximum: 100 <br />Minimum: 0 <br /> |
+
+
+#### TrafficPolicy
+
+
+
+
+
+
+
+_Appears in:_
+- [ModelServerSpec](#modelserverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `retry` _[Retry](#retry)_ | The retry policy for the inference request. |  |  |
+| `connectionPool` _[ConnectionPool](#connectionpool)_ | ConnectionPool configures the upstream HTTP connection pool used when<br />forwarding to this ModelServer's pods. When omitted, a shared default<br />pool is used. Each ModelServer that sets this gets its own isolated pool. |  |  |
+| `sessionSticky` _[SessionSticky](#sessionsticky)_ | SessionSticky pins requests with the same extracted session key to the same<br />backend Pod of this ModelServer for a TTL. Nil or omitted disables session<br />affinity for this ModelServer. It does not override ModelRoute weighted<br />selection among ModelServers. |  |  |
+
+
+#### WorkloadPort
+
+
+
+WorkloadPort defines the port and protocol configuration for the model server.
+
+
+
+_Appears in:_
+- [ModelServerSpec](#modelserverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `port` _integer_ | The port of the model server. The number must be between 1 and 65535. |  | Maximum: 65535 <br />Minimum: 1 <br />Required: \{\} <br /> |
+| `protocol` _string_ | The protocol of the model server. Supported values are "http" and "https". | http | Enum: [http https] <br /> |
+
+
+#### WorkloadSelector
+
+
+
+WorkloadSelector is used to match the model serving instances.
+Currently, they must be pods within the same namespace as modelServer object.
+
+
+
+_Appears in:_
+- [ModelServerSpec](#modelserverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `matchLabels` _object (keys:string, values:string)_ | The base labels to match the model serving instances.<br />All serving instances must match these labels. |  |  |
+| `pdGroup` _[PDGroup](#pdgroup)_ | PDGroup is used to further match different roles of the model serving instances,<br />mainly used in case like PD disaggregation. |  |  |
+
+
