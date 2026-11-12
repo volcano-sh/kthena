@@ -176,8 +176,9 @@ func (c *ModelServingController) rolloutDeletionPending(ms *api.ModelServing, gr
 type coordinatedSurgeKey struct{}
 
 const (
-	surgeAnnotation = "modelserving.volcano.sh/surge"
-	surgeRole       = "role"
+	surgeAnnotation   = "modelserving.volcano.sh/surge"
+	surgeServingGroup = "serving-group"
+	surgeRole         = "role"
 )
 
 func setSurgeScope(pod *corev1.Pod, scope string) {
