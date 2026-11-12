@@ -1534,7 +1534,7 @@ func (c *ModelServingController) updateRoleStatus(
 	groupName, roleName, roleID string,
 	status datastore.RoleStatus,
 ) error {
-	name := utils.GetNamespaceName(ms)
+	namespacedName := utils.GetNamespaceName(ms)
 	previous := c.store.GetRoleStatus(name, groupName, roleName, roleID)
 	if err := c.store.UpdateRoleStatus(name, groupName, roleName, roleID, status); err != nil {
 		return err
