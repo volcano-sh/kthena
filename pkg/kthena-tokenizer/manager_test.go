@@ -256,7 +256,9 @@ func TestRendererManagerRestartBudgetIsNotRestoredByFlapping(t *testing.T) {
 	// looping, so it must stop being restarted once the budget is spent.
 	cfg := testConfig(t, 18380, map[string]string{"served": "some/source"})
 	cfg.RendererMaxRestarts = 2
-	cfg.RendererStableWindow = time.Minute
+	// Short enough that the test can wait past it, well above the time each
+	// flap spends ready (the status poll notices within ~100ms).
+	cfg.RendererStableWindow = 2 * time.Second
 	m := NewRendererManager(cfg)
 	defer m.shutdown()
 
@@ -286,5 +288,15 @@ func TestRendererManagerRestartBudgetIsNotRestoredByFlapping(t *testing.T) {
 	infos := m.Snapshot()
 	require.Len(t, infos, 1)
 	assert.Equal(t, "restart budget exhausted", infos[0].LastError)
+	assert.Equal(t, cfg.RendererMaxRestarts, infos[0].Restarts)
+
+	// The budget is restored by a stable run, not by lying dead for the
+	// window. Nothing is running now, so later ticks must leave it failed.
+	time.Sleep(2 * cfg.RendererStableWindow)
+	m.restartCrashed()
+	infos = m.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, string(StatusFailed), infos[0].Status,
+		"an exhausted renderer was relaunched after the window passed with it dead")
 	assert.Equal(t, cfg.RendererMaxRestarts, infos[0].Restarts)
 }

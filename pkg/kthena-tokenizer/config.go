@@ -71,8 +71,8 @@ type Config struct {
 	// RendererMaxRestarts is how many consecutive restarts a crashed renderer
 	// gets; the count resets after it stays ready for RendererStableWindow.
 	RendererMaxRestarts int
-	// RendererStableWindow is how long a renderer must stay ready before its
-	// restart budget is restored.
+	// RendererStableWindow is how long a renderer must run while ready before
+	// its restart budget is restored.
 	RendererStableWindow time.Duration
 	// ProxyTimeout bounds a proxied /tokenize request.
 	ProxyTimeout time.Duration
