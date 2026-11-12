@@ -91,7 +91,7 @@ spec:
                   name: redis-secret
                   key: REDIS_PASSWORD
                   optional: true
-            {{- if and .Values.kthenaRouter.sessionSticky (and .Values.kthenaRouter.sessionSticky.redis (and .Values.kthenaRouter.sessionSticky.redis.secretRef .Values.kthenaRouter.sessionSticky.redis.secretRef.name)) }}
+            {{- if and .Values.kthenaRouter.sessionSticky (eq (.Values.kthenaRouter.sessionSticky.backend | default "memory") "redis") (and .Values.kthenaRouter.sessionSticky.redis (and .Values.kthenaRouter.sessionSticky.redis.secretRef .Values.kthenaRouter.sessionSticky.redis.secretRef.name)) }}
             - name: SESSION_STICKY_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
