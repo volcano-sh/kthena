@@ -18,6 +18,7 @@ package scheduler
 
 import (
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,9 @@ type PluginChain struct {
 	// scoring requires on-flight counts synced from Redis first (multiple
 	// router replicas each only see their own dispatches).
 	syncOnFlight bool
+
+	// builtFrom is the exact profile object this chain was built from.
+	builtFrom *aiv1alpha1.SchedulerProfile
 
 	// A retired chain stays open until every request still using it has
 	// finished (after RunPostHooks), then closes.
@@ -144,10 +148,23 @@ func scorePluginNames(scores []*scorePlugin) string {
 	return strings.Join(names, ", ")
 }
 
+// reconcileStripes is the number of striped locks serializing per-profile
+// reconcile decisions. The same key always hashes to the same stripe, so one
+// profile's read-decide-commit sequence stays atomic; different profiles run
+// in parallel unless their hashes collide on a stripe (harmless — they only
+// occasionally serialize).
+const reconcileStripes = 16
+
 // ProfileChainManager builds one plugin chain per SchedulerProfile and
 // resolves ModelServer references to them.
 type ProfileChainManager struct {
 	store datastore.Store
+
+	// reconcileLocks serializes build/retire decisions per profile stripe.
+	// Every decision reads the current Store state while holding its stripe,
+	// so delayed callbacks are harmless and cannot apply an obsolete
+	// reference snapshot.
+	reconcileLocks [reconcileStripes]sync.Mutex
 
 	// mu guards chains and buildErrs as one unit: a build's commit (record
 	// error, or swap chain and drop the previous error) is atomic for
@@ -165,6 +182,15 @@ type ProfileChainManager struct {
 	notificationsEnabled atomic.Bool
 }
 
+// reconcileStripe returns the stripe serializing decisions for key.
+func (m *ProfileChainManager) reconcileStripe(key types.NamespacedName) *sync.Mutex {
+	h := fnv.New32a()
+	h.Write([]byte(key.Namespace))
+	h.Write([]byte{0})
+	h.Write([]byte(key.Name))
+	return &m.reconcileLocks[h.Sum32()%reconcileStripes]
+}
+
 // NewProfileChainManager registers SchedulerProfile store callbacks; the
 // store must be shared with the SchedulerProfile controller.
 func NewProfileChainManager(store datastore.Store) *ProfileChainManager {
@@ -177,6 +203,7 @@ func NewProfileChainManager(store datastore.Store) *ProfileChainManager {
 	}
 	m.notificationsEnabled.Store(true)
 	store.RegisterCallback("SchedulerProfile", m.onProfileEvent)
+	store.RegisterCallback("SchedulerProfileReference", m.onProfileReferenceEvent)
 	return m
 }
 
@@ -236,72 +263,106 @@ func (m *ProfileChainManager) BuildStatus(key types.NamespacedName) (built bool,
 	return ok, nil
 }
 
-// onProfileEvent rebuilds and swaps the profile's chain on add/update,
-// removes it on delete. Store callbacks run concurrently, so a commit is
-// gated on the profile version: only the build of the version currently in
-// the store may commit, a stale outcome is discarded — the newest event's
-// build owns the final state regardless of completion order.
+// onProfileEvent reconciles only this profile. A profile is built only while
+// at least one ModelServer references it.
 func (m *ProfileChainManager) onProfileEvent(data datastore.EventData) {
-	if data.SchedulerProfile == nil {
+	key := data.SchedulerProfileKey
+	if key.Namespace == "" && key.Name == "" {
 		return
 	}
-	profile := data.SchedulerProfile
-	key := types.NamespacedName{Namespace: profile.Namespace, Name: profile.Name}
 	klog.V(4).Infof("SchedulerProfile %s: received %s event", key.String(), data.EventType)
-	if data.EventType == datastore.EventDelete {
+	m.reconcileProfile(key, data.EventType != datastore.EventDelete)
+}
+
+// onProfileReferenceEvent reconciles the one profile whose reference set
+// changed, using its current reference count from Store.
+func (m *ProfileChainManager) onProfileReferenceEvent(data datastore.EventData) {
+	key := data.SchedulerProfileKey
+	if key.Namespace == "" && key.Name == "" {
+		return
+	}
+	m.reconcileProfile(key, false)
+}
+
+// reconcileProfile makes the cached chain match the current Store state.
+// profileChanged is true for Profile add/update events, which must build from
+// the new Profile even when a chain or previous build error is already cached.
+// Reference events and AcquireProfile pass false to build only on a cache miss.
+func (m *ProfileChainManager) reconcileProfile(key types.NamespacedName, profileChanged bool) {
+	stripe := m.reconcileStripe(key)
+	stripe.Lock()
+	defer stripe.Unlock()
+
+	profile := m.store.GetSchedulerProfile(key)
+	refCount := m.store.GetModelServerCountForSchedulerProfile(key)
+	if profile == nil || refCount == 0 {
 		m.mu.Lock()
-		if m.store.GetSchedulerProfile(key) != nil {
-			m.mu.Unlock()
-			return
-		}
-		old, had := m.chains[key]
+		old, hadChain := m.chains[key]
+		_, hadErr := m.buildErrs[key]
 		delete(m.chains, key)
 		delete(m.buildErrs, key)
-		if had {
-			// Retire under the lock so no AcquireProfile can grab the chain.
+		if old != nil {
 			old.retire()
 		}
 		m.mu.Unlock()
-		m.notifyStatusNotify(key)
-		klog.Infof("SchedulerProfile %s: removed; referencing ModelServers fail their requests until the reference is updated", key.String())
+		if hadChain || hadErr {
+			m.notifyStatusNotify(key)
+		}
+		return
+	}
+
+	if !profileChanged {
+		m.mu.RLock()
+		_, hasChain := m.chains[key]
+		_, hasErr := m.buildErrs[key]
+		m.mu.RUnlock()
+		if hasChain || hasErr {
+			return
+		}
+	}
+
+	m.mu.RLock()
+	chain, hasChain := m.chains[key]
+	m.mu.RUnlock()
+	if hasChain && chain.builtFrom == profile {
+		// Already built from this exact object: a delayed callback carries an
+		// obsolete event, and rebuilding would only churn the serving chain.
 		return
 	}
 
 	chain, err := m.buildChain(profile)
-	m.mu.Lock()
+	// A profile/ref change may have landed while plugins were being built.
+	// Only commit if the current state still calls for this exact version.
 	cur := m.store.GetSchedulerProfile(key)
-	stale := cur == nil || cur.ResourceVersion != profile.ResourceVersion
-	var retired *PluginChain
-	if !stale {
-		if err != nil {
-			m.buildErrs[key] = err
-		} else {
-			delete(m.buildErrs, key)
-			retired = m.chains[key]
-			m.chains[key] = chain
+	stillReferenced := m.store.GetModelServerCountForSchedulerProfile(key) > 0
+	stale := cur == nil || cur.ResourceVersion != profile.ResourceVersion || !stillReferenced
+	m.mu.Lock()
+	if stale {
+		m.mu.Unlock()
+		if err == nil {
+			chain.retire()
 		}
+		return
+	}
+	var retired *PluginChain
+	if err != nil {
+		m.buildErrs[key] = err
+	} else {
+		delete(m.buildErrs, key)
+		retired = m.chains[key]
+		m.chains[key] = chain
 	}
 	if retired != nil {
-		// Retire under the lock so in-flight requests drain before close.
 		retired.retire()
 	}
 	m.mu.Unlock()
 
-	if stale {
-		if err == nil {
-			// Never served; close now instead of leaking its plugins.
-			chain.retire()
-		}
-		klog.V(4).Infof("SchedulerProfile %s: stale build (rv %q) discarded; the current version owns the outcome",
-			key.String(), profile.ResourceVersion)
-		return
-	}
 	if err != nil {
 		klog.Warningf("SchedulerProfile %s: failed to build plugin chain: %v", key.String(), err)
 		m.notifyStatusNotify(key)
 		return
 	}
-	klog.V(4).Infof("SchedulerProfile %s: chain rebuilt (filters: [%s], scores: [%s])",
+	klog.Infof("SchedulerProfile %s: chain built (filters: [%s], scores: [%s])",
 		key.String(), pluginNames(chain.filters), scorePluginNames(chain.scores))
 	m.notifyStatusNotify(key)
 }
@@ -390,15 +451,15 @@ func (m *ProfileChainManager) buildChain(profile *aiv1alpha1.SchedulerProfile) (
 		scores:            scores,
 		postScheduleHooks: getPostScheduleHooks(scores),
 		syncOnFlight:      chainNeedsOnFlightSync(filters, scores),
+		builtFrom:         profile,
 	}, nil
 }
 
 // AcquireProfile resolves the chain for the ModelServer's profile reference
 // and marks it in use atomically (lookup + Acquire under the same lock the
 // retire path uses), so an already-retired chain is never handed out. The
-// chain may still be retired later while in use; Release keeps it open
-// until this request is done. A ModelServer without a reference returns
-// (nil, nil).
+// chain may still be retired later while in use; Release keeps it open until
+// this request is done. A ModelServer without a reference returns (nil, nil).
 func (m *ProfileChainManager) AcquireProfile(ms *aiv1alpha1.ModelServer) (*PluginChain, error) {
 	if ms == nil || ms.Spec.TrafficPolicy == nil ||
 		ms.Spec.TrafficPolicy.LoadBalancer == nil ||
@@ -407,18 +468,31 @@ func (m *ProfileChainManager) AcquireProfile(ms *aiv1alpha1.ModelServer) (*Plugi
 	}
 	name := *ms.Spec.TrafficPolicy.LoadBalancer.SchedulerProfile
 	key := types.NamespacedName{Namespace: ms.Namespace, Name: name}
+	if chain, err := m.acquireCachedProfile(key); chain != nil || err != nil {
+		return chain, err
+	}
+
+	// Store callbacks are asynchronous. Build synchronously on a referenced
+	// cache miss so the first request need not wait for callback scheduling.
+	m.reconcileProfile(key, false)
+	if chain, err := m.acquireCachedProfile(key); chain != nil || err != nil {
+		return chain, err
+	}
+	return nil, fmt.Errorf("SchedulerProfile %q not found in namespace %q", name, ms.Namespace)
+}
+
+// acquireCachedProfile performs a cache lookup and increments the chain's
+// usage count while holding the same lock used by retirement.
+func (m *ProfileChainManager) acquireCachedProfile(key types.NamespacedName) (*PluginChain, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	chain, ok := m.chains[key]
 	if ok {
-		// Both retire paths hold the write lock, so a chain found here cannot
-		// be retiring concurrently; the increment makes a later retire wait
-		// for this request's Release.
 		chain.Acquire()
 		return chain, nil
 	}
 	if buildErr := m.buildErrs[key]; buildErr != nil {
 		return nil, fmt.Errorf("SchedulerProfile %q failed to build: %w", key.String(), buildErr)
 	}
-	return nil, fmt.Errorf("SchedulerProfile %q not found in namespace %q", name, ms.Namespace)
+	return nil, nil
 }

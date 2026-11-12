@@ -93,6 +93,11 @@ func (m *MockStore) GetAllSchedulerProfiles() map[types.NamespacedName]*aiv1alph
 	return args.Get(0).(map[types.NamespacedName]*aiv1alpha1.SchedulerProfile)
 }
 
+func (m *MockStore) GetModelServerCountForSchedulerProfile(name types.NamespacedName) int {
+	args := m.Called(name)
+	return args.Int(0)
+}
+
 func (m *MockStore) GetPodsByModelServer(name types.NamespacedName) ([]*datastore.PodInfo, error) {
 	args := m.Called(name)
 	if args.Get(0) == nil {

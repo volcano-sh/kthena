@@ -90,8 +90,9 @@ func TestProfileChainManager_BuildStatusOnProfileEvents(t *testing.T) {
 	m := NewProfileChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p1"}
 
-	// A nil-profile event is a no-op.
-	m.onProfileEvent(datastore.EventData{EventType: datastore.EventAdd})
+	// Chains are lazy: only profiles referenced by a ModelServer in the
+	// store build. The reference must exist before the profile settles.
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "p1"), nil)
 
 	// Nothing built yet.
 	built, buildErr := m.BuildStatus(key)
@@ -146,6 +147,9 @@ func TestProfileChainManager_BuildStatusReportsBuildError(t *testing.T) {
 	m := NewProfileChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p1"}
 
+	// Lazy: a build failure is only reached once something references the
+	// profile.
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "p1"), nil)
 	store.AddOrUpdateSchedulerProfile(failedProfile("p1"))
 	var buildErr error
 	waitUntil(t, 2*time.Second, func() bool {
@@ -341,6 +345,10 @@ func TestChainNeedsOnFlightSync(t *testing.T) {
 func TestProfileChainManager_AcquireProfile(t *testing.T) {
 	store := datastore.New()
 	m := NewProfileChainManager(store)
+	// The referencing ModelServers must be in the store: AcquireProfile's
+	// synchronous fallback build commits only for referenced profiles.
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms-built", "built"), nil)
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms-failed", "failed"), nil)
 	store.AddOrUpdateSchedulerProfile(validProfile("built"))
 	store.AddOrUpdateSchedulerProfile(failedProfile("failed"))
 	waitUntil(t, 2*time.Second, func() bool {
@@ -462,6 +470,7 @@ func TestProfileChainManager_StatusNotifyCarriesKeys(t *testing.T) {
 	store := datastore.New()
 	m := NewProfileChainManager(store)
 
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "built"), nil)
 	store.AddOrUpdateSchedulerProfile(validProfile("built"))
 
 	select {
@@ -580,14 +589,16 @@ func TestPluginChain_CloseExactlyOnce(t *testing.T) {
 	assert.EqualValues(t, 1, spy.closes.Load())
 }
 
-// TestProfileChainManager_StaleSuccessDiscarded verifies a build of an
-// older profile version cannot commit after a newer one: the current
-// chain survives and no settle hint is emitted.
+// TestProfileChainManager_StaleSuccessDiscarded verifies a delayed event for
+// an older profile version cannot disturb the current chain: reconcile reads
+// the store's current object, sees the chain already built from it, and
+// skips — no rebuild, no settle hint.
 func TestProfileChainManager_StaleSuccessDiscarded(t *testing.T) {
 	store := datastore.New()
 	m := NewProfileChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p1"}
 
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "p1"), nil)
 	newer := validProfile("p1") // least-request filter
 	newer.ResourceVersion = "200"
 	store.AddOrUpdateSchedulerProfile(newer)
@@ -601,15 +612,11 @@ func TestProfileChainManager_StaleSuccessDiscarded(t *testing.T) {
 		t.Fatal("expected the newer build to settle")
 	}
 
-	// An older event (rv 100, different spec) settles late: it must not
-	// replace the current chain.
-	stale := newTestProfile("p1", aiv1alpha1.SchedulerProfileSpec{
-		Plugins: aiv1alpha1.Plugins{
-			Filter: aiv1alpha1.Filter{Enabled: []string{plugins.LoraAffinityPluginName}},
-		},
-	})
-	stale.ResourceVersion = "100"
-	m.onProfileEvent(datastore.EventData{EventType: datastore.EventUpdate, SchedulerProfile: stale})
+	// An older event (rv 100, different spec) settles late: reconcile reads
+	// the store's current version (rv 200), which the cached chain is
+	// already built from — no rebuild, no replacement, no settle. Events
+	// carry only the key; the stale payload cannot leak into the chain.
+	m.onProfileEvent(datastore.EventData{EventType: datastore.EventUpdate, SchedulerProfileKey: key})
 
 	m.mu.RLock()
 	chain := m.chains[key]
@@ -633,9 +640,10 @@ func TestProfileChainManager_StaleFailureDiscarded(t *testing.T) {
 	m := NewProfileChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p2"}
 
-	stale := failedProfile("p2")
-	stale.ResourceVersion = "100"
-	m.onProfileEvent(datastore.EventData{EventType: datastore.EventAdd, SchedulerProfile: stale})
+	// An add event for a profile that is not in the store (e.g. deleted
+	// before its callback ran) carries only the key: reconcile reads the
+	// store, finds nothing, and records no build outcome.
+	m.onProfileEvent(datastore.EventData{EventType: datastore.EventAdd, SchedulerProfileKey: key})
 
 	built, buildErr := m.BuildStatus(key)
 	assert.False(t, built)
@@ -654,6 +662,7 @@ func TestProfileChainManager_UpdateReplacesChain(t *testing.T) {
 	m := NewProfileChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p1"}
 
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "p1"), nil)
 	first := validProfile("p1") // least-request filter
 	first.ResourceVersion = "100"
 	store.AddOrUpdateSchedulerProfile(first)
@@ -682,4 +691,84 @@ func TestProfileChainManager_UpdateReplacesChain(t *testing.T) {
 	waitUntil(t, 2*time.Second, func() bool {
 		return old.retired.Load()
 	}, "the replaced chain must be retired")
+}
+
+// TestProfileChainManager_LazyCreation verifies the lazy lifecycle: a
+// profile that nothing references holds no chain, the first reference
+// builds it, losing the reference retires it at once, and a dangling
+// reference builds nothing.
+func TestProfileChainManager_LazyCreation(t *testing.T) {
+	store := datastore.New()
+	m := NewProfileChainManager(store)
+	key := types.NamespacedName{Namespace: "default", Name: "p1"}
+
+	store.AddOrUpdateSchedulerProfile(validProfile("p1"))
+	time.Sleep(100 * time.Millisecond)
+	built, buildErr := m.BuildStatus(key)
+	assert.False(t, built, "an unreferenced profile must not build")
+	assert.NoError(t, buildErr)
+	m.mu.RLock()
+	assert.Empty(t, m.chains, "an unreferenced profile must hold no chain")
+	m.mu.RUnlock()
+
+	// The reference appears: the ModelServer's reference event builds.
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "p1"), nil)
+	waitUntil(t, 2*time.Second, func() bool {
+		built, _ := m.BuildStatus(key)
+		return built
+	}, "referencing the profile must build its chain")
+
+	// The reference disappears (ModelServer deleted): the chain retires.
+	store.DeleteModelServer(types.NamespacedName{Namespace: "default", Name: "ms"})
+	waitUntil(t, 2*time.Second, func() bool {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return len(m.chains) == 0
+	}, "losing the reference must retire the chain")
+
+	// A dangling reference (profile absent) must not build either.
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "ghost"), nil)
+	time.Sleep(100 * time.Millisecond)
+	m.mu.RLock()
+	assert.Empty(t, m.chains, "a reference to a missing profile must hold no chain")
+	m.mu.RUnlock()
+	_, err := m.AcquireProfile(newModelServerWithProfileRef("default", "ms", "ghost"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found in namespace")
+}
+
+// TestProfileChainManager_ReferenceSwitchLifecycle verifies a ModelServer
+// switching profiles retires the old chain immediately and builds the new
+// one.
+func TestProfileChainManager_ReferenceSwitchLifecycle(t *testing.T) {
+	store := datastore.New()
+	m := NewProfileChainManager(store)
+	a := types.NamespacedName{Namespace: "default", Name: "a"}
+	b := types.NamespacedName{Namespace: "default", Name: "b"}
+
+	store.AddOrUpdateSchedulerProfile(validProfile("a"))
+	store.AddOrUpdateSchedulerProfile(validProfile("b"))
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "a"), nil)
+	waitUntil(t, 2*time.Second, func() bool {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		_, hasA := m.chains[a]
+		_, hasB := m.chains[b]
+		return hasA && !hasB
+	}, "referencing a must build only a's chain")
+	m.mu.RLock()
+	oldA := m.chains[a]
+	m.mu.RUnlock()
+
+	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "b"), nil)
+	waitUntil(t, 2*time.Second, func() bool {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		_, hasA := m.chains[a]
+		_, hasB := m.chains[b]
+		return !hasA && hasB
+	}, "switching to b must retire a and build b")
+	waitUntil(t, 2*time.Second, func() bool {
+		return oldA.retired.Load()
+	}, "the switched-away chain must be retired")
 }
