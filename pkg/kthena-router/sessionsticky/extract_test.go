@@ -88,6 +88,56 @@ func TestExtractSessionKey_NilSpec(t *testing.T) {
 	require.Equal(t, "", ExtractSessionKey(c, nil))
 }
 
+func TestLookupBinding_NilGuards(t *testing.T) {
+	spec := &networkingv1alpha1.SessionSticky{
+		Sources: []networkingv1alpha1.SessionKeySource{
+			{Type: networkingv1alpha1.SessionKeySourceHeader, Name: "X-Session-ID"},
+		},
+	}
+	owner := types.NamespacedName{Namespace: "default", Name: "ms"}
+	store := NewMemoryStore()
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+	c.Request.Header.Set("X-Session-ID", "sess-1")
+
+	// 1. Nil context
+	require.NotPanics(t, func() {
+		sessKey, storeKey, binding, ok := LookupBinding(nil, owner, spec, store)
+		require.False(t, ok)
+		require.Equal(t, "", sessKey)
+		require.Equal(t, "", storeKey)
+		require.Equal(t, Binding{}, binding)
+	})
+
+	// 2. Nil request
+	cNilReq, _ := gin.CreateTestContext(httptest.NewRecorder())
+	cNilReq.Request = nil
+	require.NotPanics(t, func() {
+		sessKey, storeKey, binding, ok := LookupBinding(cNilReq, owner, spec, store)
+		require.False(t, ok)
+		require.Equal(t, "", sessKey)
+		require.Equal(t, "", storeKey)
+		require.Equal(t, Binding{}, binding)
+	})
+
+	// 3. Nil spec
+	sessKey, storeKey, binding, ok := LookupBinding(c, owner, nil, store)
+	require.False(t, ok)
+	require.Equal(t, "", sessKey)
+	require.Equal(t, "", storeKey)
+	require.Equal(t, Binding{}, binding)
+
+	// 4. Nil store
+	sessKey, storeKey, binding, ok = LookupBinding(c, owner, spec, nil)
+	require.False(t, ok)
+	require.Equal(t, "", sessKey)
+	require.Equal(t, "", storeKey)
+	require.Equal(t, Binding{}, binding)
+}
+
 func TestMemoryStore_GetSetTTL(t *testing.T) {
 	ctx := t.Context()
 	s := NewMemoryStore()
