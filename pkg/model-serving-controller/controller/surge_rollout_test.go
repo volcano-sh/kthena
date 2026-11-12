@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -691,4 +692,125 @@ func TestAdoptionFailureDoesNotBlockScaleUp(t *testing.T) {
 		_, err := kube.CoreV1().Pods(ms.Namespace).Get(context.Background(), utils.GeneratePodName(utils.GenerateServingGroupName(ms.Name, ordinal), "inference-0", 0), metav1.GetOptions{})
 		assert.NoError(t, err, "group %d is created", ordinal)
 	}
+}
+
+// The delete event of a Pod can be handled after its ServingGroup was deleted
+// and created again. It must not trigger recovery of the new Pods: recreating
+// the Pods of a surge group would drop the marker and the rollout would end
+// sparse. Recovery still applies when a Pod of the unit predates the deletion.
+func TestDelayedDeleteEventDoesNotRecoverRecreatedUnit(t *testing.T) {
+	created := time.Now().Truncate(time.Second)
+	for _, tt := range []struct {
+		name string
+		// deletion of the former Pod and creation of another Pod of the same
+		// group, both relative to the creation of the Pod that replaced it
+		deleted, grace, other time.Duration
+		otherRoleID           string
+		policy                workloadv1alpha1.RecoveryPolicy
+		wantRecover           bool
+	}{
+		{"group recreated after the deletion", -10 * time.Second, 0, 0, "inference-0", workloadv1alpha1.RoleRecreate, false},
+		{"group recreated in the second of the deletion", 0, 0, 0, "inference-0", workloadv1alpha1.RoleRecreate, false},
+		{"former Pod last seen terminating", 20 * time.Second, 30 * time.Second, 0, "inference-0", workloadv1alpha1.RoleRecreate, false},
+		{"a Pod of the Role predates the deletion", -10 * time.Second, 0, -time.Minute, "inference-0", workloadv1alpha1.RoleRecreate, true},
+		{"a Pod of another Role instance predates the deletion", -10 * time.Second, 0, -time.Minute, "inference-1", workloadv1alpha1.RoleRecreate, false},
+		{"a Pod of the group predates the deletion", -10 * time.Second, 0, -time.Minute, "inference-1", workloadv1alpha1.ServingGroupRecreate, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, ms, _ := newSurgeFixture(t, surgeServingGroup)
+			ms.Spec.RecoveryPolicy = tt.policy
+			require.NoError(t, c.modelServingsInformer.GetIndexer().Update(ms))
+			group := utils.GenerateServingGroupName(ms.Name, 3)
+			stored, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(context.Background(), utils.GeneratePodName(group, "inference-0", 0), metav1.GetOptions{})
+			require.NoError(t, err)
+			// The Pod that replaced the deleted one under the same name.
+			current := stored.DeepCopy()
+			current.CreationTimestamp = metav1.NewTime(created)
+			require.NoError(t, c.podsInformer.GetIndexer().Update(current))
+			other := current.DeepCopy()
+			other.Name += "-other"
+			other.UID = types.UID(other.Name)
+			other.Labels[workloadv1alpha1.RoleIDKey] = tt.otherRoleID
+			other.CreationTimestamp = metav1.NewTime(created.Add(tt.other))
+			require.NoError(t, c.podsInformer.GetIndexer().Add(other))
+			former := current.DeepCopy()
+			former.UID = types.UID("former")
+			former.CreationTimestamp = metav1.NewTime(created.Add(-time.Hour))
+			former.DeletionTimestamp = ptr.To(metav1.NewTime(created.Add(tt.deleted)))
+			former.DeletionGracePeriodSeconds = ptr.To(int64(tt.grace / time.Second))
+			kube := c.kubeClientSet.(*kubefake.Clientset)
+			kube.ClearActions()
+
+			c.deletePod(former)
+
+			recovered := slices.ContainsFunc(kube.Actions(), func(action kubetesting.Action) bool {
+				return action.GetResource().Resource == "pods" && (action.GetVerb() == "delete" || action.GetVerb() == "delete-collection")
+			})
+			assert.Equal(t, tt.wantRecover, recovered, "Pods deleted for recovery")
+			if !tt.wantRecover {
+				assert.Equal(t, 1, c.workqueue.Len(), "the ModelServing is reconciled to refill a Pod that is really missing")
+			}
+		})
+	}
+}
+
+// An add or update event of a Pod can be handled after the Pod is gone and
+// its ServingGroup was removed from the store. It must not bring the group
+// back with the revision of that Pod: the group would then be recreated in
+// place, unmarked, instead of through the scale-up that marks surge groups.
+func TestDelayedPodEventDoesNotRestoreDeletedGroup(t *testing.T) {
+	c, ms, _ := newSurgeFixture(t, surgeServingGroup)
+	key := utils.GetNamespaceName(ms)
+	group := utils.GenerateServingGroupName(ms.Name, 2)
+	pod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(context.Background(), utils.GeneratePodName(group, "inference-0", 0), metav1.GetOptions{})
+	require.NoError(t, err)
+	cached, _, err := c.podsInformer.GetIndexer().Get(pod)
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Delete(cached))
+	c.store.DeleteServingGroup(key, group)
+
+	c.updatePod(nil, pod)
+	assert.Equal(t, datastore.ServingGroupNotFound, c.store.GetServingGroupStatus(key, group), "the Pod is gone")
+
+	replacement := pod.DeepCopy()
+	replacement.UID = types.UID("replacement")
+	require.NoError(t, c.podsInformer.GetIndexer().Add(replacement))
+	c.updatePod(nil, pod)
+	assert.Equal(t, datastore.ServingGroupNotFound, c.store.GetServingGroupStatus(key, group), "the Pod was replaced")
+
+	terminating := pod.DeepCopy()
+	terminating.DeletionTimestamp = ptr.To(metav1.Now())
+	require.NoError(t, c.podsInformer.GetIndexer().Update(terminating))
+	c.updatePod(nil, pod)
+	assert.Equal(t, datastore.ServingGroupNotFound, c.store.GetServingGroupStatus(key, group), "the Pod is terminating")
+	require.NoError(t, c.podsInformer.GetIndexer().Update(replacement))
+
+	// The event of the Pod in the cache is recorded.
+	c.updatePod(nil, replacement)
+	assert.NotEqual(t, datastore.ServingGroupNotFound, c.store.GetServingGroupStatus(key, group))
+}
+
+// A Ready event of a Pod can be handled after the deletion of its
+// ServingGroup started. It must not make the group Running again: the delete
+// events of its Pods would then trigger recovery, and the group would be
+// recreated in place instead of through the scale-up that marks surge groups.
+func TestDelayedReadyEventDoesNotReviveDeletingGroup(t *testing.T) {
+	c, ms, _ := newSurgeFixture(t, surgeServingGroup)
+	ms.Spec.RecoveryPolicy = workloadv1alpha1.RoleRecreate
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(ms))
+	key := utils.GetNamespaceName(ms)
+	group := utils.GenerateServingGroupName(ms.Name, 2)
+	pod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(context.Background(), utils.GeneratePodName(group, "inference-0", 0), metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupDeleting))
+
+	c.updatePod(nil, pod)
+	assert.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(key, group))
+
+	// The delete event then only continues the deletion of the group.
+	cached, _, err := c.podsInformer.GetIndexer().Get(pod)
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Delete(cached))
+	c.deletePod(pod)
+	assert.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group, "inference", "inference-0"), "the Role is not recovered")
 }

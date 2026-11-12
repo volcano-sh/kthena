@@ -357,6 +357,15 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 		// After deleted，following work will be done in deletePod.
 		return
 	}
+	// Event handlers can lag behind the informer cache. An event about a Pod
+	// that is gone, replaced or terminating by now must not be recorded in the
+	// store: it would bring back a ServingGroup that was already deleted, with
+	// the revision of its former Pod. The check narrows that window but does
+	// not close it, because the handling below makes API calls.
+	if current, err := c.podsLister.Pods(newPod.Namespace).Get(newPod.Name); err != nil || current.UID != newPod.UID || current.DeletionTimestamp != nil {
+		klog.V(2).Infof("ignoring the event of pod %s/%s (uid %s): it is gone, replaced or terminating", newPod.Namespace, newPod.Name, newPod.UID)
+		return
+	}
 
 	ms, servingGroupName, err := c.getModelServingByChildResource(newPod)
 	if err != nil {
@@ -455,6 +464,12 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		return
 	}
 
+	if c.recreatedSinceDeletion(ms, servingGroupName, pod) {
+		klog.V(2).Infof("ignoring the delete event of pod %s/%s (uid %s): its Role or ServingGroup was recreated since", pod.Namespace, pod.Name, pod.UID)
+		c.enqueueModelServing(ms)
+		return
+	}
+
 	// Remove the pod from running pods in the store
 	c.store.DeleteRunningPodFromServingGroup(utils.GetNamespaceName(ms), servingGroupName, pod.Name)
 
@@ -471,6 +486,49 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	if err != nil {
 		klog.Errorf("handle deleted pod %s/%s failed in ServingGroup %s of ModelServing %s/%s: %v", pod.Namespace, pod.Name, servingGroupName, ms.Namespace, ms.Name, err)
 	}
+}
+
+// recreatedSinceDeletion reports whether every Pod of the unit that the
+// recovery policy would recreate for the deleted Pod was created after that
+// Pod was deleted. Event handlers can lag behind the informer cache, so the
+// unit may have been deleted and created again before the delete event of one
+// of its former Pods is handled. Recovering it once more would only restart
+// the new Pods.
+//
+// DeletionTimestamp minus the grace period is never later than the removal of
+// the Pod: the last state of a deleted Pod carries the removal time (the
+// request time before Kubernetes 1.33) with a zero grace period, and a Pod
+// last seen terminating carries the request time plus its grace period.
+// Timestamps have a resolution of one second. A Pod created in the same second
+// counts as created afterwards, because a unit is recreated only once its
+// former Pods are gone. A unit that young which really loses a Pod has the Pod
+// refilled by the next reconcile instead of being recreated.
+//
+// Only Pods in the informer cache are considered. A delete event handled
+// after the unit was created again but before its new Pods reach the cache is
+// still treated as the loss of a Pod.
+func (c *ModelServingController) recreatedSinceDeletion(ms *workloadv1alpha1.ModelServing, servingGroupName string, deleted *corev1.Pod) bool {
+	if deleted.DeletionTimestamp == nil {
+		return false
+	}
+	deletedAt := deleted.DeletionTimestamp.Time
+	if grace := deleted.DeletionGracePeriodSeconds; grace != nil {
+		deletedAt = deletedAt.Add(-time.Duration(*grace) * time.Second)
+	}
+	index, key := RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, servingGroupName, utils.GetRoleName(deleted), utils.GetRoleID(deleted))
+	if ms.Spec.RecoveryPolicy == workloadv1alpha1.ServingGroupRecreate {
+		index, key = GroupNameKey, fmt.Sprintf("%s/%s", ms.Namespace, servingGroupName)
+	}
+	pods, err := c.getPodsByIndex(index, key)
+	if err != nil || len(pods) == 0 {
+		return false
+	}
+	for _, pod := range pods {
+		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) || pod.CreationTimestamp.Time.Before(deletedAt) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *ModelServingController) deleteService(obj interface{}) {
@@ -2128,6 +2186,13 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	ready, err := c.checkServingGroupReady(ms, servingGroupName)
 	if err != nil {
 		return errors.Join(revisionErr, fmt.Errorf("failed to check ServingGroup status: %w", err))
+	}
+	if ready && c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName) == datastore.ServingGroupDeleting {
+		// The event was queued before the deletion started. Running would make
+		// the delete events of the Pods trigger recovery instead of finishing
+		// the deletion.
+		klog.V(2).Infof("ServingGroup %s/%s is being deleted, ignoring the Ready event of pod %s", ms.Namespace, servingGroupName, newPod.Name)
+		return revisionErr
 	}
 	if ready {
 		// All pods in the ServingGroup are running, so the ServingGroup status also needs to be set to running
