@@ -1,0 +1,88 @@
+name: Release Charts
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions: read-all
+
+jobs:
+  release-charts:
+    if: github.repository == 'volcano-sh/kthena'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          path: "kthena"
+
+      - name: Checkout helm-charts
+        uses: actions/checkout@v5
+        with:
+          repository: "${{ github.repository_owner }}/helm-charts"
+          # use token for helm-charts repo
+          token: "${{ secrets.HELM_CHARTER_TOKEN }}"
+          path: "helm-charts"
+          fetch-depth: 0
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Setup yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Make charts
+        working-directory: kthena
+        run: |
+          TAG=${GITHUB_REF_NAME} make generate-charts
+
+      - name: Install chart-releaser
+        # Warning: Do not upgrade from v1.5.0; newer versions require a gh-pages branch when uploading preview releases.
+        uses: helm/chart-releaser-action@be16258da8010256c6e82849661221415f031968 # v1.5.0
+        with:
+          install_only: true
+
+      # upload charts to helm-charts repo's release
+      - name: Upload charts
+        working-directory: kthena
+        run: |
+          cr upload -o ${{ github.repository_owner }} --skip-existing
+        env:
+          # GitHub repository
+          CR_GIT_REPO: "helm-charts"
+          # Path to directory with chart packages (default ".cr-release-packages")
+          CR_PACKAGE_PATH: "_output/release/chart/"
+          # use token for helm-charts repo
+          CR_TOKEN: "${{ secrets.HELM_CHARTER_TOKEN }}"
+
+      # copy artifacts to helm-charts repo, we need those for update index
+      - name: Copy artifacts
+        run: |
+          cp -r kthena/_output/ helm-charts/
+
+      - name: Configure Git
+        working-directory: helm-charts
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      # this step will directly push to the main branch, so make sure you have the right permissions
+      - name: Update index
+        working-directory: helm-charts
+        run: |
+          rm -rf index.yaml
+          rm -rf .cr-index
+          mkdir -p .cr-index
+          cr index -o ${{ github.repository_owner }} --push
+        env:
+          # GitHub repository
+          CR_GIT_REPO: "helm-charts"
+          # The GitHub pages branch (default "gh-pages")
+          CR_PAGES_BRANCH: "main"
+          # Path to directory with chart packages (default ".cr-release-packages")
+          CR_PACKAGE_PATH: "_output/release/chart/"
+          # use token for helm-charts repo
+          CR_TOKEN: "${{ secrets.HELM_CHARTER_TOKEN }}"

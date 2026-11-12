@@ -2,6 +2,14 @@ apiVersion: v2
 name: kthena
 description: A Helm chart for deploying Kthena
 type: application
+home: https://kthena.volcano.sh
+icon: https://raw.githubusercontent.com/volcano-sh/kthena/main/docs/kthena/static/img/kthena-logo/icon/colour/kthena-icon-color.svg
+sources:
+  - https://github.com/volcano-sh/kthena
+keywords:
+  - llm
+  - inference
+  - volcano
 # This is the chart version. This version number should be incremented each time you make changes
 # to the chart and its templates, including the app version.
 # Versions are expected to follow Semantic Versioning (https://semver.org/)
