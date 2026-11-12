@@ -143,6 +143,9 @@ func TestProfileStatusController_SchedulerProfileCondition(t *testing.T) {
 			require.NoError(t, err)
 
 			if tt.profile != nil {
+				// Chains are lazy: the referencing ModelServer must be in the
+				// store for the profile's chain to build.
+				store.AddOrUpdateModelServer(ms, nil)
 				store.AddOrUpdateSchedulerProfile(tt.profile)
 				waitForChainBuild(t, chainManager, types.NamespacedName{Namespace: "default", Name: "p1"})
 			}
@@ -215,6 +218,9 @@ func TestProfileStatusController_ReportsResolvedOnSync(t *testing.T) {
 	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
 		context.Background(), ms, metav1.CreateOptions{})
 	require.NoError(t, err)
+	// The referencing ModelServer must be in the store for the chain to
+	// build lazily.
+	store.AddOrUpdateModelServer(ms, nil)
 	store.AddOrUpdateSchedulerProfile(builtProfile("p1"))
 	waitForChainBuild(t, chainManager, types.NamespacedName{Namespace: "default", Name: "p1"})
 
@@ -265,6 +271,9 @@ func TestProfileStatusController_StatusNotifyConverges(t *testing.T) {
 
 	// Step 2: the profile lands and the chain settles; the status signal
 	// re-enqueues the referencing ModelServer, which now reports Resolved.
+	// The referencing ModelServer must be in the store for the chain to
+	// build lazily.
+	store.AddOrUpdateModelServer(ms, nil)
 	_, err = kthenaClient.NetworkingV1alpha1().SchedulerProfiles("default").Create(
 		context.Background(), builtProfile("p1"), metav1.CreateOptions{})
 	require.NoError(t, err)
@@ -332,6 +341,9 @@ func TestProfileStatusController_ReferenceRemovedClearsCondition(t *testing.T) {
 	_, err := kthenaClient.NetworkingV1alpha1().ModelServers("default").Create(
 		context.Background(), ms, metav1.CreateOptions{})
 	require.NoError(t, err)
+	// The referencing ModelServer must be in the store for the chain to
+	// build lazily.
+	store.AddOrUpdateModelServer(ms, nil)
 	store.AddOrUpdateSchedulerProfile(builtProfile("p1"))
 	waitForChainBuild(t, chainManager, types.NamespacedName{Namespace: "default", Name: "p1"})
 
@@ -373,6 +385,9 @@ func TestProfileStatusController_FailedWriteIsReturned(t *testing.T) {
 			context.Background(), ms, metav1.CreateOptions{})
 		require.NoError(t, err)
 
+		// The referencing ModelServer must be in the store for the chain to
+		// build lazily.
+		store.AddOrUpdateModelServer(ms, nil)
 		store.AddOrUpdateSchedulerProfile(builtProfile("p1"))
 		waitForChainBuild(t, chainManager, types.NamespacedName{Namespace: "default", Name: "p1"})
 
@@ -392,6 +407,7 @@ func TestProfileStatusController_FailedWriteIsReturned(t *testing.T) {
 			context.Background(), ms, metav1.CreateOptions{})
 		require.NoError(t, err)
 
+		store.AddOrUpdateModelServer(ms, nil)
 		store.AddOrUpdateSchedulerProfile(builtProfile("p1"))
 		waitForChainBuild(t, chainManager, types.NamespacedName{Namespace: "default", Name: "p1"})
 
@@ -436,6 +452,9 @@ func TestProfileStatusController_FailedWriteIsRequeued(t *testing.T) {
 	ms := newModelServerWithProfileRef("default", "ms", "p1")
 	require.NoError(t, kthenaInformerFactory.Networking().V1alpha1().ModelServers().Informer().GetIndexer().Add(ms))
 
+	// The referencing ModelServer must be in the store for the chain to
+	// build lazily.
+	store.AddOrUpdateModelServer(ms, nil)
 	store.AddOrUpdateSchedulerProfile(builtProfile("p1"))
 	waitForChainBuild(t, chainManager, types.NamespacedName{Namespace: "default", Name: "p1"})
 
