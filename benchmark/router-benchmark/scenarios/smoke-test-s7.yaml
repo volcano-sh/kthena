@@ -1,0 +1,64 @@
+name: "smoke-test-s7-backend-variance"
+description: "s7 scenario: latency variance on heterogeneous backends"
+
+# rate=0.5 was empirically validated on the 4c/16g CI runner against this
+# exact backend shape (3 heterogeneous mocker pods: fast/normal/slow at
+# 10x/1x/0.2x speedup, default resources): CI runs 30694269799 and
+# 30695729677 cleared 96.77-100% success on random and least-request, with
+# 0 mocker restarts and 0 genuine AIPerf errors on both runs.
+#
+# The scenario's original rate=50 was never run directly (superseded
+# before any dispatch), but is well above what 3 pods on this backend
+# shape could plausibly sustain given the confirmed-unsafe rate=20 on 8
+# validated-shape pods (issue #1452's original diagnosis).
+#
+# IMPORTANT caveat for anyone extending the request-level saturation
+# verdict logic to this scenario: both validated runs show large p95/p50
+# tail-latency ratios (5.3x-40.0x), well above the 3.0x warning threshold
+# calibrated on homogeneous scenarios. This is expected here, not a
+# saturation signal - the "slow" pod is deliberately 5x slower than
+# "normal" by design (speedupRatio: 0.2), so a wide latency spread is the
+# scenario working as intended. Do not treat the tail-latency warning as
+# meaningful for s7/s8; success rate and genuine-error/cancelled counts
+# remained the reliable signals here.
+#
+# See volcano-sh/kthena#1452 for the full experiment history.
+load:
+  schedule:
+    mode: "rate"
+    rate: 0.5
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    engineType: "sglang"
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "fast"
+      count: 1
+      speedupRatio: 10.0
+    - name: "normal"
+      count: 1
+      speedupRatio: 1.0
+    - name: "slow"
+      count: 1
+      speedupRatio: 0.2
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
