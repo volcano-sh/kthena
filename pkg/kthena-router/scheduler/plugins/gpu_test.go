@@ -23,7 +23,7 @@ import (
 )
 
 func TestGPUCacheUsageName(t *testing.T) {
-	plugin := NewGPUCacheUsage()
+	plugin := NewGPUCacheUsage(BuildContext{})
 	if plugin.Name() != GPUCacheUsagePluginName {
 		t.Fatalf("expected plugin name %q, got %q", GPUCacheUsagePluginName, plugin.Name())
 	}
@@ -52,7 +52,7 @@ func TestGPUCacheUsageScore(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plugin := NewGPUCacheUsage()
+			plugin := NewGPUCacheUsage(BuildContext{})
 			scores := plugin.Score(nil, tt.pods)
 			if len(scores) != len(tt.pods) {
 				t.Fatalf("expected %d scores, got %d", len(tt.pods), len(scores))

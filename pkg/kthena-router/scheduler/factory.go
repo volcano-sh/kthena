@@ -17,6 +17,8 @@ limitations under the License.
 package scheduler
 
 import (
+	"fmt"
+
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
@@ -24,8 +26,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
-type ScorePluginBuilder = func(store datastore.Store, arg runtime.RawExtension) framework.ScorePlugin
-type FilterPluginBuilder = func(arg runtime.RawExtension) framework.FilterPlugin
+type ScorePluginBuilder = func(bc plugins.BuildContext, store datastore.Store, arg runtime.RawExtension) (framework.ScorePlugin, error)
+type FilterPluginBuilder = func(bc plugins.BuildContext, arg runtime.RawExtension) (framework.FilterPlugin, error)
 
 // PluginRegistry manages the registration and retrieval of scheduler plugins
 type PluginRegistry struct {
@@ -63,55 +65,40 @@ func (r *PluginRegistry) getFilterPlugin(name string) (FilterPluginBuilder, bool
 	return fp, exist
 }
 
-// registerDefaultPlugins registers all default plugins to the given registry
+// registerDefaultPlugins registers all scheduler plugins to the given registry,
+// derived from plugins.SchedulerPlugins — the single registration point.
 func registerDefaultPlugins(registry *PluginRegistry) {
-	// scorePlugin
-	registry.registerScorePlugin(plugins.GPUCacheUsagePluginName, func(_ datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
-		return plugins.NewGPUCacheUsage()
-	})
-	registry.registerScorePlugin(plugins.LeastLatencyPluginName, func(_ datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
-		return plugins.NewLeastLatency(args)
-	})
-	registry.registerScorePlugin(plugins.LeastRequestPluginName, func(_ datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
-		return plugins.NewLeastRequest(args)
-	})
-	registry.registerScorePlugin(plugins.RandomPluginName, func(_ datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
-		return plugins.NewRandom(args)
-	})
-	registry.registerScorePlugin(plugins.PrefixCachePluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
-		return plugins.NewPrefixCache(store, args)
-	})
-
-	registry.registerScorePlugin(plugins.KVCacheAwarePluginName, func(store datastore.Store, args runtime.RawExtension) framework.ScorePlugin {
-		return plugins.NewKVCacheAware(store, args)
-	})
-	// filterPlugin
-	registry.registerFilterPlugin(plugins.LeastRequestPluginName, func(args runtime.RawExtension) framework.FilterPlugin {
-		return plugins.NewLeastRequest(args)
-	})
-	registry.registerFilterPlugin(plugins.LoraAffinityPluginName, func(args runtime.RawExtension) framework.FilterPlugin {
-		return plugins.NewLoraAffinity()
-	})
-}
-
-func getFilterPlugins(registry *PluginRegistry, filterPluginMap []string, pluginsArgMap map[string]runtime.RawExtension) []framework.FilterPlugin {
-	var list []framework.FilterPlugin
-	// TODO: enable lora affinity when models from metrics are available.
-	for _, pluginName := range filterPluginMap {
-		if builderFunc, exist := registry.getFilterPlugin(pluginName); !exist {
-			klog.Errorf("Failed to get plugin %s.", pluginName)
-			continue
-		} else {
-			plugin := builderFunc(pluginsArgMap[pluginName])
-			if plugin != nil {
-				list = append(list, plugin)
-			}
+	for name, plugin := range plugins.SchedulerPlugins {
+		if plugin.NewScore != nil {
+			registry.registerScorePlugin(name, plugin.NewScore)
+		}
+		if plugin.NewFilter != nil {
+			registry.registerFilterPlugin(name, plugin.NewFilter)
 		}
 	}
-	return list
 }
 
-func getScorePlugins(registry *PluginRegistry, store datastore.Store, scorePluginMap map[string]int, pluginsArgMap map[string]runtime.RawExtension) []*scorePlugin {
+func getFilterPlugins(registry *PluginRegistry, filterPlugins []string, pluginsArgMap map[string]runtime.RawExtension) ([]framework.FilterPlugin, error) {
+	var list []framework.FilterPlugin
+	// TODO: enable lora affinity when models from metrics are available.
+	for _, pluginName := range filterPlugins {
+		builderFunc, exist := registry.getFilterPlugin(pluginName)
+		if !exist {
+			klog.Errorf("Failed to get plugin %s.", pluginName)
+			continue
+		}
+		plugin, err := builderFunc(plugins.BuildContext{}, pluginsArgMap[pluginName])
+		if err != nil {
+			return nil, fmt.Errorf("failed to build filter plugin %s: %w", pluginName, err)
+		}
+		if plugin != nil {
+			list = append(list, plugin)
+		}
+	}
+	return list, nil
+}
+
+func getScorePlugins(registry *PluginRegistry, store datastore.Store, scorePluginMap map[string]int, pluginsArgMap map[string]runtime.RawExtension) ([]*scorePlugin, error) {
 	var list []*scorePlugin
 	for pluginName, weight := range scorePluginMap {
 		if weight < 0 {
@@ -119,19 +106,25 @@ func getScorePlugins(registry *PluginRegistry, store datastore.Store, scorePlugi
 			weight = 0
 		}
 
-		if builderFunc, exist := registry.getScorePlugin(pluginName); !exist {
+		builderFunc, exist := registry.getScorePlugin(pluginName)
+		if !exist {
+			// Legacy lenient behavior for the global config: log and skip
+			// (see getFilterPlugins).
 			klog.Errorf("Failed to get plugin %s.", pluginName)
-		} else {
-			plugin := builderFunc(store, pluginsArgMap[pluginName])
-			if plugin != nil {
-				list = append(list, &scorePlugin{
-					plugin: plugin,
-					weight: weight,
-				})
-			}
+			continue
+		}
+		plugin, err := builderFunc(plugins.BuildContext{}, store, pluginsArgMap[pluginName])
+		if err != nil {
+			return nil, fmt.Errorf("failed to build score plugin %s: %w", pluginName, err)
+		}
+		if plugin != nil {
+			list = append(list, &scorePlugin{
+				plugin: plugin,
+				weight: weight,
+			})
 		}
 	}
-	return list
+	return list, nil
 }
 
 func getPostScheduleHooks(scorePlugins []*scorePlugin) []framework.PostScheduleHook {

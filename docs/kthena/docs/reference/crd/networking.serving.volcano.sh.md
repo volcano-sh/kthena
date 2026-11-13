@@ -14,6 +14,7 @@
 - [ModelRouteList](#modelroutelist)
 - [ModelServer](#modelserver)
 - [ModelServerList](#modelserverlist)
+- [SchedulerProfile](#schedulerprofile)
 
 
 
@@ -161,6 +162,22 @@ _Appears in:_
 | `Anthropic` | Anthropic selects the Anthropic-compatible Messages API adapter.<br /> |
 
 
+#### Filter
+
+
+
+Filter lists the filter plugins enabled by a profile.
+
+
+
+_Appears in:_
+- [Plugins](#plugins)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _string array_ | Enabled filter plugin names, executed in list order. |  |  |
+
+
 #### GlobalRateLimit
 
 
@@ -228,6 +245,22 @@ _Appears in:_
 | `nixl` |  |
 | `lmcache` |  |
 | `mooncake` |  |
+
+
+#### LoadBalancer
+
+
+
+LoadBalancer configures the load-balancing policy of a ModelServer.
+
+
+
+_Appears in:_
+- [TrafficPolicy](#trafficpolicy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `schedulerProfile` _string_ | SchedulerProfile references a SchedulerProfile CRD by name. The<br />referenced profile carries a whole scheduler plugin combination that<br />replaces the global scheduler configuration for this ModelServer's<br />pods. When unset, the global router scheduler configuration applies.<br />The profile must be in the same namespace as this ModelServer. |  | MaxLength: 253 <br /> |
 
 
 #### ModelMatch
@@ -410,6 +443,59 @@ _Appears in:_
 | `decodeLabels` _object (keys:string, values:string)_ | The labels to match the model serving instances for decode. |  |  |
 
 
+#### PluginConfig
+
+
+
+PluginConfig associates configuration arguments with a named plugin.
+
+
+
+_Appears in:_
+- [SchedulerProfileSpec](#schedulerprofilespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the plugin the arguments apply to, e.g. "least-request". |  | Required: \{\} <br /> |
+| `args` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#rawextension-runtime-pkg)_ | Args is the plugin-specific configuration in YAML/JSON form. The<br />accepted shape depends on the plugin (see each plugin's docs). |  |  |
+
+
+#### PluginWithWeight
+
+
+
+PluginWithWeight pairs a score plugin name with its weight.
+
+
+
+_Appears in:_
+- [Score](#score)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name of the score plugin, e.g. "prefix-cache". |  | Required: \{\} <br /> |
+| `weight` _integer_ | Weight multiplies this plugin's score before it is summed with the<br />other plugins' weighted scores. Must be greater than 0. |  | Minimum: 1 <br /> |
+
+
+#### Plugins
+
+
+
+Plugins declares the enabled filter and score plugins of a profile.
+JSON names follow the Kubernetes API convention (lowerCamelCase); the
+router ConfigMap keeps its capitalized keys.
+
+
+
+_Appears in:_
+- [SchedulerProfileSpec](#schedulerprofilespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `filter` _[Filter](#filter)_ | Filter declares the filter plugins enabled by this profile. |  |  |
+| `score` _[Score](#score)_ | Score declares the score plugins enabled by this profile, each with<br />its weight in the final score sum. |  |  |
+
+
 #### ProviderAuth
 
 
@@ -535,6 +621,63 @@ _Appears in:_
 | `targetModels` _[TargetModel](#targetmodel) array_ |  |  | MaxItems: 16 <br />MinItems: 1 <br /> |
 
 
+#### SchedulerProfile
+
+
+
+
+
+
+
+_Appears in:_
+- [SchedulerProfileList](#schedulerprofilelist)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `networking.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `SchedulerProfile` | | |
+| `spec` _[SchedulerProfileSpec](#schedulerprofilespec)_ |  |  |  |
+
+
+
+
+#### SchedulerProfileSpec
+
+
+
+SchedulerProfileSpec defines a complete scheduler plugin combination.
+The structure mirrors the router's global scheduler configuration
+(pluginConfig + plugins), but note the key casing differs: this API uses
+lowerCamelCase JSON names ("filter", "score"), the ConfigMap uses
+capitalized keys ("Filter", "Score").
+
+
+
+_Appears in:_
+- [SchedulerProfile](#schedulerprofile)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `pluginConfig` _[PluginConfig](#pluginconfig) array_ | PluginConfig holds per-plugin arguments, keyed by plugin name. |  |  |
+| `plugins` _[Plugins](#plugins)_ | Plugins declares which filter and score plugins are enabled, with<br />their score weights. An empty section means no plugins of that kind<br />are enabled by this profile. |  |  |
+
+
+#### Score
+
+
+
+Score lists the score plugins enabled by a profile with their weights.
+
+
+
+_Appears in:_
+- [Plugins](#plugins)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _[PluginWithWeight](#pluginwithweight) array_ | Enabled score plugins with weights. Weight must be greater than 0. |  |  |
+
+
 #### SessionKeySource
 
 
@@ -643,6 +786,7 @@ _Appears in:_
 | `retry` _[Retry](#retry)_ | The retry policy for the inference request. |  |  |
 | `connectionPool` _[ConnectionPool](#connectionpool)_ | ConnectionPool configures the upstream HTTP connection pool used when<br />forwarding to this ModelServer's pods. When omitted, a shared default<br />pool is used. Each ModelServer that sets this gets its own isolated pool. |  |  |
 | `sessionSticky` _[SessionSticky](#sessionsticky)_ | SessionSticky pins requests with the same extracted session key to the same<br />backend Pod of this ModelServer for a TTL. Nil or omitted disables session<br />affinity for this ModelServer. It does not override ModelRoute weighted<br />selection among ModelServers. |  |  |
+| `loadBalancer` _[LoadBalancer](#loadbalancer)_ | LoadBalancer configures load-balancing behavior for this ModelServer. |  |  |
 
 
 #### WorkloadPort

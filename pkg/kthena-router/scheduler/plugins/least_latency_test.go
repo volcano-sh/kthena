@@ -33,7 +33,7 @@ func schedulerTestPod(name string) *datastore.PodInfo {
 }
 
 func TestLeastLatencyName(t *testing.T) {
-	plugin := NewLeastLatency(runtime.RawExtension{Raw: []byte(`{}`)})
+	plugin := NewLeastLatency(BuildContext{}, runtime.RawExtension{Raw: []byte(`{}`)})
 	if plugin.Name() != LeastLatencyPluginName {
 		t.Fatalf("expected plugin name %q, got %q", LeastLatencyPluginName, plugin.Name())
 	}
@@ -111,21 +111,21 @@ func TestLeastLatencyScore(t *testing.T) {
 }
 
 func TestNewLeastLatencyNilRawUsesDefaultWeight(t *testing.T) {
-	plugin := NewLeastLatency(runtime.RawExtension{})
+	plugin := NewLeastLatency(BuildContext{}, runtime.RawExtension{})
 	if plugin.TTFTTPOTWeightFactor != defaultTTFTTPOTWeightFactor {
 		t.Fatalf("expected default weight factor %v, got %v", defaultTTFTTPOTWeightFactor, plugin.TTFTTPOTWeightFactor)
 	}
 }
 
 func TestNewLeastLatencyRawWithoutWeightUsesDefault(t *testing.T) {
-	plugin := NewLeastLatency(runtime.RawExtension{Raw: []byte(`{}`)})
+	plugin := NewLeastLatency(BuildContext{}, runtime.RawExtension{Raw: []byte(`{}`)})
 	if plugin.TTFTTPOTWeightFactor != defaultTTFTTPOTWeightFactor {
 		t.Fatalf("expected default weight factor %v, got %v", defaultTTFTTPOTWeightFactor, plugin.TTFTTPOTWeightFactor)
 	}
 }
 
 func TestNewLeastLatencyInvalidArgsUsesDefaultWeight(t *testing.T) {
-	plugin := NewLeastLatency(runtime.RawExtension{Raw: []byte(`TTFTTPOTWeightFactor: [`)})
+	plugin := NewLeastLatency(BuildContext{}, runtime.RawExtension{Raw: []byte(`TTFTTPOTWeightFactor: [`)})
 	if plugin.TTFTTPOTWeightFactor != defaultTTFTTPOTWeightFactor {
 		t.Fatalf("expected default weight factor %v, got %v", defaultTTFTTPOTWeightFactor, plugin.TTFTTPOTWeightFactor)
 	}
@@ -145,7 +145,7 @@ func TestNewLeastLatencyInvalidWeightUsesDefault(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plugin := NewLeastLatency(runtime.RawExtension{Raw: []byte(tt.raw)})
+			plugin := NewLeastLatency(BuildContext{}, runtime.RawExtension{Raw: []byte(tt.raw)})
 			if plugin.TTFTTPOTWeightFactor != defaultTTFTTPOTWeightFactor {
 				t.Fatalf("expected default weight factor %v, got %v", defaultTTFTTPOTWeightFactor, plugin.TTFTTPOTWeightFactor)
 			}
@@ -166,7 +166,7 @@ func TestNewLeastLatencyAcceptsWeightBounds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plugin := NewLeastLatency(runtime.RawExtension{Raw: []byte("TTFTTPOTWeightFactor: " + tt.raw)})
+			plugin := NewLeastLatency(BuildContext{}, runtime.RawExtension{Raw: []byte("TTFTTPOTWeightFactor: " + tt.raw)})
 			if plugin.TTFTTPOTWeightFactor != tt.expect {
 				t.Fatalf("expected weight %v, got %v", tt.expect, plugin.TTFTTPOTWeightFactor)
 			}

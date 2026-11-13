@@ -28,12 +28,14 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
+	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 )
 
@@ -76,10 +78,12 @@ type routerRegistrationRequest struct {
 	RouterID string `json:"router_id"`
 }
 
-// podLister is the subset of datastore.Store used to find the pods to stream
-// KV events from.
-type podLister interface {
+// subscriberStore is the subset of datastore.Store used to resolve the pods a
+// chain streams KV events from.
+type subscriberStore interface {
 	GetAllPods() map[types.NamespacedName]*datastore.PodInfo
+	GetAllModelServers() map[types.NamespacedName]*aiv1alpha1.ModelServer
+	GetPodsByModelServer(name types.NamespacedName) ([]*datastore.PodInfo, error)
 }
 
 // kvStreamTarget identifies one incarnation of a pod and the address of its
@@ -101,18 +105,21 @@ type kvStream struct {
 }
 
 // kvEventSubscriber keeps one long-lived connection to the runtime sidecar of
-// every pod in the datastore and applies the KV events the sidecar streams
-// back to the index. The router opens the connection to the pod IP it knows,
-// so every event on it belongs to that pod; nothing in the stream says which
-// pod it comes from, and the router exposes no endpoint for KV events.
+// every pod in its scope and applies the KV events the sidecar streams back
+// to the index. The router opens the connection to the pod IP it knows, so
+// every event on it belongs to that pod; nothing in the stream says which pod
+// it comes from, and the router exposes no endpoint for KV events.
 //
 // A stream starts with the pod's full block set, so the blocks of a pod are
 // only kept while its stream is open: they are dropped when it ends,
 // including when the pod leaves the datastore because it is deleted or not
 // Ready, and are sent again as soon as a stream is reopened.
 type kvEventSubscriber struct {
-	store       podLister
-	index       *KVBlockMemoryIndex
+	store subscriberStore
+	index *KVBlockMemoryIndex
+	// profile scopes the streams: a profile chain streams from the pods of
+	// the ModelServers referencing it; the global chain streams from all.
+	profile     types.NamespacedName
 	routerID    string
 	runtimePort int
 	client      *http.Client
@@ -128,10 +135,11 @@ type kvEventSubscriber struct {
 	streams map[string]*kvStream
 }
 
-func newKVEventSubscriber(store podLister, index *KVBlockMemoryIndex, routerID string, runtimePort int) *kvEventSubscriber {
+func newKVEventSubscriber(store subscriberStore, index *KVBlockMemoryIndex, profile types.NamespacedName, routerID string, runtimePort int) *kvEventSubscriber {
 	return &kvEventSubscriber{
 		store:       store,
 		index:       index,
+		profile:     profile,
 		routerID:    routerID,
 		runtimePort: runtimePort,
 		client: &http.Client{
@@ -174,6 +182,18 @@ func routerInstanceID() string {
 	return name
 }
 
+// chainRegistrationSequence numbers chain registrations, so a profile's
+// rebuilt chain never shares a router id with the chain it replaces.
+var chainRegistrationSequence atomic.Int64
+
+// routerChainInstanceID returns the router id of a profile chain's
+// subscriber: replica id + profile + sequence. Global keeps the plain id.
+func routerChainInstanceID(profile types.NamespacedName) string {
+	return fmt.Sprintf("%s/%s/%s/%d",
+		routerInstanceID(), profile.Namespace, profile.Name,
+		chainRegistrationSequence.Add(1))
+}
+
 // onPodEvent is the datastore Pod callback: a pod that is added, updated or
 // removed is picked up right away instead of on the next resync.
 func (s *kvEventSubscriber) onPodEvent(datastore.EventData) {
@@ -198,12 +218,50 @@ func (s *kvEventSubscriber) run(ctx context.Context) {
 	}
 }
 
-// targets returns the pods to stream KV events from, keyed by cache owner
-// identifier.
+// scopedOwners returns the cache owners a profile chain streams from: the
+// pods of the ModelServers referencing its profile.
+func (s *kvEventSubscriber) scopedOwners() map[string]struct{} {
+	owners := make(map[string]struct{})
+	for name, ms := range s.store.GetAllModelServers() {
+		if name.Namespace != s.profile.Namespace || !servesProfile(ms, s.profile.Name) {
+			continue
+		}
+		pods, err := s.store.GetPodsByModelServer(name)
+		if err != nil {
+			klog.V(4).Infof("KVCacheAware: skipping ModelServer %s: %v", name.String(), err)
+			continue
+		}
+		for _, pod := range pods {
+			owners[cacheOwnerIdentifier(pod.GetPodNamespacedName())] = struct{}{}
+		}
+	}
+	return owners
+}
+
+// servesProfile reports whether ms references the named SchedulerProfile.
+func servesProfile(ms *aiv1alpha1.ModelServer, profile string) bool {
+	return ms.Spec.TrafficPolicy != nil &&
+		ms.Spec.TrafficPolicy.LoadBalancer != nil &&
+		ms.Spec.TrafficPolicy.LoadBalancer.SchedulerProfile != nil &&
+		*ms.Spec.TrafficPolicy.LoadBalancer.SchedulerProfile == profile
+}
+
+// targets returns the pods to stream KV events from. A profile chain streams
+// only from its profile's ModelServers; the global chain streams from all.
 func (s *kvEventSubscriber) targets() map[string]kvStreamTarget {
+	var scoped map[string]struct{}
+	if s.profile != (types.NamespacedName{}) {
+		scoped = s.scopedOwners()
+	}
 	targets := make(map[string]kvStreamTarget)
 	pods := make(map[string][]string)
 	for name, info := range s.store.GetAllPods() {
+		owner := cacheOwnerIdentifier(name)
+		if scoped != nil {
+			if _, ok := scoped[owner]; !ok {
+				continue
+			}
+		}
 		pod := info.GetPod()
 		if pod == nil || pod.Status.Phase != corev1.PodRunning {
 			continue
@@ -212,7 +270,6 @@ func (s *kvEventSubscriber) targets() map[string]kvStreamTarget {
 		if ip == nil {
 			continue
 		}
-		owner := cacheOwnerIdentifier(name)
 		targets[owner] = kvStreamTarget{uid: pod.UID, ip: ip.String()}
 		pods[ip.String()] = append(pods[ip.String()], owner)
 	}

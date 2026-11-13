@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 )
@@ -1426,4 +1427,163 @@ func TestValidateExternalModelProvider(t *testing.T) {
 
 func ptrString(value string) *string {
 	return &value
+}
+
+func validSchedulerProfile(name string) *networkingv1alpha1.SchedulerProfile {
+	return &networkingv1alpha1.SchedulerProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: networkingv1alpha1.SchedulerProfileSpec{
+			PluginConfig: []networkingv1alpha1.PluginConfig{
+				{Name: "least-request", Args: runtime.RawExtension{Raw: []byte(`{"maxWaitingRequests": 10}`)}},
+			},
+			Plugins: networkingv1alpha1.Plugins{
+				Filter: networkingv1alpha1.Filter{Enabled: []string{"least-request"}},
+				Score: networkingv1alpha1.Score{
+					Enabled: []networkingv1alpha1.PluginWithWeight{{Name: "prefix-cache", Weight: 1}},
+				},
+			},
+		},
+	}
+}
+
+func TestValidateSchedulerProfile(t *testing.T) {
+	tests := []struct {
+		name           string
+		profile        *networkingv1alpha1.SchedulerProfile
+		expectValid    bool
+		expectedReason string
+	}{
+		{
+			name:        "valid scheduler profile",
+			profile:     validSchedulerProfile("valid"),
+			expectValid: true,
+		},
+		{
+			name: "valid profile with random as the only score plugin",
+			profile: &networkingv1alpha1.SchedulerProfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "random-only", Namespace: "default"},
+				Spec: networkingv1alpha1.SchedulerProfileSpec{
+					Plugins: networkingv1alpha1.Plugins{
+						Score: networkingv1alpha1.Score{
+							Enabled: []networkingv1alpha1.PluginWithWeight{{Name: "random", Weight: 1}},
+						},
+					},
+				},
+			},
+			expectValid: true,
+		},
+		{
+			name: "unknown plugin in pluginConfig",
+			profile: func() *networkingv1alpha1.SchedulerProfile {
+				p := validSchedulerProfile("unknown-config")
+				p.Spec.PluginConfig[0].Name = "no-such-plugin"
+				return p
+			}(),
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.pluginConfig[0].name: Invalid value: \"no-such-plugin\": unknown plugin name",
+		},
+		{
+			name: "duplicate pluginConfig entries",
+			profile: func() *networkingv1alpha1.SchedulerProfile {
+				p := validSchedulerProfile("duplicate-config")
+				p.Spec.PluginConfig = append(p.Spec.PluginConfig,
+					networkingv1alpha1.PluginConfig{Name: "least-request"})
+				return p
+			}(),
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.pluginConfig[1].name: Duplicate value: \"least-request\"",
+		},
+		{
+			name: "invalid plugin args",
+			profile: &networkingv1alpha1.SchedulerProfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-args", Namespace: "default"},
+				Spec: networkingv1alpha1.SchedulerProfileSpec{
+					PluginConfig: []networkingv1alpha1.PluginConfig{
+						{Name: "kvcache-aware", Args: runtime.RawExtension{Raw: []byte(`{"indexMode": "bogus"}`)}},
+					},
+				},
+			},
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.pluginConfig[0].args: Invalid value: \"{\\\"indexMode\\\": \\\"bogus\\\"}\": indexMode must be \"redis\" or \"memory\", got \"bogus\"",
+		},
+		{
+			name: "unknown filter plugin",
+			profile: func() *networkingv1alpha1.SchedulerProfile {
+				p := validSchedulerProfile("unknown-filter")
+				p.Spec.Plugins.Filter.Enabled = []string{"no-such-plugin"}
+				return p
+			}(),
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.plugins.filter.enabled[0]: Invalid value: \"no-such-plugin\": unknown plugin name",
+		},
+		{
+			name: "score plugin used as filter",
+			profile: func() *networkingv1alpha1.SchedulerProfile {
+				p := validSchedulerProfile("filter-role")
+				p.Spec.Plugins.Filter.Enabled = []string{"prefix-cache"}
+				return p
+			}(),
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.plugins.filter.enabled[0]: Invalid value: \"prefix-cache\": plugin \"prefix-cache\" cannot be used as a filter",
+		},
+		{
+			name: "unknown score plugin",
+			profile: func() *networkingv1alpha1.SchedulerProfile {
+				p := validSchedulerProfile("unknown-score")
+				p.Spec.Plugins.Score.Enabled = []networkingv1alpha1.PluginWithWeight{{Name: "no-such-plugin", Weight: 1}}
+				return p
+			}(),
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.plugins.score.enabled[0].name: Invalid value: \"no-such-plugin\": unknown plugin name",
+		},
+		{
+			name: "duplicate score plugin",
+			profile: func() *networkingv1alpha1.SchedulerProfile {
+				p := validSchedulerProfile("duplicate-score")
+				p.Spec.Plugins.Score.Enabled = []networkingv1alpha1.PluginWithWeight{
+					{Name: "prefix-cache", Weight: 1},
+					{Name: "prefix-cache", Weight: 2},
+				}
+				return p
+			}(),
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.plugins.score.enabled[1].name: Duplicate value: \"prefix-cache\"",
+		},
+		{
+			name: "non-positive score weight",
+			profile: func() *networkingv1alpha1.SchedulerProfile {
+				p := validSchedulerProfile("zero-weight")
+				p.Spec.Plugins.Score.Enabled = []networkingv1alpha1.PluginWithWeight{{Name: "prefix-cache", Weight: 0}}
+				return p
+			}(),
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.plugins.score.enabled[0].weight: Invalid value: 0: must be greater than 0",
+		},
+		{
+			name: "random mixed with other score plugins",
+			profile: func() *networkingv1alpha1.SchedulerProfile {
+				p := validSchedulerProfile("random-mixed")
+				p.Spec.Plugins.Score.Enabled = []networkingv1alpha1.PluginWithWeight{
+					{Name: "random", Weight: 1},
+					{Name: "prefix-cache", Weight: 1},
+				}
+				return p
+			}(),
+			expectValid:    false,
+			expectedReason: "validation failed:   - spec.plugins.score.enabled: Invalid value: [\"random\",\"prefix-cache\"]: the random plugin must be the only score plugin",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed, reason := ValidateSchedulerProfile(tt.profile)
+
+			assert.Equal(t, tt.expectValid, allowed, "Expected validation result should match")
+			if !tt.expectValid {
+				assert.Equal(t, tt.expectedReason, reason, "Error message should match expected reason")
+			} else {
+				assert.Empty(t, reason, "Reason should be empty for valid profiles")
+			}
+		})
+	}
 }

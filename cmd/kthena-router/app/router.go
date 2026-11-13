@@ -157,6 +157,7 @@ func newDebugServer(port int, store datastore.Store) *http.Server {
 		debugGroup.GET("/gateways", debugHandler.ListGateways)
 		debugGroup.GET("/httproutes", debugHandler.ListHTTPRoutes)
 		debugGroup.GET("/inferencepools", debugHandler.ListInferencePools)
+		debugGroup.GET("/schedulerprofiles", debugHandler.ListSchedulerProfiles)
 
 		// Get specific resources
 		debugGroup.GET("/namespaces/:namespace/modelroutes/:name", debugHandler.GetModelRoute)
@@ -165,6 +166,7 @@ func newDebugServer(port int, store datastore.Store) *http.Server {
 		debugGroup.GET("/namespaces/:namespace/gateways/:name", debugHandler.GetGateway)
 		debugGroup.GET("/namespaces/:namespace/httproutes/:name", debugHandler.GetHTTPRoute)
 		debugGroup.GET("/namespaces/:namespace/inferencepools/:name", debugHandler.GetInferencePool)
+		debugGroup.GET("/namespaces/:namespace/schedulerprofiles/:name", debugHandler.GetSchedulerProfile)
 	}
 
 	// Pprof endpoints for performance profiling

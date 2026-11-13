@@ -30,6 +30,8 @@ type Interface interface {
 	ModelRoutes() ModelRouteInformer
 	// ModelServers returns a ModelServerInformer.
 	ModelServers() ModelServerInformer
+	// SchedulerProfiles returns a SchedulerProfileInformer.
+	SchedulerProfiles() SchedulerProfileInformer
 }
 
 type version struct {
@@ -56,4 +58,9 @@ func (v *version) ModelRoutes() ModelRouteInformer {
 // ModelServers returns a ModelServerInformer.
 func (v *version) ModelServers() ModelServerInformer {
 	return &modelServerInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// SchedulerProfiles returns a SchedulerProfileInformer.
+func (v *version) SchedulerProfiles() SchedulerProfileInformer {
+	return &schedulerProfileInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

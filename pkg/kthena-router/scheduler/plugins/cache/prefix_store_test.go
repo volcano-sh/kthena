@@ -25,6 +25,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -830,4 +831,35 @@ func TestPrefixCacheReleasedWhenLastModelServerDeleted(t *testing.T) {
 
 	assert.Eventually(t, func() bool { return prefixStore.EntryCount() == 0 }, time.Second, 10*time.Millisecond,
 		"prefix cache should release a pod that left the datastore")
+}
+
+func TestModelPrefixStoreClose(t *testing.T) {
+	store := datastore.New()
+	s := NewModelPrefixStore(store, 100000, 5)
+
+	pod := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}}}
+	const model = "close-test-model"
+	hashes := []uint64{101, 102}
+	s.Add(model, hashes, pod)
+
+	// While registered, a pod-delete event purges the pod's entries.
+	require.NoError(t, store.DeletePod(types.NamespacedName{Namespace: "ns1", Name: "pod1"}))
+	assert.Eventually(t, func() bool {
+		s.podHashesMu.Lock()
+		defer s.podHashesMu.Unlock()
+		return len(s.podHashes) == 0
+	}, 2*time.Second, 10*time.Millisecond, "registered callback must purge the pod's entries")
+
+	// After Close the callback is gone: a later pod delete leaves entries alone.
+	require.NoError(t, s.Close())
+	assert.Nil(t, s.unregisterPodCallback, "Close must clear the registration")
+	require.NoError(t, s.Close(), "Close must be idempotent")
+
+	s.Add(model, hashes, pod)
+	require.NoError(t, store.DeletePod(types.NamespacedName{Namespace: "ns1", Name: "pod1"}))
+	time.Sleep(100 * time.Millisecond)
+	s.podHashesMu.Lock()
+	remaining := len(s.podHashes)
+	s.podHashesMu.Unlock()
+	assert.Equal(t, 1, remaining, "after Close the pod-delete callback must no longer purge")
 }

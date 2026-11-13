@@ -17,6 +17,7 @@ limitations under the License.
 package plugins
 
 import (
+	"fmt"
 	"math/rand"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,7 +38,7 @@ type Random struct {
 	name string
 }
 
-func NewRandom(pluginArg runtime.RawExtension) *Random {
+func NewRandom(_ BuildContext, pluginArg runtime.RawExtension) *Random {
 	return &Random{
 		name: RandomPluginName,
 	}
@@ -64,4 +65,13 @@ func (r *Random) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*d
 	}
 
 	return scoreResults
+}
+
+// ValidateRandomArgs validates the random plugin arguments: the plugin takes
+// no arguments, so any non-empty args are rejected.
+func ValidateRandomArgs(pluginArg runtime.RawExtension) error {
+	if len(pluginArg.Raw) > 0 {
+		return fmt.Errorf("random plugin takes no arguments")
+	}
+	return nil
 }

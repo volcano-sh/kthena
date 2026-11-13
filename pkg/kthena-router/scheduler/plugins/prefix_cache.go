@@ -71,6 +71,7 @@ Configuration Parameters:
 */
 
 import (
+	"fmt"
 	"strconv"
 
 	"github.com/cespare/xxhash"
@@ -103,6 +104,9 @@ type PrefixCache struct {
 	blockSizeToHash  int
 	maxBlocksToMatch int
 	store            *cache.ModelPrefixStore
+	// unregisterEntriesMetric removes this instance's gauge provider; set at
+	// construction, invoked by Close.
+	unregisterEntriesMetric func()
 }
 
 type PrefixCacheArgs struct {
@@ -114,7 +118,7 @@ type PrefixCacheArgs struct {
 
 // Default token block size of vLLM is 16, and a good guess of average characters per token is 4.
 // So we use 64 as the default block size.
-func NewPrefixCache(store datastore.Store, pluginArg runtime.RawExtension) *PrefixCache {
+func NewPrefixCache(_ BuildContext, store datastore.Store, pluginArg runtime.RawExtension) *PrefixCache {
 	prefixCacheArgs := PrefixCacheArgs{
 		BlockSizeToHash:  defaultPrefixCacheBlockSizeToHash,
 		MaxBlocksToMatch: defaultPrefixCacheMaxBlocksToMatch,
@@ -153,12 +157,26 @@ func NewPrefixCache(store datastore.Store, pluginArg runtime.RawExtension) *Pref
 		maxBlocksToMatch: prefixCacheArgs.MaxBlocksToMatch,
 	}
 	p.store = cache.NewModelPrefixStore(store, prefixCacheArgs.MaxHashCacheSize, prefixCacheArgs.TopKMatches)
-	metrics.DefaultMetrics.SetPrefixCacheEntriesProvider(p.store.EntryCount)
+	p.unregisterEntriesMetric = metrics.DefaultMetrics.RegisterPrefixCacheEntriesProvider(p.store.EntryCount)
 	return p
 }
 
 func (p *PrefixCache) Name() string {
 	return p.name
+}
+
+// Close releases the prefix store's pod-event callback registration and its
+// gauge provider.
+func (p *PrefixCache) Close() error {
+	if p.unregisterEntriesMetric != nil {
+		p.unregisterEntriesMetric()
+		p.unregisterEntriesMetric = nil
+	}
+	if err := p.store.Close(); err != nil {
+		return err
+	}
+	klog.V(2).Infof("PrefixCache: closed (unregistered pod callback and gauge provider)")
+	return nil
 }
 
 // matchRatio returns matched/total as a fraction in [0,1], or 0 when total is 0.
@@ -278,4 +296,31 @@ func (p *PrefixCache) hashPrompt(model string, prompt string) []uint64 {
 	}
 
 	return res
+}
+
+// ValidatePrefixCacheArgs validates the prefix-cache plugin arguments:
+// all values must be non-negative; zero means "use the default".
+func ValidatePrefixCacheArgs(pluginArg runtime.RawExtension) error {
+	if len(pluginArg.Raw) == 0 {
+		return nil
+	}
+
+	var prefixCacheArgs PrefixCacheArgs
+	if err := yaml.Unmarshal(pluginArg.Raw, &prefixCacheArgs); err != nil {
+		return fmt.Errorf("unmarshal prefix-cache arguments: %w", err)
+	}
+
+	if prefixCacheArgs.BlockSizeToHash < 0 {
+		return fmt.Errorf("blockSizeToHash must not be negative, got %d", prefixCacheArgs.BlockSizeToHash)
+	}
+	if prefixCacheArgs.MaxBlocksToMatch < 0 {
+		return fmt.Errorf("maxBlocksToMatch must not be negative, got %d", prefixCacheArgs.MaxBlocksToMatch)
+	}
+	if prefixCacheArgs.MaxHashCacheSize < 0 {
+		return fmt.Errorf("maxHashCacheSize must not be negative, got %d", prefixCacheArgs.MaxHashCacheSize)
+	}
+	if prefixCacheArgs.TopKMatches < 0 {
+		return fmt.Errorf("topKMatches must not be negative, got %d", prefixCacheArgs.TopKMatches)
+	}
+	return nil
 }

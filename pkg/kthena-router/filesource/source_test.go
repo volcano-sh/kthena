@@ -298,3 +298,224 @@ func TestRunSyncsAndSignalsReadiness(t *testing.T) {
 	close(stop)
 	require.NoError(t, <-done)
 }
+
+const schedulerProfileManifest = `apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: SchedulerProfile
+metadata:
+  name: fast
+spec:
+  plugins:
+    score:
+      enabled:
+        - name: prefix-cache
+          weight: 2
+`
+
+func TestSourceLoadsSchedulerProfile(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "profile.yaml", schedulerProfileManifest)
+
+	source, store := newTestSource(t, dir)
+	require.NoError(t, source.sync())
+
+	key := types.NamespacedName{Namespace: "default", Name: "fast"}
+	profile := store.GetSchedulerProfile(key)
+	require.NotNil(t, profile)
+	require.Len(t, profile.Spec.Plugins.Score.Enabled, 1)
+	assert.Equal(t, "prefix-cache", profile.Spec.Plugins.Score.Enabled[0].Name)
+	assert.EqualValues(t, 2, profile.Spec.Plugins.Score.Enabled[0].Weight)
+
+	// Removing the file removes it from the store.
+	require.NoError(t, os.Remove(filepath.Join(dir, "profile.yaml")))
+	require.NoError(t, source.sync())
+	assert.Nil(t, store.GetSchedulerProfile(key))
+}
+
+func TestSourceRejectsInvalidSchedulerProfile(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "profile.yaml", `apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: SchedulerProfile
+metadata:
+  name: bad
+spec:
+  plugins:
+    filter:
+      enabled: [no-such-plugin]
+`)
+
+	source, _ := newTestSource(t, dir)
+	err := source.sync()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid SchedulerProfile default/bad")
+}
+
+func TestSourceRejectsMissingSchedulerProfileReference(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "resources.yaml", `apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: demo-server
+spec:
+  inferenceEngine: vLLM
+  workloadPort:
+    port: 8000
+  endpoints:
+    - name: vllm-0
+      address: 10.0.0.1
+  trafficPolicy:
+    loadBalancer:
+      schedulerProfile: missing
+`)
+
+	source, store := newTestSource(t, dir)
+	err := source.sync()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `references SchedulerProfile "missing" which is not loaded`)
+	assert.Nil(t, store.GetModelServer(types.NamespacedName{Namespace: "default", Name: "demo-server"}))
+}
+
+func TestSourceAcceptsLoadedSchedulerProfileReference(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "resources.yaml", schedulerProfileManifest+`---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: demo-server
+spec:
+  inferenceEngine: vLLM
+  workloadPort:
+    port: 8000
+  endpoints:
+    - name: vllm-0
+      address: 10.0.0.1
+  trafficPolicy:
+    loadBalancer:
+      schedulerProfile: fast
+`)
+
+	source, store := newTestSource(t, dir)
+	require.NoError(t, source.sync())
+	assert.NotNil(t, store.GetSchedulerProfile(types.NamespacedName{Namespace: "default", Name: "fast"}))
+	assert.NotNil(t, store.GetModelServer(types.NamespacedName{Namespace: "default", Name: "demo-server"}))
+}
+
+func TestSourceUpdatesSchedulerProfile(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "profile.yaml", schedulerProfileManifest)
+
+	source, store := newTestSource(t, dir)
+	require.NoError(t, source.sync())
+	key := types.NamespacedName{Namespace: "default", Name: "fast"}
+	require.NotNil(t, store.GetSchedulerProfile(key))
+	assert.EqualValues(t, 2, store.GetSchedulerProfile(key).Spec.Plugins.Score.Enabled[0].Weight)
+
+	writeManifest(t, dir, "profile.yaml", `apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: SchedulerProfile
+metadata:
+  name: fast
+spec:
+  plugins:
+    score:
+      enabled:
+        - name: prefix-cache
+          weight: 7
+`)
+	require.NoError(t, source.sync())
+	require.NotNil(t, store.GetSchedulerProfile(key))
+	assert.EqualValues(t, 7, store.GetSchedulerProfile(key).Spec.Plugins.Score.Enabled[0].Weight)
+}
+
+func TestSourceRejectsCrossNamespaceProfileReference(t *testing.T) {
+	dir := t.TempDir()
+	// The profile lives in the default namespace; the ModelServer referencing
+	// it lives in another one, and references are namespace-scoped.
+	writeManifest(t, dir, "resources.yaml", schedulerProfileManifest+`---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: demo-server
+  namespace: other
+spec:
+  inferenceEngine: vLLM
+  workloadPort:
+    port: 8000
+  endpoints:
+    - name: vllm-0
+      address: 10.0.0.1
+  trafficPolicy:
+    loadBalancer:
+      schedulerProfile: fast
+`)
+
+	source, store := newTestSource(t, dir)
+	err := source.sync()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `references SchedulerProfile "fast" which is not loaded`)
+	assert.Nil(t, store.GetSchedulerProfile(types.NamespacedName{Namespace: "default", Name: "fast"}))
+}
+
+func TestSourceKeepsLastGoodSnapshotOnInvalidProfileReference(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "resources.yaml", schedulerProfileManifest+`---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: demo-server
+spec:
+  inferenceEngine: vLLM
+  workloadPort:
+    port: 8000
+  endpoints:
+    - name: vllm-0
+      address: 10.0.0.1
+  trafficPolicy:
+    loadBalancer:
+      schedulerProfile: fast
+`)
+
+	source, store := newTestSource(t, dir)
+	require.NoError(t, source.sync())
+
+	// Break the reference: the snapshot is rejected and the previous one keeps
+	// serving.
+	writeManifest(t, dir, "resources.yaml", `apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: demo-server
+spec:
+  inferenceEngine: vLLM
+  workloadPort:
+    port: 8000
+  endpoints:
+    - name: vllm-0
+      address: 10.0.0.1
+  trafficPolicy:
+    loadBalancer:
+      schedulerProfile: fast
+`)
+	require.Error(t, source.sync())
+
+	assert.NotNil(t, store.GetSchedulerProfile(types.NamespacedName{Namespace: "default", Name: "fast"}),
+		"the last good snapshot must keep serving")
+	assert.NotNil(t, store.GetModelServer(types.NamespacedName{Namespace: "default", Name: "demo-server"}))
+}
+
+func TestSourceRejectsInvalidProfileWeight(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, "profile.yaml", `apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: SchedulerProfile
+metadata:
+  name: zero-weight
+spec:
+  plugins:
+    score:
+      enabled:
+        - name: prefix-cache
+          weight: 0
+`)
+
+	source, _ := newTestSource(t, dir)
+	err := source.sync()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid SchedulerProfile default/zero-weight")
+}

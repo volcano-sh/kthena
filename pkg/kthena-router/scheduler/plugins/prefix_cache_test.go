@@ -307,7 +307,7 @@ func TestPrefixCacheScoreMetrics(t *testing.T) {
 
 func TestPrefixCacheEntriesProviderRegistered(t *testing.T) {
 	mockDS := datastore.New()
-	plugin := NewPrefixCache(mockDS, runtime.RawExtension{Raw: []byte{}})
+	plugin := NewPrefixCache(BuildContext{}, mockDS, runtime.RawExtension{Raw: []byte{}})
 
 	pod := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}}}
 	const model = "prefixentries-model"
@@ -360,7 +360,7 @@ func TestNewPrefixCacheWithEmptyArgs(t *testing.T) {
 	klog.LogToStderr(false)
 	klog.SetOutput(&logBuffer)
 
-	plugin := NewPrefixCache(datastore.New(), runtime.RawExtension{Raw: []byte{}})
+	plugin := NewPrefixCache(BuildContext{}, datastore.New(), runtime.RawExtension{Raw: []byte{}})
 	klog.Flush()
 
 	if plugin.blockSizeToHash != 64 {
@@ -375,7 +375,7 @@ func TestNewPrefixCacheWithEmptyArgs(t *testing.T) {
 }
 
 func TestNewPrefixCacheRespectsTopKMatches(t *testing.T) {
-	plugin := NewPrefixCache(datastore.New(), runtime.RawExtension{
+	plugin := NewPrefixCache(BuildContext{}, datastore.New(), runtime.RawExtension{
 		Raw: []byte(`{"blockSizeToHash": 64, "maxBlocksToMatch": 128, "maxHashCacheSize": 50000, "topKMatches": 1}`),
 	})
 
@@ -588,4 +588,14 @@ func TestPrefixCachePostSchedule(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrefixCacheClose(t *testing.T) {
+	mockDS := datastore.New()
+	plugin := NewPrefixCache(BuildContext{}, mockDS, runtime.RawExtension{Raw: []byte{}})
+	require.NotNil(t, plugin.unregisterEntriesMetric, "construction must register the gauge provider")
+
+	require.NoError(t, plugin.Close())
+	assert.Nil(t, plugin.unregisterEntriesMetric, "Close must unregister the gauge provider")
+	assert.NoError(t, plugin.Close(), "Close must be idempotent")
 }

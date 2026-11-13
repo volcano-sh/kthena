@@ -69,6 +69,35 @@ func (m *MockStore) GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelS
 	return args.Get(0).(*aiv1alpha1.ModelServer)
 }
 
+func (m *MockStore) AddOrUpdateSchedulerProfile(profile *aiv1alpha1.SchedulerProfile) {
+	m.Called(profile)
+}
+
+func (m *MockStore) DeleteSchedulerProfile(name types.NamespacedName) {
+	m.Called(name)
+}
+
+func (m *MockStore) GetSchedulerProfile(name types.NamespacedName) *aiv1alpha1.SchedulerProfile {
+	args := m.Called(name)
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(*aiv1alpha1.SchedulerProfile)
+}
+
+func (m *MockStore) GetAllSchedulerProfiles() map[types.NamespacedName]*aiv1alpha1.SchedulerProfile {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil
+	}
+	return args.Get(0).(map[types.NamespacedName]*aiv1alpha1.SchedulerProfile)
+}
+
+func (m *MockStore) GetModelServerCountForSchedulerProfile(name types.NamespacedName) int {
+	args := m.Called(name)
+	return args.Int(0)
+}
+
 func (m *MockStore) GetPodsByModelServer(name types.NamespacedName) ([]*datastore.PodInfo, error) {
 	args := m.Called(name)
 	if args.Get(0) == nil {
@@ -130,8 +159,9 @@ func (m *MockStore) GetPrefillPodsForDecodeGroup(modelServerName types.Namespace
 	return args.Get(0).([]*datastore.PodInfo), args.Error(1)
 }
 
-func (m *MockStore) RegisterCallback(kind string, callback datastore.CallbackFunc) {
+func (m *MockStore) RegisterCallback(kind string, callback datastore.CallbackFunc) (unregister func()) {
 	m.Called(kind, callback)
+	return func() {}
 }
 
 func (m *MockStore) Run(ctx context.Context) {
@@ -965,4 +995,79 @@ func TestGetInferencePool(t *testing.T) {
 		},
 	}
 	runHandlerCases(t, cases, func(h *DebugHandler, c *gin.Context) { h.GetInferencePool(c) })
+}
+
+func TestListSchedulerProfiles(t *testing.T) {
+	key := types.NamespacedName{Namespace: "default", Name: "fast"}
+	profile := &aiv1alpha1.SchedulerProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "fast", Namespace: "default"},
+		Spec: aiv1alpha1.SchedulerProfileSpec{
+			Plugins: aiv1alpha1.Plugins{
+				Score: aiv1alpha1.Score{
+					Enabled: []aiv1alpha1.PluginWithWeight{{Name: "prefix-cache", Weight: 2}},
+				},
+			},
+		},
+	}
+
+	cases := []handlerCase{
+		{
+			name: "lists scheduler profiles",
+			setup: func(m *MockStore) {
+				m.On("GetAllSchedulerProfiles").Return(map[types.NamespacedName]*aiv1alpha1.SchedulerProfile{key: profile})
+			},
+			expectedStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var response map[string][]SchedulerProfileResponse
+				require.NoError(t, json.Unmarshal(body, &response))
+				profiles := response["schedulerprofiles"]
+				require.Len(t, profiles, 1)
+				assert.Equal(t, "fast", profiles[0].Name)
+				assert.Equal(t, "default", profiles[0].Namespace)
+				require.Len(t, profiles[0].Spec.Plugins.Score.Enabled, 1)
+				assert.Equal(t, "prefix-cache", profiles[0].Spec.Plugins.Score.Enabled[0].Name)
+			},
+		},
+	}
+	runHandlerCases(t, cases, func(h *DebugHandler, c *gin.Context) { h.ListSchedulerProfiles(c) })
+}
+
+func TestGetSchedulerProfile(t *testing.T) {
+	key := types.NamespacedName{Namespace: "default", Name: "fast"}
+	profile := &aiv1alpha1.SchedulerProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "fast", Namespace: "default"},
+	}
+
+	cases := []handlerCase{
+		{
+			name:   "found",
+			params: nsName("default", "fast"),
+			setup: func(m *MockStore) {
+				m.On("GetSchedulerProfile", key).Return(profile)
+			},
+			expectedStatus: http.StatusOK,
+			check: func(t *testing.T, body []byte) {
+				var response SchedulerProfileResponse
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, "fast", response.Name)
+				assert.Equal(t, "default", response.Namespace)
+			},
+		},
+		{
+			name:   "not found",
+			params: nsName("default", "missing"),
+			setup: func(m *MockStore) {
+				m.On("GetSchedulerProfile", types.NamespacedName{Namespace: "default", Name: "missing"}).Return(nil)
+			},
+			expectedStatus: http.StatusNotFound,
+			check:          errorBodyCheck("SchedulerProfile not found"),
+		},
+		{
+			name:           "missing params",
+			params:         gin.Params{},
+			expectedStatus: http.StatusBadRequest,
+			check:          errorBodyCheck("namespace and name parameters are required"),
+		},
+	}
+	runHandlerCases(t, cases, func(h *DebugHandler, c *gin.Context) { h.GetSchedulerProfile(c) })
 }

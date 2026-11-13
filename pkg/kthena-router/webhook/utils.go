@@ -99,6 +99,21 @@ func ParseExternalModelProviderFromRequest(r *http.Request) (*admissionv1.Admiss
 	return admissionReview, &provider, nil
 }
 
+// ParseSchedulerProfileFromRequest parses the HTTP request and extracts the AdmissionReview and SchedulerProfile.
+func ParseSchedulerProfileFromRequest(r *http.Request) (*admissionv1.AdmissionReview, *networkingv1alpha1.SchedulerProfile, error) {
+	admissionReview, err := parseAdmissionReviewFromRequest(r)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var profile networkingv1alpha1.SchedulerProfile
+	if err := json.Unmarshal(admissionReview.Request.Object.Raw, &profile); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode schedulerProfile: %v", err)
+	}
+
+	return admissionReview, &profile, nil
+}
+
 // SendAdmissionResponse sends the AdmissionReview response back to the client
 func SendAdmissionResponse(w http.ResponseWriter, admissionReview *admissionv1.AdmissionReview) error {
 	// Send the response
