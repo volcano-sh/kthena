@@ -66,6 +66,15 @@ type renderer struct {
 	status   RendererStatus
 	restarts int
 	lastErr  string
+	// budgetUsed counts restarts since the budget was last restored; restarts
+	// stays the lifetime total reported by /models.
+	budgetUsed int
+	// readyAt is when the current subprocess became ready and exitedAt is when
+	// it was seen to exit; both zero otherwise. Their difference is how long
+	// the renderer actually ran, which is what restores the budget. Time since
+	// readyAt would not do: it keeps growing while the process is dead.
+	readyAt  time.Time
+	exitedAt time.Time
 
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
@@ -271,6 +280,13 @@ func (m *RendererManager) launch(r *renderer) {
 		if err != nil && ctx.Err() == nil {
 			klog.Warningf("Renderer for model %s exited: %v", r.model, err)
 		}
+		m.mu.Lock()
+		if m.renderers[r.model] == r {
+			r.exitedAt = time.Now()
+		}
+		m.mu.Unlock()
+		// Recorded before the close so restartCrashed, which only acts once
+		// done is closed, never reads a zero exit time.
 		close(done)
 	}()
 
@@ -299,6 +315,7 @@ func (m *RendererManager) waitReady(r *renderer) {
 			if m.renderers[r.model] == r {
 				r.status = StatusReady
 				r.lastErr = ""
+				r.readyAt = time.Now()
 				klog.Infof("Tokenizer for model %s ready at %s", r.model, r.endpoint())
 			}
 			m.mu.Unlock()
@@ -353,7 +370,18 @@ func (m *RendererManager) restartCrashed() {
 		default:
 			continue
 		}
-		if r.restarts >= m.config.RendererMaxRestarts {
+		// Serving for the whole window means it recovered rather than crash
+		// looped, so give the budget back. The run is measured to the exit:
+		// time since readyAt keeps growing while the process is dead.
+		if !r.readyAt.IsZero() && !r.exitedAt.IsZero() &&
+			r.exitedAt.Sub(r.readyAt) >= m.config.RendererStableWindow {
+			r.budgetUsed = 0
+		}
+		// This exit is accounted for either way. Keeping the timestamps would
+		// let a later tick credit the downtime of an exhausted renderer as a
+		// stable run and relaunch it.
+		r.readyAt, r.exitedAt = time.Time{}, time.Time{}
+		if r.budgetUsed >= m.config.RendererMaxRestarts {
 			// Only log the transition once; already-failed renderers keep
 			// their original error message.
 			if r.status == StatusReady {
@@ -364,6 +392,7 @@ func (m *RendererManager) restartCrashed() {
 			continue
 		}
 		r.restarts++
+		r.budgetUsed++
 		r.status = StatusLoading
 		toRestart = append(toRestart, r)
 	}
@@ -371,7 +400,7 @@ func (m *RendererManager) restartCrashed() {
 
 	for _, r := range toRestart {
 		klog.Warningf("Restarting renderer for model %s (%d/%d)",
-			r.model, r.restarts, m.config.RendererMaxRestarts)
+			r.model, r.budgetUsed, m.config.RendererMaxRestarts)
 		go m.launch(r)
 	}
 }
