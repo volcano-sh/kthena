@@ -44,15 +44,19 @@ import (
 )
 
 type ModelServerController struct {
-	modelServerLister listerv1alpha1.ModelServerLister
-	podLister         corelisters.PodLister
+	modelServerLister  listerv1alpha1.ModelServerLister
+	podLister          corelisters.PodLister
+	secretLister       corelisters.SecretLister
+	modelServerIndexer cache.Indexer
 
 	modelServerSynced cache.InformerSynced
 	podSynced         cache.InformerSynced
+	secretSynced      cache.InformerSynced
 
 	// Event handler registrations
 	modelServerRegistration cache.ResourceEventHandlerRegistration
 	podRegistration         cache.ResourceEventHandlerRegistration
+	secretRegistration      cache.ResourceEventHandlerRegistration
 
 	workqueue   workqueue.TypedRateLimitingInterface[QueueItem]
 	initialSync *atomic.Bool
@@ -63,34 +67,57 @@ type ModelServerController struct {
 	transportRegistry *common.TransportRegistry
 }
 
+// modelServerSecretRefIndex indexes ModelServers by the Secret they name, so
+// a Secret event can find the ModelServers that care about it.
+const modelServerSecretRefIndex = "modelServerSecretRef"
+
 func NewModelServerController(
 	kthenaInformerFactory informersv1alpha1.SharedInformerFactory,
 	kubeInformerFactory informers.SharedInformerFactory,
+	secretInformerFactory informers.SharedInformerFactory,
 	store datastore.Store,
 	transportRegistry *common.TransportRegistry,
 ) (*ModelServerController, error) {
 	modelServerInformer := kthenaInformerFactory.Networking().V1alpha1().ModelServers()
 	podInformer := kubeInformerFactory.Core().V1().Pods()
+	secretInformer := secretInformerFactory.Core().V1().Secrets()
+	if err := modelServerInformer.Informer().AddIndexers(cache.Indexers{
+		modelServerSecretRefIndex: modelServerSecretRefIndexFunc,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to add Secret reference index for modelserver controller: %w", err)
+	}
 
 	controller := &ModelServerController{
-		modelServerLister: modelServerInformer.Lister(),
-		podLister:         podInformer.Lister(),
-		modelServerSynced: modelServerInformer.Informer().HasSynced,
-		podSynced:         podInformer.Informer().HasSynced,
-		workqueue:         workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueItem]()),
-		initialSync:       &atomic.Bool{},
-		store:             store,
-		transportRegistry: transportRegistry,
+		modelServerLister:  modelServerInformer.Lister(),
+		podLister:          podInformer.Lister(),
+		secretLister:       secretInformer.Lister(),
+		modelServerIndexer: modelServerInformer.Informer().GetIndexer(),
+		modelServerSynced:  modelServerInformer.Informer().HasSynced,
+		podSynced:          podInformer.Informer().HasSynced,
+		secretSynced:       secretInformer.Informer().HasSynced,
+		workqueue:          workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueItem]()),
+		initialSync:        &atomic.Bool{},
+		store:              store,
+		transportRegistry:  transportRegistry,
 	}
 
 	var err error
 	// Register ModelServer event handlers
 	controller.modelServerRegistration, err = modelServerInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: controller.enqueueModelServer,
+		AddFunc: func(obj interface{}) {
+			controller.enqueueModelServer(obj)
+			controller.enqueueModelServerSecret(obj)
+		},
 		UpdateFunc: func(old, new interface{}) {
 			controller.enqueueModelServer(new)
+			// Both, so a changed apiKeySecretRef drops the old credential.
+			controller.enqueueModelServerSecret(old)
+			controller.enqueueModelServerSecret(new)
 		},
-		DeleteFunc: controller.enqueueModelServer,
+		DeleteFunc: func(obj interface{}) {
+			controller.enqueueModelServer(obj)
+			controller.enqueueModelServerSecret(obj)
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to add event handler for modelserver controller: %w", err)
@@ -107,6 +134,18 @@ func NewModelServerController(
 	if err != nil {
 		return nil, fmt.Errorf("failed to add pod event handler for modelserver controller: %w", err)
 	}
+
+	// Register Secret event handlers for ModelServer credentials
+	controller.secretRegistration, err = secretInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: controller.enqueueSecret,
+		UpdateFunc: func(old, new interface{}) {
+			controller.enqueueSecret(new)
+		},
+		DeleteFunc: controller.enqueueSecret,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add secret event handler for modelserver controller: %w", err)
+	}
 	return controller, nil
 }
 
@@ -114,7 +153,7 @@ func (c *ModelServerController) Run(stopCh <-chan struct{}) error {
 	defer utilruntime.HandleCrash()
 	defer c.workqueue.ShutDown()
 
-	if ok := cache.WaitForCacheSync(stopCh, c.modelServerSynced, c.podSynced); !ok {
+	if ok := cache.WaitForCacheSync(stopCh, c.modelServerSynced, c.podSynced, c.secretSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 	// add initialSync signal
@@ -156,6 +195,8 @@ func (c *ModelServerController) processNextWorkItem() bool {
 		err = c.syncModelServerHandler(obj.Key)
 	case ResourceTypePod:
 		err = c.syncPodHandler(obj.Key)
+	case ResourceTypeSecret:
+		err = c.syncSecretHandler(obj.Key)
 	default:
 		c.workqueue.Forget(obj)
 		utilruntime.HandleError(fmt.Errorf("unexpected resource type in workqueue: %s", obj.ResourceType))
@@ -348,4 +389,104 @@ func isPodReady(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// ── ModelServer credentials ──────────────────────────────────────────────────
+//
+// ModelServer API keys are synced here rather than alongside the
+// ExternalModelProvider credentials: the two are unrelated and are kept in
+// separate parts of the store, so neither controller can project over the
+// other's keys.
+
+func modelServerSecretRefIndexFunc(obj interface{}) ([]string, error) {
+	modelServer, ok := obj.(*aiv1alpha1.ModelServer)
+	if !ok {
+		return nil, fmt.Errorf("expected ModelServer in Secret reference index, got %T", obj)
+	}
+	if modelServer.Spec.APIKeySecretRef == nil || modelServer.Spec.APIKeySecretRef.Name == "" {
+		return nil, nil
+	}
+	return []string{types.NamespacedName{
+		Namespace: modelServer.Namespace,
+		Name:      modelServer.Spec.APIKeySecretRef.Name,
+	}.String()}, nil
+}
+
+func (c *ModelServerController) modelServersForSecret(secretName types.NamespacedName) ([]*aiv1alpha1.ModelServer, error) {
+	objects, err := c.modelServerIndexer.ByIndex(modelServerSecretRefIndex, secretName.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up ModelServers for Secret %s: %w", secretName, err)
+	}
+
+	modelServers := make([]*aiv1alpha1.ModelServer, 0, len(objects))
+	for _, object := range objects {
+		modelServer, ok := object.(*aiv1alpha1.ModelServer)
+		if !ok {
+			return nil, fmt.Errorf("expected ModelServer in Secret reference index, got %T", object)
+		}
+		modelServers = append(modelServers, modelServer)
+	}
+	return modelServers, nil
+}
+
+func (c *ModelServerController) enqueueSecret(obj interface{}) {
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	c.workqueue.Add(QueueItem{ResourceType: ResourceTypeSecret, Key: key})
+}
+
+func (c *ModelServerController) enqueueModelServerSecret(obj interface{}) {
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
+	ms, ok := obj.(*aiv1alpha1.ModelServer)
+	if !ok || ms.Spec.APIKeySecretRef == nil || ms.Spec.APIKeySecretRef.Name == "" {
+		return
+	}
+	secretName := types.NamespacedName{Namespace: ms.Namespace, Name: ms.Spec.APIKeySecretRef.Name}
+	c.workqueue.Add(QueueItem{ResourceType: ResourceTypeSecret, Key: secretName.String()})
+}
+
+func (c *ModelServerController) syncSecretHandler(key string) error {
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("invalid resource key: %s", key))
+		return nil
+	}
+
+	secretName := types.NamespacedName{Namespace: namespace, Name: name}
+	modelServers, err := c.modelServersForSecret(secretName)
+	if err != nil {
+		return err
+	}
+	if len(modelServers) == 0 {
+		return c.store.DeleteModelServerSecret(secretName)
+	}
+
+	secret, err := c.secretLister.Secrets(namespace).Get(name)
+	if errors.IsNotFound(err) {
+		return c.store.DeleteModelServerSecret(secretName)
+	}
+	if err != nil {
+		return err
+	}
+
+	// Keep only the keys a ModelServer actually names, so the store never holds
+	// credential material nobody asked for.
+	projected := secret.DeepCopy()
+	projected.Data = make(map[string][]byte, len(modelServers))
+	for _, ms := range modelServers {
+		if ms.Spec.APIKeySecretRef == nil {
+			continue
+		}
+		refKey := ms.Spec.APIKeySecretRef.Key
+		if value, ok := secret.Data[refKey]; ok {
+			projected.Data[refKey] = append([]byte(nil), value...)
+		}
+	}
+	projected.StringData = nil
+	return c.store.AddOrUpdateModelServerSecret(projected)
 }

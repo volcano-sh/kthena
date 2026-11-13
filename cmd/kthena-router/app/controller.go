@@ -88,7 +88,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 	if err != nil {
 		klog.Fatalf("Error creating external model provider controller: %s", err.Error())
 	}
-	modelServerController, err := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, store, transportRegistry)
+	modelServerController, err := controller.NewModelServerController(kthenaInformerFactory, kubeInformerFactory, externalProviderSecretInformerFactory, store, transportRegistry)
 	if err != nil {
 		klog.Fatalf("Error creating model server controller: %s", err.Error())
 	}
