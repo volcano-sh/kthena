@@ -118,7 +118,11 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Ecosystem',
-      items: ['ecosystem/dynamo-on-kthena', 'ecosystem/llm-d-router-with-kthena'],
+      items: [
+        'ecosystem/volcano-integration',
+        'ecosystem/dynamo-on-kthena',
+        'ecosystem/llm-d-router-with-kthena',
+      ],
     },
     {
       type: 'category',
