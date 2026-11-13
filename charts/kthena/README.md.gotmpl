@@ -9,6 +9,37 @@
 
 {{ template "chart.valuesSection" . }}
 
+### Session-Sticky Redis Authentication
+
+When `networking.kthenaRouter.sessionSticky.backend` is set to `"redis"` and the Redis instance requires authentication, configure a Kubernetes Secret reference:
+
+```yaml
+networking:
+  kthenaRouter:
+    sessionSticky:
+      backend: "redis"
+      redis:
+        address: "redis:6379"
+        secretRef:
+          name: "session-sticky-redis-credentials"
+          key: "redis-password"  # optional; defaults to "password" if omitted
+```
+
+Example Kubernetes Secret:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: session-sticky-redis-credentials
+  namespace: kthena-system
+type: Opaque
+stringData:
+  redis-password: "<your-redis-password>"
+```
+
+The router deployment injects this secret into the container environment variable `SESSION_STICKY_REDIS_PASSWORD` via `secretKeyRef`. The password is read at runtime during store initialization and is never rendered into the router ConfigMap.
+
 
 ## Notes
 

@@ -83,6 +83,10 @@ networking:
       backend: memory   # or redis
       redis:
         address: "redis:6379"   # required when backend is redis
+        # Optional Secret reference when Redis requires authentication:
+        secretRef:
+          name: "session-sticky-redis-secret"
+          key: "redis-password"  # defaults to "password" if omitted
 ```
 
 Equivalent ConfigMap snippet under `routerConfiguration`:
@@ -93,6 +97,8 @@ sessionSticky:
   redis:
     address: redis:6379
 ```
+
+> **Note**: Passwords are never stored in ConfigMaps. When `secretRef` is configured, the password is securely injected into the router container environment as `SESSION_STICKY_REDIS_PASSWORD` via a Kubernetes `secretKeyRef`.
 
 Use Redis whenever you run more than one router replica and need cross-replica stickiness.
 

@@ -151,9 +151,16 @@ kthenaRouter:
   tolerations: []
   # sessionSticky configures the router-wide session affinity backing store.
   sessionSticky:
-    # backend is "memory" (default) or "redis".
+    # -- Backend store for session affinity: "memory" (default) or "redis".
     backend: memory
     redis:
-      # address is required when backend is redis (e.g. "redis:6379").
+      # -- Address of the Redis instance (e.g. "redis:6379"). Required when backend is redis.
       address: ""
+      # secretRef references a Kubernetes Secret containing the Redis password.
+      # If Redis does not require authentication, leave name and key empty.
+      secretRef:
+        # -- Kubernetes Secret name containing the Redis password.
+        name: ""
+        # -- Key within the Secret containing the Redis password (defaults to "password").
+        key: ""
 
