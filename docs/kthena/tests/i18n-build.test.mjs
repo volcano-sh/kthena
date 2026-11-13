@@ -228,19 +228,25 @@ test('links between fallback documents stay in the selected locale', () => {
 });
 
 test('untranslated docs and older versions keep their English content with a notice', () => {
-  for (const route of [
-    '/docs/general/faq',
-    '/docs/next/general/faq',
-    '/docs/developer-guide/ci',
-    '/docs/next/developer-guide/ci',
-    '/docs/timeline/releases',
-    '/docs/next/timeline/releases',
-    '/docs/architecture/model-booster-controller',
-    '/docs/next/architecture/model-booster-controller',
-    '/docs/v0.4.0/getting-started/installation',
+  for (const { version, doc } of [
+    { version: '', doc: 'general/faq' },
+    { version: 'next/', doc: 'general/faq' },
+    { version: '', doc: 'developer-guide/ci' },
+    { version: 'next/', doc: 'developer-guide/ci' },
+    { version: '', doc: 'timeline/releases' },
+    { version: 'next/', doc: 'timeline/releases' },
+    { version: '', doc: 'architecture/model-booster-controller' },
+    { version: 'next/', doc: 'architecture/model-booster-controller' },
+    { version: 'v0.4.0/', doc: 'getting-started/installation' },
   ]) {
-    if (!existsSync(new URL(`../build${route}.html`, import.meta.url)))
+    const sourceDir =
+      version === 'next/'
+        ? 'docs'
+        : `versioned_docs/version-${version ? version.slice(0, -1) : defaultVersion}`;
+    // Skip only when the source doc is gone; a missing build output must fail.
+    if (!existsSync(new URL(`../${sourceDir}/${doc}.md`, import.meta.url)))
       continue;
+    const route = `/docs/${version}${doc}`;
     const en = page(route);
     const zh = page(`/zh-Hans${route}`);
     assert.doesNotMatch(en, /此页面尚未翻译|Translation unavailable/);
