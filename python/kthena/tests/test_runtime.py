@@ -23,6 +23,7 @@ import pytest
 import uvicorn
 from fastapi.testclient import TestClient
 
+from kthena.downloader.app import load_config
 from kthena.runtime import app as runtime_app
 from kthena.runtime import memory_kv_manager as mkm
 from kthena.runtime.app import (
@@ -168,6 +169,80 @@ def test_load_lora_adapter_async_download_success(monkeypatch):
 
         # Assert (background task returns 202 Accepted)
         assert resp.status_code == 202
+
+
+@pytest.mark.parametrize("path, extra_body", [
+    ("/v1/download_model", {}),
+    ("/v1/load_lora_adapter", {"lora_name": "lora-sql"}),
+])
+def test_download_endpoints_pass_object_config_to_downloader(monkeypatch, path, extra_body):
+    # Arrange: record the config the endpoint hands to the downloader
+    monkeypatch.delenv("HF_AUTH_TOKEN", raising=False)
+    app = create_application(_make_args())
+    state = get_app_state(app)
+    monkeypatch.setattr("httpx.AsyncClient", _FakeAsyncClient)
+    state.client = _FakeAsyncClient()
+    monkeypatch.setattr("httpx.Client", _FakeSyncClient)
+
+    received = []
+    monkeypatch.setattr(
+        "kthena.runtime.app.download_model",
+        lambda source, output_dir, config, max_workers: received.append(config),
+    )
+
+    with TestClient(app) as client:
+        body = {
+            "source": "hf://org/repo",
+            "output_dir": "/tmp/model",
+            "config": {"hf_token": "from-request"},
+            **extra_body,
+        }
+
+        # Act
+        resp = client.post(path, json=body)
+
+    # Assert
+    assert resp.status_code == 200
+    assert received == [{"hf_token": "from-request"}]
+
+
+@pytest.mark.parametrize("config, expected", [
+    (None, {}),
+    ("", {}),
+    ({}, {}),
+    ({"hf_token": "from-config"}, {"hf_token": "from-config"}),
+    ('{"hf_token": "from-config"}', {"hf_token": "from-config"}),
+])
+def test_load_config_accepts_supported_forms(monkeypatch, config, expected):
+    monkeypatch.delenv("HF_AUTH_TOKEN", raising=False)
+
+    assert load_config(config) == expected
+
+
+@pytest.mark.parametrize("config", [
+    {"hf_token": "from-config"},
+    '{"hf_token": "from-config"}',
+])
+def test_load_config_prefers_explicit_values_over_environment(monkeypatch, config):
+    monkeypatch.setenv("HF_AUTH_TOKEN", "from-env")
+
+    assert load_config(config) == {"hf_token": "from-config"}
+
+
+def test_load_config_fills_missing_values_without_mutating_input(monkeypatch):
+    monkeypatch.setenv("HF_AUTH_TOKEN", "from-env")
+    config = {"endpoint": "http://storage.local"}
+
+    result = load_config(config)
+
+    assert result == {"endpoint": "http://storage.local", "hf_token": "from-env"}
+    assert config == {"endpoint": "http://storage.local"}
+
+
+@pytest.mark.parametrize("config", [123, 0, False, [], ["hf_token"], "[1, 2]", "not json"])
+def test_load_config_rejects_values_that_are_not_objects(config):
+    with pytest.raises(ValueError):
+        load_config(config)
 
 
 @pytest.mark.asyncio
