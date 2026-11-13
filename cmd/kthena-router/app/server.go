@@ -70,6 +70,11 @@ type Server struct {
 	RouterConfigFile string
 	// drainTimeout is HTTP server shutdown grace; not datastore state.
 	drainTimeout time.Duration
+	// listeners tracks the inference listeners so Run can wait for them to drain.
+	listeners drainGroup
+	// requests tracks the requests the inference listeners serve, so Run can
+	// wait for their handlers to return once the listeners have stopped.
+	requests drainGroup
 }
 
 func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort, metricsPort int, exposeMetricsOnRouterPort bool, kubeAPIQPS float32, kubeAPIBurst int) *Server {
@@ -137,7 +142,12 @@ func (s *Server) Run(ctx context.Context) {
 		klog.Fatalf("Failed to sync controllers")
 	}
 	klog.Infof("Controllers have synced, starting store periodic update loop")
-	store.Run(ctx)
+	// The store's loops, such as the dispatch of the fairness and session-boost
+	// queues, run until Run returns, so that requests still queued at shutdown
+	// are admitted while the listeners drain.
+	storeCtx, stopStore := context.WithCancel(context.Background())
+	defer stopStore()
+	store.Run(storeCtx)
 	// start router
 	s.startRouter(ctx, r, store)
 
@@ -145,6 +155,21 @@ func (s *Server) Run(ctx context.Context) {
 	klog.Info("Router server started, waiting for shutdown signal...")
 	<-ctx.Done()
 	klog.Info("Router server shutting down...")
+	s.shutdown()
+}
+
+// shutdown returns once the inference listeners have drained, or have been
+// force-closed at the drain timeout, and every request handler has returned.
+// main() exits as soon as Run returns.
+func (s *Server) shutdown() {
+	// A listener has drained once its connections are closed, which happens
+	// only after their responses have been completely written.
+	s.listeners.closeAndWait()
+	// http.Server.Close does not wait for handlers to return. Handlers of
+	// connections force-closed at the drain timeout still run their cleanup,
+	// such as releasing the pod's on-flight count in Redis.
+	s.requests.closeAndWait()
+	klog.Info("Router server stopped")
 }
 
 func (s *Server) HasSynced() bool {
