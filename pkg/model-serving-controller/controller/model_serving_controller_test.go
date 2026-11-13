@@ -4840,7 +4840,7 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 				2: 20,
 				3: 30,
 			},
-			expectedRemainingNames: []string{"prefill-2", "prefill-3"}, // Role 1 (not ready) and Role 0 (lowest cost among ready) deleted
+			expectedRemainingNames: []string{"prefill-0", "prefill-3"}, // Role 1 (not ready) and Role 2 (lowest cost among non-0 ready) deleted; Role 0 is preserved for HPA selector
 			description:            "Not-ready status should take priority over deletion cost",
 		},
 		{
@@ -9960,4 +9960,92 @@ func TestRoleTargetRejectsForeignSnapshotReuseRace(t *testing.T) {
 	actual, err := kube.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, foreign.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	require.Equal(t, foreign, actual)
+}
+
+func TestScaleLabelSelectorMatchesGroupAfterRoleZeroScaledDown(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset()
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+
+	msName := "llm"
+	groupName := utils.GenerateServingGroupName(msName, 0)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: msName},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas:      ptr.To[int32](1),
+			SchedulerName: "volcano",
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{{
+					Name:     "prefill",
+					Replicas: ptr.To[int32](1),
+					EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+					},
+				}},
+			},
+			RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+		},
+	}
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(context.Background(), ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(ms))
+
+	key := utils.GetNamespaceName(ms)
+	controller.store.AddServingGroup(key, 0, "rev")
+	podIndexer := controller.podsInformer.GetIndexer()
+	roleList := []datastore.Role{}
+	// prefill was scaled from 2 to 1; prefill-0 has the lower deletion cost.
+	for ordinal, cost := range map[int]int{0: 0, 1: 100} {
+		roleID := utils.GenerateRoleID("prefill", ordinal)
+		controller.store.AddRole(key, groupName, "prefill", roleID, "rev", "hash")
+		controller.store.UpdateRoleStatus(key, groupName, "prefill", roleID, datastore.RoleRunning)
+		require.NoError(t, podIndexer.Add(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      fmt.Sprintf("%s-%s", groupName, roleID),
+				Labels: map[string]string{
+					workloadv1alpha1.ModelServingNameLabelKey: msName,
+					workloadv1alpha1.GroupNameLabelKey:        groupName,
+					workloadv1alpha1.RoleLabelKey:             "prefill",
+					workloadv1alpha1.RoleIDKey:                roleID,
+					workloadv1alpha1.EntryLabelKey:            utils.Entry,
+				},
+				Annotations: map[string]string{PodDeletionCostAnnotation: fmt.Sprintf("%d", cost)},
+			},
+		}))
+	}
+	for _, ordinal := range []int{0, 1} {
+		roleList = append(roleList, datastore.Role{Name: utils.GenerateRoleID("prefill", ordinal), Status: datastore.RoleRunning})
+	}
+
+	controller.scaleDownRoles(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], roleList, 1)
+	for _, ordinal := range []int{0, 1} {
+		roleID := utils.GenerateRoleID("prefill", ordinal)
+		if controller.store.GetRoleStatus(key, groupName, "prefill", roleID) != datastore.RoleDeleting {
+			continue
+		}
+		pods, _ := controller.podsLister.Pods("default").List(labels.SelectorFromSet(map[string]string{workloadv1alpha1.RoleIDKey: roleID}))
+		for _, pod := range pods {
+			require.NoError(t, podIndexer.Delete(pod))
+		}
+		controller.store.DeleteRole(key, groupName, "prefill", roleID)
+	}
+	remaining, err := controller.store.GetRoleList(key, groupName, "prefill")
+	require.NoError(t, err)
+	require.Len(t, remaining, 1)
+	require.Equal(t, "prefill-0", remaining[0].Name, "scale-down preserves role-0 for HPA status.labelSelector")
+	require.NoError(t, controller.store.UpdateServingGroupStatus(key, groupName, datastore.ServingGroupRunning))
+
+	require.NoError(t, controller.UpdateModelServingStatus(ms, "rev"))
+	updated, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Get(context.Background(), msName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, updated.Status.Replicas)
+
+	selector, err := labels.Parse(updated.Status.LabelSelector)
+	require.NoError(t, err)
+	pods, err := controller.podsLister.Pods("default").List(selector)
+	require.NoError(t, err)
+	require.Len(t, pods, int(updated.Status.Replicas),
+		"status.labelSelector %q must match one pod per ServingGroup", updated.Status.LabelSelector)
 }

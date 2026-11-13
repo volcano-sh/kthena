@@ -1153,10 +1153,22 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 	// Lower priority value = higher deletion priority (delete first)
 	// Lower deletion cost = higher deletion priority
 	// Higher index = higher deletion priority (backward compatibility)
+	isFirstRole := len(ms.Spec.Template.Roles) > 0 && targetRole.Name == ms.Spec.Template.Roles[0].Name
 	sortRoles := func(a, b RoleWithScore) int {
 		// Primary: Sort by priority (not-ready first)
 		if a.Priority != b.Priority {
 			return cmp.Compare(a.Priority, b.Priority) // Ascending: lower priority (not-ready) first
+		}
+
+		// Preserve the 0th instance of the first role among instances with the same priority,
+		// because status.labelSelector pins to it for the HPA scale subresource.
+		if isFirstRole {
+			if a.Index == 0 && b.Index != 0 {
+				return 1
+			}
+			if b.Index == 0 && a.Index != 0 {
+				return -1
+			}
 		}
 
 		// Secondary: Among roles with same priority, lower deletion cost comes first
