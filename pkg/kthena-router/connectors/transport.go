@@ -79,12 +79,34 @@ func roundTrip(req *http.Request, timeout time.Duration, rt http.RoundTripper) (
 	return resp, nil
 }
 
+// requestSideStatusCode reports whether the HTTP status code represents a
+// request-side error that cannot succeed on any other pod (bad request body,
+// authentication/authorization failure, oversized or semantically invalid
+// payload). Engines disagree on which codes they use for pod-local conditions
+// (e.g. an adapter not loaded on that pod, or per-pod throttling), so only
+// this explicit allowlist is considered non-retryable; unknown 4xx keep the
+// retryable forwarding-error semantics.
+func requestSideStatusCode(code int) bool {
+	return code == http.StatusBadRequest ||
+		code == http.StatusUnauthorized ||
+		code == http.StatusForbidden ||
+		code == http.StatusRequestEntityTooLarge ||
+		code == http.StatusUnprocessableEntity
+}
+
 func prefillerProxy(req *http.Request, timeout time.Duration, rt http.RoundTripper) error {
 	resp, err := roundTrip(req, timeout, rt)
 	if err != nil {
 		return fmt.Errorf("prefill request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// A request-side 4xx (invalid body, auth, oversized payload) fails on every
+	// prefill/decode pair, so stop the retry loop instead of re-sending the
+	// same request to the remaining pairs.
+	if requestSideStatusCode(resp.StatusCode) {
+		return &NonRetryableError{Err: fmt.Errorf("prefill request rejected with status %d", resp.StatusCode)}
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("prefill request failed with status %d", resp.StatusCode)
@@ -124,6 +146,13 @@ func decoderProxy(c *gin.Context, req *http.Request, timeout time.Duration, rt h
 		return 0, fmt.Errorf("decode request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// A request-side 4xx (invalid body, auth, oversized payload) fails on every
+	// prefill/decode pair, so stop the retry loop instead of re-sending the
+	// same request to the remaining pairs.
+	if requestSideStatusCode(resp.StatusCode) {
+		return 0, &NonRetryableError{Err: fmt.Errorf("decode request rejected with status %d", resp.StatusCode)}
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if isResponsesRequest(c, req) {
