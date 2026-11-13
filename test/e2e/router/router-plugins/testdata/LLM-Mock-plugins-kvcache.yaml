@@ -3,6 +3,7 @@ kind: StatefulSet
 metadata:
   name: router-plugin-kvcache-mock
 spec:
+  podManagementPolicy: Parallel
   serviceName: router-plugin-kvcache-mock
   replicas: 3
   selector:
