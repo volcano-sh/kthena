@@ -19,11 +19,12 @@ package batch
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lestrrat-go/jwx/v3/jwt"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/filters/auth"
 )
 
 // anonymousTenant is the one tenant every caller shares when authentication is off.
@@ -32,14 +33,21 @@ const anonymousTenant = "anonymous"
 // tenantOf derives the owner from the verified token; only a caller with no token is anonymous.
 func tenantOf(c *gin.Context) string {
 	subject := c.GetString(common.UserIdKey)
-	if _, verified := c.Get(common.JWTTokenKey); subject == "" && !verified {
-		return anonymousTenant
+	value, _ := c.Get(common.JWTTokenKey)
+	token, verified := value.(jwt.Token)
+	if !verified {
+		if subject == "" {
+			return anonymousTenant
+		}
+		return tenantID("", subject)
 	}
-	return tenantID(auth.ClaimFromContext(c, "iss"), subject)
+	// The issuer is read as signed, because a trimmed one would merge two issuers.
+	issuer, _ := token.Issuer()
+	return tenantID(issuer, subject)
 }
 
-// tenantID is safe as a Redis key part and a directory name whatever the claims hold.
+// tenantID is safe as a Redis key part and a directory name; the issuer length keeps any two pairs apart.
 func tenantID(issuer, subject string) string {
-	sum := sha256.Sum256([]byte(issuer + "\x00" + subject))
+	sum := sha256.Sum256([]byte(strconv.Itoa(len(issuer)) + ":" + issuer + subject))
 	return hex.EncodeToString(sum[:16])
 }

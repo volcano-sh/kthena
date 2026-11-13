@@ -61,10 +61,6 @@ func TestFileStoreCreateAndRead(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(12), written)
 	assert.Equal(t, "hello\nworld\n", readAll(t, store, "alice", "file-1"))
-
-	size, err := store.Size(ctx, "alice", "file-1")
-	require.NoError(t, err)
-	assert.Equal(t, int64(12), size)
 }
 
 func TestFileStoreKeepsTenantsApart(t *testing.T) {
@@ -148,6 +144,16 @@ func TestFileStoreLeavesNothingBehindOnFailure(t *testing.T) {
 	assert.Empty(t, leftovers, "no temp file is left behind")
 }
 
+func TestFileStoreCreateStopsForACancelledRequest(t *testing.T) {
+	store, root := newTestFileStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.Create(ctx, "alice", "file-1", strings.NewReader("data"), 1024)
+	require.ErrorIs(t, err, context.Canceled, "nobody waits for this file any more")
+	assert.Empty(t, storedFiles(t, root), "so nothing is kept")
+}
+
 func TestFileStoreReplacesAtomically(t *testing.T) {
 	store, _ := newTestFileStore(t)
 	ctx := context.Background()
@@ -157,7 +163,7 @@ func TestFileStoreReplacesAtomically(t *testing.T) {
 	_, err = store.Create(ctx, "alice", "file-1", strings.NewReader("second write"), 1024)
 	require.NoError(t, err)
 	assert.Equal(t, "second write", readAll(t, store, "alice", "file-1"),
-		"finalize rewrites the same file, so a replace must be complete or not at all")
+		"a second write under one id replaces the first, whole")
 }
 
 func TestFileStoreMissingFile(t *testing.T) {
@@ -165,8 +171,6 @@ func TestFileStoreMissingFile(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := store.Open(ctx, "alice", "file-nope")
-	assert.ErrorIs(t, err, ErrNotFound)
-	_, err = store.Size(ctx, "alice", "file-nope")
 	assert.ErrorIs(t, err, ErrNotFound)
 	assert.ErrorIs(t, store.Remove(ctx, "alice", "file-nope"), ErrNotFound)
 }
@@ -183,7 +187,7 @@ func TestFileStoreWritesGroupReadableFiles(t *testing.T) {
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o640), info.Mode().Perm(),
-		"replicas share the volume by group, and nobody else may read prompts")
+		"the volume's group may read the file, and nobody else may read prompts")
 
 	dir, err := os.Stat(filepath.Dir(path))
 	require.NoError(t, err)
@@ -295,9 +299,6 @@ func TestFileStoreAppend(t *testing.T) {
 		require.NoError(t, w.Close())
 	}
 	assert.Equal(t, "one\ntwo\n", readAll(t, store, "alice", "segment-1"), "a reopened segment keeps what it had")
-	size, err := store.Size(ctx, "alice", "segment-1")
-	require.NoError(t, err)
-	assert.EqualValues(t, 8, size)
 }
 
 func TestFileStoreRejectsUnsafeNames(t *testing.T) {
@@ -326,4 +327,26 @@ func TestFileStoreReadsAtAnOffset(t *testing.T) {
 	_, err = f.ReadAt(buf, 4)
 	require.NoError(t, err)
 	assert.Equal(t, "456", string(buf))
+}
+
+func TestFileStoreLeavesNothingBehindWhenTheDirectoryCannotBeSynced(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can open any directory")
+	}
+	store, root := newTestFileStore(t)
+	ctx := context.Background()
+	_, err := store.Create(ctx, "alice", "file-1", strings.NewReader("first"), 0)
+	require.NoError(t, err)
+	dir := filepath.Join(root, "alice")
+	require.NoError(t, os.Chmod(dir, 0o300))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	_, err = store.Create(ctx, "alice", "file-2", strings.NewReader("second"), 0)
+	require.Error(t, err, "a directory that cannot be opened cannot be synced")
+
+	require.NoError(t, os.Chmod(dir, 0o700))
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "a failed create leaves no bytes for the caller to clean up")
+	assert.Equal(t, "file-1", entries[0].Name())
 }

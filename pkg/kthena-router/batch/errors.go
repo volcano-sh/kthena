@@ -20,6 +20,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"k8s.io/klog/v2"
 )
 
 // Error types from the OpenAI error object.
@@ -37,7 +38,8 @@ func fail(c *gin.Context, status int, kind, param, message string) {
 	c.AbortWithStatusJSON(status, gin.H{"error": body})
 }
 
-// unavailable answers a failure of the store or the volume, which is never a 404.
-func unavailable(c *gin.Context, message string) {
+// unavailable answers a failure of the store or the volume, which is never a 404, and logs its cause.
+func unavailable(c *gin.Context, message string, cause error) {
+	klog.Errorf("batch: %s: %v", message, cause)
 	fail(c, http.StatusServiceUnavailable, errAPI, "", message)
 }

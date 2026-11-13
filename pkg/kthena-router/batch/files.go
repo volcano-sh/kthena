@@ -61,8 +61,6 @@ type FileStore interface {
 	Create(ctx context.Context, tenant, id string, r io.Reader, limit int64) (int64, error)
 	// Open returns the file for reading, or ErrNotFound.
 	Open(ctx context.Context, tenant, id string) (ReadFile, error)
-	// Size returns the stored size, or ErrNotFound.
-	Size(ctx context.Context, tenant, id string) (int64, error)
 	// Append opens a file for appending, creating it durably when it is new.
 	Append(ctx context.Context, tenant, id string) (SegmentWriter, error)
 	// Remove deletes the bytes, or returns ErrNotFound.
@@ -93,18 +91,15 @@ func (s *FSStore) path(tenant, id string) (string, error) {
 	return filepath.Join(s.root, tenant, id), nil
 }
 
-// ensureDir creates dir and makes a newly created one durable in its parent.
+// ensureDir creates dir and syncs its parent every time, as another caller may have just created it.
 func ensureDir(dir string) error {
-	if _, err := os.Stat(dir); err == nil {
-		return nil
-	}
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return err
 	}
 	return syncDir(filepath.Dir(dir))
 }
 
-// Create writes to a temporary file, syncs it, renames it into place and syncs the directory.
+// Create writes a synced temporary file, renames it into place and syncs the directory; a failure leaves nothing.
 func (s *FSStore) Create(ctx context.Context, tenant, id string, r io.Reader, limit int64) (int64, error) {
 	final, err := s.path(tenant, id)
 	if err != nil {
@@ -132,7 +127,11 @@ func (s *FSStore) Create(ctx context.Context, tenant, id string, r io.Reader, li
 		_ = os.Remove(temp.Name())
 		return 0, err
 	}
-	return written, syncDir(dir)
+	if err := syncDir(dir); err != nil {
+		_ = os.Remove(final)
+		return 0, err
+	}
+	return written, nil
 }
 
 func fill(ctx context.Context, f *os.File, r io.Reader, limit int64) (int64, error) {
@@ -166,22 +165,6 @@ func (s *FSStore) Open(_ context.Context, tenant, id string) (ReadFile, error) {
 		return nil, err
 	}
 	return f, nil
-}
-
-// Size returns how many bytes are stored.
-func (s *FSStore) Size(_ context.Context, tenant, id string) (int64, error) {
-	path, err := s.path(tenant, id)
-	if err != nil {
-		return 0, err
-	}
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, ErrNotFound
-	}
-	if err != nil {
-		return 0, err
-	}
-	return info.Size(), nil
 }
 
 // Append opens a file for appending and syncs the directory so a new file survives a crash.

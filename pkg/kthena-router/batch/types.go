@@ -45,5 +45,7 @@ type File struct {
 	Bytes     int64
 	CreatedAt int64
 	ExpiresAt int64
+	// IndexedAt is the write time in microseconds that orders the listing.
+	IndexedAt int64
 	Deleted   bool
 }

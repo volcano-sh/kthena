@@ -17,9 +17,11 @@ limitations under the License.
 package batch
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -40,7 +42,12 @@ const (
 	defaultMaxBytes = int64(200 << 20)
 	defaultPageSize = 20
 	maxPageSize     = 100
+	// settleTimeout bounds the lookup that settles an upload whose record write failed.
+	settleTimeout = 5 * time.Second
 )
+
+// errFieldTooLong means a form field other than the file went over maxFormValue.
+var errFieldTooLong = errors.New("a form field is longer than " + strconv.Itoa(maxFormValue) + " bytes")
 
 // Config holds the settings of the batch API.
 type Config struct {
@@ -130,6 +137,13 @@ type upload struct {
 func (s *Service) uploadFile(c *gin.Context) {
 	tenant := tenantOf(c)
 	ctx := c.Request.Context()
+	// cleanup still removes bytes after the client is gone and the request is cancelled.
+	cleanup := context.WithoutCancel(ctx)
+	// A declared size over the limit is refused before the client sends the body.
+	if c.Request.ContentLength > s.config.MaxFileBytes+multipartSlack {
+		fail(c, http.StatusRequestEntityTooLarge, errInvalidRequest, "file", s.tooLarge())
+		return
+	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.config.MaxFileBytes+multipartSlack)
 	reader, err := c.Request.MultipartReader()
 	if err != nil {
@@ -137,47 +151,52 @@ func (s *Service) uploadFile(c *gin.Context) {
 		return
 	}
 	id := s.newID("file-")
+	// Asking for the new ID first refuses the upload before any byte is stored while the store is down.
+	if _, err := s.store.GetFile(ctx, id); !errors.Is(err, ErrNotFound) {
+		unavailable(c, "cannot record files right now", err)
+		return
+	}
 	var form upload
 	// reject removes the bytes already written and answers the error.
 	reject := func(status int, kind, param, message string) {
 		if form.gotFile {
-			_ = s.files.Remove(ctx, tenant, id)
+			_ = s.files.Remove(cleanup, tenant, id)
 		}
 		fail(c, status, kind, param, message)
 	}
 	for {
 		part, err := reader.NextPart()
-		if errors.Is(err, io.EOF) {
+		// Only a bare io.EOF is the end of the form; a wrapped one means the body was cut off.
+		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			s.uploadFailed(reject, err, false)
 			return
 		}
+		// A part is never closed here: Close would read the rest of it, even of one already rejected.
+		storing := false
 		switch part.FormName() {
 		case "file":
 			if form.gotFile {
-				part.Close()
 				reject(http.StatusBadRequest, errInvalidRequest, "file", "only one file part is allowed")
 				return
 			}
+			storing = true
 			form.filename = part.FileName()
 			form.written, err = s.files.Create(ctx, tenant, id, part, s.config.MaxFileBytes)
-			part.Close()
-			if err != nil {
-				s.uploadFailed(reject, err, true)
-				return
-			}
-			form.gotFile = true
+			form.gotFile = err == nil
 		case "purpose":
-			form.purpose = readFormValue(part)
+			form.purpose, err = readFormValue(part)
 		case "expires_after[anchor]":
-			form.anchor = readFormValue(part)
+			form.anchor, err = readFormValue(part)
 		case "expires_after[seconds]":
-			form.seconds = readFormValue(part)
-		default:
-			_, _ = io.Copy(io.Discard, io.LimitReader(part, maxFormValue))
-			part.Close()
+			form.seconds, err = readFormValue(part)
+		}
+		if err != nil {
+			// A client that left cancels the request, and its failed read is not the volume's failure.
+			s.uploadFailed(reject, err, storing && !errors.Is(ctx.Err(), context.Canceled))
+			return
 		}
 	}
 	ttl, param, message := s.checkUpload(&form)
@@ -198,11 +217,33 @@ func (s *Service) uploadFile(c *gin.Context) {
 	if ttl > 0 {
 		file.ExpiresAt = now.Add(ttl).Unix()
 	}
-	if err := s.store.CreateFile(ctx, file); err != nil {
-		reject(http.StatusServiceUnavailable, errAPI, "", "cannot record the uploaded file")
+	if err := s.recordFile(ctx, file); err != nil {
+		unavailable(c, "cannot record the uploaded file", err)
 		return
 	}
 	c.JSON(http.StatusOK, fileObject(file))
+}
+
+// recordFile stores the record; after a failure the bytes go only when a lookup shows no record points at them.
+func (s *Service) recordFile(ctx context.Context, file *File) error {
+	err := s.store.CreateFile(ctx, file)
+	if err == nil {
+		return nil
+	}
+	detached := context.WithoutCancel(ctx)
+	settle, cancel := context.WithTimeout(detached, settleTimeout)
+	defer cancel()
+	_, lookupErr := s.store.GetFile(settle, file.ID)
+	switch {
+	case lookupErr == nil:
+		// The record is there, so only the reply to the write was lost.
+		return nil
+	case errors.Is(lookupErr, ErrNotFound):
+		_ = s.files.Remove(detached, file.Tenant, file.ID)
+		return err
+	default:
+		return fmt.Errorf("%w; the record may exist, so the bytes of %s are kept", err, file.ID)
+	}
 }
 
 // checkUpload validates the form and returns how long the file lives.
@@ -230,33 +271,39 @@ func (s *Service) checkUpload(form *upload) (time.Duration, string, string) {
 }
 
 // uploadFailed answers a failed upload: too large is 413, a broken form 400, the volume 503.
-func (s *Service) uploadFailed(reject func(int, string, string, string), err error, storing bool) {
+func (s *Service) uploadFailed(reject func(int, string, string, string), err error, volume bool) {
 	var tooBig *http.MaxBytesError
 	switch {
 	case errors.Is(err, ErrTooLarge) || errors.As(err, &tooBig):
-		reject(http.StatusRequestEntityTooLarge, errInvalidRequest, "file",
-			"file is larger than "+strconv.FormatInt(s.config.MaxFileBytes, 10)+" bytes")
-	case storing && !errors.Is(err, io.ErrUnexpectedEOF):
+		reject(http.StatusRequestEntityTooLarge, errInvalidRequest, "file", s.tooLarge())
+	case errors.Is(err, errFieldTooLong):
+		reject(http.StatusBadRequest, errInvalidRequest, "", err.Error())
+	case volume && !errors.Is(err, io.ErrUnexpectedEOF):
+		klog.Errorf("batch: cannot store the uploaded file: %v", err)
 		reject(http.StatusServiceUnavailable, errAPI, "", "cannot store the uploaded file")
 	default:
 		reject(http.StatusBadRequest, errInvalidRequest, "file", "malformed multipart upload")
 	}
 }
 
-func readFormValue(part io.ReadCloser) string {
-	defer part.Close()
-	value, err := io.ReadAll(io.LimitReader(part, maxFormValue))
-	if err != nil {
-		return ""
+func (s *Service) tooLarge() string {
+	return "file is larger than " + strconv.FormatInt(s.config.MaxFileBytes, 10) + " bytes"
+}
+
+// readFormValue reads a short field; a longer one is refused, as a cut value could pass a check the whole one fails.
+func readFormValue(part io.Reader) (string, error) {
+	value, err := io.ReadAll(io.LimitReader(part, maxFormValue+1))
+	if err == nil && len(value) > maxFormValue {
+		err = errFieldTooLong
 	}
-	return strings.TrimSpace(string(value))
+	return strings.TrimSpace(string(value)), err
 }
 
 // lookup returns the caller's file; another tenant's file answers exactly like a missing one.
 func (s *Service) lookup(c *gin.Context, id string) (*File, bool) {
 	file, err := s.store.GetFile(c.Request.Context(), id)
 	if err != nil && !errors.Is(err, ErrNotFound) {
-		unavailable(c, "cannot read the file record")
+		unavailable(c, "cannot read the file record", err)
 		return nil, false
 	}
 	if err != nil || file.Deleted || file.Tenant != tenantOf(c) {
@@ -283,12 +330,42 @@ func (s *Service) fileContent(c *gin.Context, id string) {
 		return
 	}
 	if err != nil {
-		unavailable(c, "cannot read the file")
+		unavailable(c, "cannot read the file", err)
 		return
 	}
 	defer body.Close()
 	c.Header("Content-Type", "application/jsonl")
-	http.ServeContent(c.Writer, c.Request, "", time.Unix(file.CreatedAt, 0), body)
+	http.ServeContent(&contentWriter{ResponseWriter: c.Writer, c: c}, c.Request, "", time.Unix(file.CreatedAt, 0), body)
+}
+
+// contentWriter answers the errors of http.ServeContent in the OpenAI shape instead of plain text.
+type contentWriter struct {
+	http.ResponseWriter
+	c      *gin.Context
+	failed bool
+}
+
+func (w *contentWriter) WriteHeader(status int) {
+	if status < http.StatusBadRequest {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	// http.Error has set a plain-text type, which gin would keep for the JSON body.
+	w.Header().Del("Content-Type")
+	w.failed = true
+	switch {
+	case status < http.StatusInternalServerError:
+		fail(w.c, status, errInvalidRequest, "", strings.ToLower(http.StatusText(status)))
+	default:
+		unavailable(w.c, "cannot read the file", errors.New("serving the content failed with status "+strconv.Itoa(status)))
+	}
+}
+
+func (w *contentWriter) Write(p []byte) (int, error) {
+	if w.failed {
+		return len(p), nil
+	}
+	return w.ResponseWriter.Write(p)
 }
 
 func (s *Service) deleteFile(c *gin.Context, id string) {
@@ -298,12 +375,12 @@ func (s *Service) deleteFile(c *gin.Context, id string) {
 	}
 	removable, err := s.store.DeleteFile(c.Request.Context(), id)
 	if err != nil && !errors.Is(err, ErrNotFound) {
-		unavailable(c, "cannot delete the file")
+		unavailable(c, "cannot delete the file", err)
 		return
 	}
 	if removable {
-		// The record is already deleted, so leftover bytes are logged and not reported.
-		err := s.files.Remove(c.Request.Context(), file.Tenant, file.ID)
+		// The record is already deleted, so the bytes go even if the client left; leftovers are only logged.
+		err := s.files.Remove(context.WithoutCancel(c.Request.Context()), file.Tenant, file.ID)
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			klog.Errorf("batch: bytes of deleted file %s were not removed: %v", file.ID, err)
 		}
@@ -335,7 +412,7 @@ func (s *Service) listFiles(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		unavailable(c, "cannot list files right now")
+		unavailable(c, "cannot list files right now", err)
 		return
 	}
 	data := make([]gin.H, 0, len(files))

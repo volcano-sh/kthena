@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -30,13 +31,16 @@ import (
 // DefaultKeyPrefix keeps every batch key in one Redis slot, which the scripts need.
 const DefaultKeyPrefix = "kthena:batch:{b}:"
 
-// listScan is how many index entries one listing round reads.
-const listScan = 100
-
 //go:embed scripts/*.lua
 var scriptFS embed.FS
 
-var deleteFileScript = mustLoadScript("delete_file.lua")
+// listScan is how many index entries a listing reads at once after filtered files left its page short.
+const listScan = 100
+
+var (
+	createFileScript = mustLoadScript("create_file.lua")
+	deleteFileScript = mustLoadScript("delete_file.lua")
+)
 
 func mustLoadScript(name string) *redis.Script {
 	src, err := scriptFS.ReadFile("scripts/" + name)
@@ -67,13 +71,18 @@ func (s *RedisStore) fileKey(id string) string          { return s.prefix + "fil
 func (s *RedisStore) fileRefsKey(id string) string      { return s.prefix + "fileref:" + id }
 func (s *RedisStore) fileIndexKey(tenant string) string { return s.prefix + "idx:files:" + tenant }
 
-// indexScore orders a listing by write time in microseconds, kept inside the second of created_at.
-func (s *RedisStore) indexScore(createdAt int64) float64 {
+// indexTime is the write time in microseconds, kept inside the second of created_at.
+func (s *RedisStore) indexTime(createdAt int64) int64 {
 	first := createdAt * 1e6
-	return float64(min(max(s.now().UnixMicro(), first), first+1e6-1))
+	return min(max(s.now().UnixMicro(), first), first+1e6-1)
 }
 
-// CreateFile stores a file record and indexes it for its tenant.
+// indexMember sorts by write time and then ID, so a page can start after any record, even a deleted one.
+func indexMember(file *File) string {
+	return fmt.Sprintf("%020d:%s", file.IndexedAt, file.ID)
+}
+
+// CreateFile stores a file record and indexes it for its tenant in one step.
 func (s *RedisStore) CreateFile(ctx context.Context, file *File) error {
 	if file == nil || file.ID == "" {
 		return errors.New("batch: file id is required")
@@ -84,11 +93,10 @@ func (s *RedisStore) CreateFile(ctx context.Context, file *File) error {
 	if file.CreatedAt == 0 {
 		file.CreatedAt = s.now().Unix()
 	}
-	pipe := s.client.TxPipeline()
-	pipe.HSet(ctx, s.fileKey(file.ID), file.toHash()...)
-	pipe.ZAddNX(ctx, s.fileIndexKey(file.Tenant), redis.Z{Score: s.indexScore(file.CreatedAt), Member: file.ID})
-	_, err := pipe.Exec(ctx)
-	return err
+	file.IndexedAt = s.indexTime(file.CreatedAt)
+	keys := []string{s.fileKey(file.ID), s.fileIndexKey(file.Tenant)}
+	args := append([]any{indexMember(file)}, file.toHash()...)
+	return createFileScript.Run(ctx, s.client, keys, args...).Err()
 }
 
 // GetFile returns one file record.
@@ -110,7 +118,7 @@ func (s *RedisStore) DeleteFile(ctx context.Context, id string) (bool, error) {
 		return false, err
 	}
 	keys := []string{s.fileKey(id), s.fileRefsKey(id), s.fileIndexKey(file.Tenant)}
-	res, err := deleteFileScript.Run(ctx, s.client, keys, id).Text()
+	res, err := deleteFileScript.Run(ctx, s.client, keys, indexMember(file)).Text()
 	if err != nil {
 		return false, err
 	}
@@ -123,60 +131,83 @@ func (s *RedisStore) DeleteFile(ctx context.Context, id string) (bool, error) {
 // ListFiles returns one full page, reading on past files the purpose filter drops.
 func (s *RedisStore) ListFiles(ctx context.Context, query FileQuery) ([]*File, bool, error) {
 	index := s.fileIndexKey(query.Tenant)
-	start := int64(0)
+	after := ""
 	if query.After != "" {
-		rank, err := s.rank(ctx, index, query.After, query.Ascending)
+		cursor, err := s.GetFile(ctx, query.After)
 		if err != nil {
 			return nil, false, err
 		}
-		start = rank + 1
+		if cursor.Tenant != query.Tenant {
+			return nil, false, ErrNotFound
+		}
+		after = indexMember(cursor)
 	}
-	files := make([]*File, 0, query.Limit)
+	limit := max(query.Limit, 1)
+	files := make([]*File, 0, min(limit, listScan))
+	// One more than the page tells whether more files follow.
+	want := limit + 1
 	for {
-		ids, err := s.slice(ctx, index, start, start+listScan-1, query.Ascending)
+		members, err := s.slice(ctx, index, after, want, query.Ascending)
 		if err != nil {
 			return nil, false, err
 		}
-		for _, id := range ids {
-			file, err := s.GetFile(ctx, id)
-			if errors.Is(err, ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return nil, false, err
-			}
+		found, err := s.getFiles(ctx, members)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, file := range found {
 			if file.Deleted || (query.Purpose != "" && file.Purpose != query.Purpose) {
 				continue
 			}
-			if len(files) == query.Limit {
+			if len(files) == limit {
 				return files, true, nil
 			}
 			files = append(files, file)
 		}
-		if len(ids) < listScan {
+		if len(members) < want {
 			return files, false, nil
 		}
-		start += listScan
+		after = members[len(members)-1]
+		want = max(want, listScan)
 	}
 }
 
-func (s *RedisStore) rank(ctx context.Context, index, id string, ascending bool) (int64, error) {
-	cmd := s.client.ZRevRank(ctx, index, id)
+// slice reads up to count index members that follow after in listing order.
+func (s *RedisStore) slice(ctx context.Context, index, after string, count int, ascending bool) ([]string, error) {
+	by := &redis.ZRangeBy{Min: "-", Max: "+", Count: int64(count)}
 	if ascending {
-		cmd = s.client.ZRank(ctx, index, id)
+		if after != "" {
+			by.Min = "(" + after
+		}
+		return s.client.ZRangeByLex(ctx, index, by).Result()
 	}
-	rank, err := cmd.Result()
-	if errors.Is(err, redis.Nil) {
-		return 0, ErrNotFound
+	if after != "" {
+		by.Max = "(" + after
 	}
-	return rank, err
+	return s.client.ZRevRangeByLex(ctx, index, by).Result()
 }
 
-func (s *RedisStore) slice(ctx context.Context, index string, start, stop int64, ascending bool) ([]string, error) {
-	if ascending {
-		return s.client.ZRange(ctx, index, start, stop).Result()
+// getFiles reads the records of index members in one round trip, skipping any that are gone.
+func (s *RedisStore) getFiles(ctx context.Context, members []string) ([]*File, error) {
+	if len(members) == 0 {
+		return nil, nil
 	}
-	return s.client.ZRevRange(ctx, index, start, stop).Result()
+	pipe := s.client.Pipeline()
+	cmds := make([]*redis.MapStringStringCmd, 0, len(members))
+	for _, member := range members {
+		_, id, _ := strings.Cut(member, ":")
+		cmds = append(cmds, pipe.HGetAll(ctx, s.fileKey(id)))
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, err
+	}
+	files := make([]*File, 0, len(cmds))
+	for _, cmd := range cmds {
+		if raw := cmd.Val(); len(raw) > 0 {
+			files = append(files, fileFromHash(raw))
+		}
+	}
+	return files, nil
 }
 
 func (f *File) toHash() []any {
@@ -194,6 +225,7 @@ func (f *File) toHash() []any {
 		"bytes", f.Bytes,
 		"created_at", f.CreatedAt,
 		"expires_at", f.ExpiresAt,
+		"indexed_at", f.IndexedAt,
 		"deleted", deleted,
 	}
 }
@@ -208,6 +240,7 @@ func fileFromHash(raw map[string]string) *File {
 		Bytes:     parseInt(raw["bytes"]),
 		CreatedAt: parseInt(raw["created_at"]),
 		ExpiresAt: parseInt(raw["expires_at"]),
+		IndexedAt: parseInt(raw["indexed_at"]),
 		Deleted:   raw["deleted"] == "1",
 	}
 }

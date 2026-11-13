@@ -20,7 +20,7 @@ import "context"
 
 // Store keeps the batch records shared between router replicas.
 type Store interface {
-	// CreateFile stores the record for an uploaded or produced file.
+	// CreateFile stores the record for an uploaded or produced file; a retry of the same ID changes nothing.
 	CreateFile(ctx context.Context, file *File) error
 	// GetFile returns one file record, or ErrNotFound.
 	GetFile(ctx context.Context, id string) (*File, error)

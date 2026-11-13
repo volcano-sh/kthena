@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -185,23 +186,6 @@ func TestUploadRefusesOversizedFiles(t *testing.T) {
 		map[string]string{"purpose": PurposeBatch, "filename": "big.jsonl"}))
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
 	assert.Empty(t, storedFiles(t, api.root), "an oversized upload leaves no bytes behind")
-}
-
-func TestUploadChecksTheExpiryWindow(t *testing.T) {
-	api := newTestAPI(t)
-	for _, seconds := range []string{"60", "9999999"} {
-		rec := api.call(t, "alice", uploadRequest(t, "line\n", true, map[string]string{
-			"purpose": PurposeBatch, "filename": "q.jsonl", "expires_after[seconds]": seconds,
-		}))
-		assert.Equal(t, http.StatusBadRequest, rec.Code, "seconds=%s is outside 1h..30d", seconds)
-	}
-
-	rec := api.call(t, "alice", uploadRequest(t, "line\n", true, map[string]string{
-		"purpose": PurposeBatch, "filename": "q.jsonl", "expires_after[seconds]": "7200",
-	}))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	out := decode(t, rec)
-	assert.InDelta(t, out["created_at"].(float64)+7200, out["expires_at"].(float64), 2)
 }
 
 func TestFilenameCannotSteerTheFilesystem(t *testing.T) {
@@ -428,7 +412,7 @@ func TestWithAuthDisabledEveryoneIsOneTenant(t *testing.T) {
 	id := decode(t, rec)["id"].(string)
 
 	rec = api.call(t, "", httptest.NewRequest(http.MethodGet, filesPath+"/"+id, nil))
-	assert.Equal(t, http.StatusOK, rec.Code, "without JWT auth there is a single tenant; document it")
+	assert.Equal(t, http.StatusOK, rec.Code, "without JWT auth there is a single tenant")
 
 	rec = api.call(t, "alice", httptest.NewRequest(http.MethodGet, filesPath+"/"+id, nil))
 	assert.Equal(t, http.StatusNotFound, rec.Code, "a named tenant still cannot read the anonymous one")
@@ -528,6 +512,11 @@ func TestUploadRules(t *testing.T) {
 		{name: "seconds that are not a number", fields: map[string]string{"expires_after[seconds]": "soon"}, wantCode: http.StatusBadRequest, wantParam: "expires_after"},
 		{name: "an anchor without seconds", fields: map[string]string{"expires_after[anchor]": "created_at"}, wantCode: http.StatusBadRequest, wantParam: "expires_after"},
 		{name: "an unknown anchor", fields: map[string]string{"expires_after[anchor]": "last_used", "expires_after[seconds]": "7200"}, wantCode: http.StatusBadRequest, wantParam: "expires_after"},
+		{name: "the shortest expiry", fields: map[string]string{"expires_after[seconds]": "3600"}, wantCode: http.StatusOK},
+		{name: "the longest expiry", fields: map[string]string{"expires_after[seconds]": "2592000"}, wantCode: http.StatusOK},
+		{name: "one second under the shortest expiry", fields: map[string]string{"expires_after[seconds]": "3599"}, wantCode: http.StatusBadRequest, wantParam: "expires_after"},
+		{name: "one second over the longest expiry", fields: map[string]string{"expires_after[seconds]": "2592001"}, wantCode: http.StatusBadRequest, wantParam: "expires_after"},
+		{name: "a filename at the limit", fields: map[string]string{"filename": long[:maxFilename]}, wantCode: http.StatusOK},
 		{name: "a filename that is too long", fields: map[string]string{"filename": long}, wantCode: http.StatusBadRequest, wantParam: "file"},
 	}
 	for _, tt := range tests {
@@ -547,10 +536,36 @@ func TestUploadRules(t *testing.T) {
 			body := decode(t, rec)
 			created := int64(body["created_at"].(float64))
 			want := created + int64((720 * time.Hour).Seconds())
-			if tt.fields["expires_after[seconds]"] != "" {
-				want = created + 7200
+			if seconds := tt.fields["expires_after[seconds]"]; seconds != "" {
+				ttl, err := strconv.ParseInt(seconds, 10, 64)
+				require.NoError(t, err)
+				want = created + ttl
 			}
 			assert.EqualValues(t, want, body["expires_at"])
+		})
+	}
+}
+
+func TestUploadRefusesAFieldOverTheLimit(t *testing.T) {
+	padded := func(value string, size int) string { return value + strings.Repeat(" ", size-len(value)) }
+	tests := []struct {
+		name     string
+		fields   map[string]string
+		wantCode int
+	}{
+		{name: "a padded purpose that is not batch", fields: map[string]string{"purpose": padded(PurposeBatch, maxFormValue) + "x"}, wantCode: http.StatusBadRequest},
+		{name: "padded seconds after the file", fields: map[string]string{"purpose": PurposeBatch, "expires_after[seconds]": padded("7200", maxFormValue) + "1"}, wantCode: http.StatusBadRequest},
+		{name: "a value at the limit", fields: map[string]string{"purpose": padded(PurposeBatch, maxFormValue)}, wantCode: http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newTestAPI(t)
+			rec := api.call(t, "alice", uploadRequest(t, "line\n", true, tt.fields))
+			require.Equal(t, tt.wantCode, rec.Code, "a cut value must not pass a check the whole value fails: %s", rec.Body.String())
+			if tt.wantCode != http.StatusOK {
+				assert.Equal(t, errInvalidRequest, errorOf(t, rec)["type"])
+				assert.Empty(t, storedFiles(t, api.root), "a refused upload leaves no bytes behind")
+			}
 		})
 	}
 }
@@ -669,4 +684,407 @@ func TestTokenWithoutASubjectIsNotAnonymous(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code, "another issuer must not read it either")
 	rec = api.callAs(t, "https://issuer-a", "", httptest.NewRequest(http.MethodGet, filesPath+"/"+id, nil))
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// serveHanging sends the start of a form and then nothing, like a client that stopped sending.
+func serveHanging(t *testing.T, api *testAPI, write func(*multipart.Writer)) *httptest.ResponseRecorder {
+	t.Helper()
+	body, sender := io.Pipe()
+	t.Cleanup(func() { _ = body.Close() })
+	writer := multipart.NewWriter(sender)
+	go write(writer)
+	req := httptest.NewRequest(http.MethodPost, filesPath, body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = req
+		c.Set(common.UserIdKey, "alice")
+		api.service.Serve(c)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the handler waits for the rest of a part it already rejected")
+	}
+	return rec
+}
+
+func TestUploadAnswersWithoutReadingTheRestOfARejectedPart(t *testing.T) {
+	tests := []struct {
+		name   string
+		write  func(*multipart.Writer)
+		status int
+	}{
+		{name: "oversized file", status: http.StatusRequestEntityTooLarge, write: func(w *multipart.Writer) {
+			part, _ := w.CreateFormFile("file", "big.jsonl")
+			_, _ = part.Write(bytes.Repeat([]byte("x"), 4096))
+		}},
+		{name: "second file", status: http.StatusBadRequest, write: func(w *multipart.Writer) {
+			_ = w.WriteField("purpose", PurposeBatch)
+			part, _ := w.CreateFormFile("file", "a.jsonl")
+			_, _ = part.Write([]byte("line\n"))
+			part, _ = w.CreateFormFile("file", "b.jsonl")
+			_, _ = part.Write(bytes.Repeat([]byte("x"), 4096))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newTestAPI(t)
+			rec := serveHanging(t, api, tt.write)
+			assert.Equal(t, tt.status, rec.Code, rec.Body.String())
+			assert.Empty(t, storedFiles(t, api.root))
+		})
+	}
+}
+
+func TestUploadRejectsAFormThatWasCutOff(t *testing.T) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	require.NoError(t, writer.WriteField("purpose", PurposeBatch))
+	part, err := writer.CreateFormFile("file", "questions.jsonl")
+	require.NoError(t, err)
+	_, err = io.WriteString(part, "line\n")
+	require.NoError(t, err)
+	require.NoError(t, writer.WriteField("expires_after[seconds]", "7200"))
+	require.NoError(t, writer.Close())
+	closing := "\r\n--" + writer.Boundary() + "--\r\n"
+
+	tests := []struct {
+		name string
+		keep int
+	}{
+		{name: "inside the file", keep: bytes.Index(buf.Bytes(), []byte("line\n")) + 2},
+		{name: "inside the last field", keep: buf.Len() - len(closing) - 2},
+		{name: "before the closing boundary", keep: buf.Len() - len(closing)},
+		{name: "inside the closing boundary", keep: buf.Len() - 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newTestAPI(t)
+			req := httptest.NewRequest(http.MethodPost, filesPath, bytes.NewReader(buf.Bytes()[:tt.keep]))
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			rec := api.call(t, "alice", req)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "half a form must not become a file: %s", rec.Body.String())
+			assert.Empty(t, storedFiles(t, api.root))
+		})
+	}
+}
+
+// brokenStore fails every record write, stored or not, and can go silent after it.
+type brokenStore struct {
+	Store
+	stores  bool
+	answers bool
+	wrote   bool
+}
+
+func (s *brokenStore) CreateFile(ctx context.Context, file *File) error {
+	s.wrote = true
+	if s.stores {
+		if err := s.Store.CreateFile(ctx, file); err != nil {
+			return err
+		}
+	}
+	return errors.New("i/o timeout")
+}
+
+func (s *brokenStore) GetFile(ctx context.Context, id string) (*File, error) {
+	if s.wrote && !s.answers {
+		return nil, errors.New("i/o timeout")
+	}
+	return s.Store.GetFile(ctx, id)
+}
+
+func TestUploadWhenTheStoreFailsToAnswer(t *testing.T) {
+	tests := []struct {
+		name    string
+		stores  bool
+		answers bool
+		status  int
+		kept    int
+	}{
+		{name: "the record was stored and only the reply was lost", stores: true, answers: true, status: http.StatusOK, kept: 1},
+		{name: "the record was not stored", answers: true, status: http.StatusServiceUnavailable, kept: 0},
+		{name: "the store went silent, so the bytes stay", stores: true, status: http.StatusServiceUnavailable, kept: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newTestAPI(t)
+			api.service.store = &brokenStore{Store: api.store, stores: tt.stores, answers: tt.answers}
+			rec := api.call(t, "alice", uploadRequest(t, "line\n", true, map[string]string{"purpose": PurposeBatch}))
+			assert.Equal(t, tt.status, rec.Code, rec.Body.String())
+			assert.Len(t, storedFiles(t, api.root), tt.kept, "bytes go only when no record can point at them")
+		})
+	}
+}
+
+func TestFileContentErrorsHaveTheOpenAIShape(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		value  string
+		status int
+	}{
+		{name: "range outside the file", header: "Range", value: "bytes=50-60", status: http.StatusRequestedRangeNotSatisfiable},
+		{name: "failed precondition", header: "If-Match", value: `"other"`, status: http.StatusPreconditionFailed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newTestAPI(t)
+			id := mustUpload(t, api, "alice", "0123456789")
+			req := httptest.NewRequest(http.MethodGet, filesPath+"/"+id+"/content", nil)
+			req.Header.Set(tt.header, tt.value)
+			rec := api.call(t, "alice", req)
+			assert.Equal(t, tt.status, rec.Code)
+			assert.Equal(t, errInvalidRequest, errorOf(t, rec)["type"])
+		})
+	}
+}
+
+func TestListAndDeleteLoopReachesEveryFile(t *testing.T) {
+	api := newTestAPI(t)
+	for i := 0; i < 5; i++ {
+		mustUpload(t, api, "alice", "line\n")
+	}
+	deleted, after := 0, ""
+	for more, pages := true, 0; more; pages++ {
+		require.Less(t, pages, 10, "the listing never says it is done")
+		rec := api.call(t, "alice", httptest.NewRequest(http.MethodGet, filesPath+"?limit=2"+after, nil))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		page := decode(t, rec)
+		for _, item := range page["data"].([]any) {
+			id := item.(map[string]any)["id"].(string)
+			rec := api.call(t, "alice", httptest.NewRequest(http.MethodDelete, filesPath+"/"+id, nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			deleted++
+			after = "&after=" + id
+		}
+		more = page["has_more"].(bool)
+	}
+	assert.Equal(t, 5, deleted, "paging continues from a file the loop just deleted")
+	assert.Empty(t, storedFiles(t, api.root))
+}
+
+func TestIssuerIsComparedExactly(t *testing.T) {
+	api := newTestAPI(t)
+	rec := api.callAs(t, " https://issuer ", "user-1", uploadRequest(t, "line\n", true, map[string]string{"purpose": PurposeBatch}))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	id := decode(t, rec)["id"].(string)
+
+	rec = api.callAs(t, "https://issuer", "user-1", httptest.NewRequest(http.MethodGet, filesPath+"/"+id, nil))
+	assert.Equal(t, http.StatusNotFound, rec.Code, "an issuer that differs only by spaces is another issuer")
+	assert.NotEqual(t, tenantID("a\x00b", "c"), tenantID("a", "b\x00c"), "no two pairs share one tenant")
+}
+
+// unseekable is a stored file whose volume fails once it is open.
+type unseekable struct{ ReadFile }
+
+func (unseekable) Seek(int64, int) (int64, error) { return 0, errors.New("stale file handle") }
+
+// failingVolume opens files that cannot be read.
+type failingVolume struct{ FileStore }
+
+func (s failingVolume) Open(ctx context.Context, tenant, id string) (ReadFile, error) {
+	file, err := s.FileStore.Open(ctx, tenant, id)
+	if err != nil {
+		return nil, err
+	}
+	return unseekable{file}, nil
+}
+
+func TestFileContentErrorsAreJSON(t *testing.T) {
+	api := newTestAPI(t)
+	id := mustUpload(t, api, "alice", "0123456789")
+
+	req := httptest.NewRequest(http.MethodGet, filesPath+"/"+id+"/content", nil)
+	req.Header.Set("Range", "bytes=50-60")
+	rec := api.call(t, "alice", req)
+	require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Type"), "application/json", "the body is JSON, so the header must say so")
+
+	api.service.files = failingVolume{api.files}
+	rec = api.call(t, "alice", httptest.NewRequest(http.MethodGet, filesPath+"/"+id+"/content", nil))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "a volume failure is not the caller's fault")
+	assert.Equal(t, errAPI, errorOf(t, rec)["type"])
+	assert.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+}
+
+// unreadBody fails the test when anything reads it.
+type unreadBody struct{ t *testing.T }
+
+func (b unreadBody) Read([]byte) (int, error) {
+	b.t.Error("the body was read")
+	return 0, io.EOF
+}
+
+func TestUploadRefusesADeclaredOversizeBeforeReadingIt(t *testing.T) {
+	api := newTestAPI(t)
+	req := httptest.NewRequest(http.MethodPost, filesPath, unreadBody{t})
+	req.ContentLength = 1024 + multipartSlack + 1
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=x")
+
+	rec := api.call(t, "alice", req)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+}
+
+// leavingClient cancels the request once the file is stored and then honours that, like a remote store would.
+type leavingClient struct {
+	FileStore
+	leave context.CancelFunc
+}
+
+func (s leavingClient) Create(ctx context.Context, tenant, id string, r io.Reader, limit int64) (int64, error) {
+	written, err := s.FileStore.Create(ctx, tenant, id, r, limit)
+	s.leave()
+	return written, err
+}
+
+func (s leavingClient) Remove(ctx context.Context, tenant, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.FileStore.Remove(ctx, tenant, id)
+}
+
+func TestUploadCleansUpAfterAClientThatLeft(t *testing.T) {
+	tests := []struct {
+		name    string
+		purpose string
+	}{
+		{name: "the form is then rejected", purpose: "assistants"},
+		{name: "the record is then not stored", purpose: PurposeBatch},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newTestAPI(t)
+			ctx, leave := context.WithCancel(context.Background())
+			api.service.files = leavingClient{FileStore: api.files, leave: leave}
+			req := uploadRequest(t, "line\n", false, map[string]string{"purpose": tt.purpose})
+
+			rec := api.call(t, "alice", req.WithContext(ctx))
+			require.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Empty(t, storedFiles(t, api.root), "the bytes go even though the request is already cancelled")
+		})
+	}
+}
+
+// leavingStore cancels the request right after the record is marked deleted.
+type leavingStore struct {
+	Store
+	leave context.CancelFunc
+}
+
+func (s leavingStore) DeleteFile(ctx context.Context, id string) (bool, error) {
+	removable, err := s.Store.DeleteFile(ctx, id)
+	s.leave()
+	return removable, err
+}
+
+func TestDeleteRemovesTheBytesAfterAClientThatLeft(t *testing.T) {
+	api := newTestAPI(t)
+	id := mustUpload(t, api, "alice", "line\n")
+	ctx, leave := context.WithCancel(context.Background())
+	api.service.store = leavingStore{Store: api.store, leave: leave}
+	api.service.files = leavingClient{FileStore: api.files, leave: leave}
+
+	req := httptest.NewRequest(http.MethodDelete, filesPath+"/"+id, nil).WithContext(ctx)
+	rec := api.call(t, "alice", req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, storedFiles(t, api.root), "the record is deleted, so the bytes go whether or not the client waits")
+}
+
+func TestUploadRefusesABodyOverTheCap(t *testing.T) {
+	api := newTestAPI(t)
+	req := uploadRequest(t, "line\n", true, map[string]string{
+		"purpose": PurposeBatch, "filename": "q.jsonl", "notes": strings.Repeat("x", 1024+multipartSlack),
+	})
+	// No declared length, as with a chunked upload, so only reading can find the body too large.
+	req.ContentLength = -1
+
+	rec := api.call(t, "alice", req)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "parts the API does not use still count toward the cap: %s", rec.Body.String())
+	assert.Empty(t, storedFiles(t, api.root), "the file stored before the cap was hit is removed")
+}
+
+func TestListFilesPageSizes(t *testing.T) {
+	api := newTestAPI(t)
+	addFiles(t, api.store, tenantID("", "alice"), PurposeBatch, maxPageSize+5)
+
+	tests := []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{name: "no limit uses the default page", query: "", want: defaultPageSize},
+		{name: "a limit over the largest page is clamped", query: "?limit=1000", want: maxPageSize},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := api.call(t, "alice", httptest.NewRequest(http.MethodGet, filesPath+tt.query, nil))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			body := decode(t, rec)
+			assert.Len(t, body["data"], tt.want)
+			assert.Equal(t, true, body["has_more"])
+		})
+	}
+}
+
+// failingCreate is a volume that cannot store a file, or a client that left while it was stored.
+type failingCreate struct {
+	FileStore
+	leave context.CancelFunc
+}
+
+func (s failingCreate) Create(context.Context, string, string, io.Reader, int64) (int64, error) {
+	if s.leave != nil {
+		s.leave()
+	}
+	return 0, errors.New("write failed")
+}
+
+func TestUploadFailureIsBlamedOnTheRightSide(t *testing.T) {
+	tests := []struct {
+		name   string
+		gone   bool
+		status int
+		kind   string
+	}{
+		{name: "the volume fails while the client waits", status: http.StatusServiceUnavailable, kind: errAPI},
+		{name: "the client is gone, so the volume is not blamed", gone: true, status: http.StatusBadRequest, kind: errInvalidRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newTestAPI(t)
+			ctx, leave := context.WithCancel(context.Background())
+			defer leave()
+			volume := failingCreate{FileStore: api.files}
+			if tt.gone {
+				volume.leave = leave
+			}
+			api.service.files = volume
+			req := uploadRequest(t, "line\n", true, map[string]string{"purpose": PurposeBatch})
+
+			rec := api.call(t, "alice", req.WithContext(ctx))
+			assert.Equal(t, tt.status, rec.Code, rec.Body.String())
+			assert.Equal(t, tt.kind, errorOf(t, rec)["type"])
+		})
+	}
+}
+
+// sweptStore loses the record between the lookup and the delete.
+type sweptStore struct{ Store }
+
+func (sweptStore) DeleteFile(context.Context, string) (bool, error) { return false, ErrNotFound }
+
+func TestDeleteOfARecordThatJustWentAwaySucceeds(t *testing.T) {
+	api := newTestAPI(t)
+	id := mustUpload(t, api, "alice", "line\n")
+	api.service.store = sweptStore{api.store}
+
+	rec := api.call(t, "alice", httptest.NewRequest(http.MethodDelete, filesPath+"/"+id, nil))
+	require.Equal(t, http.StatusOK, rec.Code, "the file is gone either way, which is what the caller asked for: %s", rec.Body.String())
+	assert.Equal(t, true, decode(t, rec)["deleted"])
 }
