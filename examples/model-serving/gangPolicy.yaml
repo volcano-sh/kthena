@@ -3,6 +3,8 @@ kind: ModelServing
 metadata:
   name: sample
   namespace: default
+  # annotations:
+  #   scheduling.volcano.sh/queue-name: my-queue   # place the PodGroup in a Volcano Queue
 spec:
   schedulerName: volcano
   replicas: 1  # servingGroup replicas
@@ -17,6 +19,8 @@ spec:
         replicas: 2       # role replicas, for example, 1P1D
         entryTemplate:
           spec:
+            # nodeSelector:
+            #   nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
             containers:
               - name: leader
                 image: nginx
