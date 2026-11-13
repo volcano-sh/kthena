@@ -12,13 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from kthena.downloader.base import get_downloader
 from kthena.downloader.downloader import download_model
 from kthena.downloader.pvc import PVCDownloader
+from kthena.downloader.lock import LockManager
 
 
 class TestDownloadModel(unittest.TestCase):
@@ -85,6 +89,39 @@ class TestDownloadModel(unittest.TestCase):
         downloader = get_downloader(source, {})
         self.assertIsInstance(downloader, PVCDownloader)
         self.assertEqual(downloader.source_path, source)
+
+    def test_pvc_copy_preserves_active_destination_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            destination = Path(temp_dir) / "destination"
+            source.mkdir()
+            (source / ".lock").touch()
+            # Different mtimes make rsync transfer even an empty persistent marker.
+            os.utime(source / ".lock", (1, 1))
+            (source / "weights.bin").write_bytes(b"model weights")
+            (source / "nested").mkdir()
+            (source / "nested" / ".lock").write_text("model data")
+            downloader = PVCDownloader(source_path=f"pvc://{source}")
+            original_copy = downloader._copy_from_pvc
+
+            def copy_and_check_lock(pvc_path, output_dir):
+                lock_path = destination / ".lock"
+                original_inode = lock_path.stat().st_ino
+                original_copy(pvc_path, output_dir)
+                contender = LockManager(str(lock_path))
+                try:
+                    self.assertFalse(contender.try_acquire(), "Copy must not unlock the destination")
+                    self.assertEqual(original_inode, lock_path.stat().st_ino)
+                finally:
+                    contender.release()
+
+            with patch.object(downloader, "_copy_from_pvc", side_effect=copy_and_check_lock):
+                downloader.download_model(str(destination))
+
+            self.assertEqual(b"model weights", (destination / "weights.bin").read_bytes())
+            self.assertEqual("model data", (destination / "nested" / ".lock").read_text())
+            with LockManager(str(destination / ".lock")):
+                pass
 
     def test_init_with_valid_source(self):
         downloader = PVCDownloader(source_path="pvc://models")
