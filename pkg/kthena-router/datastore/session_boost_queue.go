@@ -32,15 +32,16 @@ import (
 // cancellation and shutdown logic, while the ordering and dequeue strategy below
 // replace per-user fairness with session-aware boosting for prefix-cache reuse.
 
-// BackendWaitingChecker is a function that checks whether the backend pods
-// have capacity to accept new requests. It returns true when at least one pod
-// has an empty waiting queue (i.e. RequestWaitingNum == 0), meaning the backend
-// can accept a new request without queuing.
+// BackendWaitingChecker is a function that checks whether a request may leave the
+// queue. It returns true when at least one pod has an empty waiting queue (i.e.
+// RequestWaitingNum == 0), meaning the backend can accept a new request without
+// queuing. It also returns true when there is nothing to wait on: no backend pods,
+// or a route that can send to an external provider.
 type BackendWaitingChecker func() bool
 
-// PodCounter returns the number of backend pods currently serving a model. It is
-// used in session-boost mode to scale the total inflight limit by the number of
-// pods (InflightPerPod * podCount).
+// PodCounter returns the number of backend pods that can serve a model's requests.
+// It is used in session-boost mode to scale the total inflight limit by the number
+// of pods (InflightPerPod * podCount).
 type PodCounter func() int
 
 // SessionTracker tracks recently completed sessions for priority boosting using
