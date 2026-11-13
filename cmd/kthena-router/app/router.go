@@ -369,6 +369,9 @@ type PortListenerInfo struct {
 	Server       *http.Server
 	ShutdownFunc context.CancelFunc
 	Listeners    []ListenerConfig
+	// listenerClosed is closed once Server has closed its listener, so the
+	// port can be bound again.
+	listenerClosed chan struct{}
 }
 
 // ListenerManager manages Gateway listeners dynamically
@@ -568,6 +571,9 @@ func (lm *ListenerManager) addListenerToPort(port int32, config ListenerConfig, 
 		}
 		lm.portListeners[port] = portInfo
 		portInfo.ShutdownFunc = cancel
+		// Shutdown closes the server's listener before it runs the shutdown hooks.
+		portInfo.listenerClosed = make(chan struct{})
+		server.RegisterOnShutdown(func() { close(portInfo.listenerClosed) })
 	} else {
 		// Add listener to existing port
 		portInfo.mu.Lock()
@@ -692,6 +698,13 @@ func (lm *ListenerManager) checkAndClosePortIfEmpty(port int32) {
 		delete(lm.portListeners, port)
 		klog.Infof("No listeners remaining on port %d, shutting down server", port)
 		portInfo.ShutdownFunc()
+		// The server closes its listener asynchronously. Wait for it, so that a
+		// listener added to this port next can bind it. Once the router is
+		// shutting down, the server may have shut down before the hook was set.
+		select {
+		case <-portInfo.listenerClosed:
+		case <-lm.ctx.Done():
+		}
 	}
 }
 

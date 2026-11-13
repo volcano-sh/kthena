@@ -17,10 +17,18 @@ limitations under the License.
 package app
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	routerpkg "github.com/volcano-sh/kthena/pkg/kthena-router/router"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -216,5 +224,50 @@ func TestMatchedListenerIsStableAfterGatewayUpdate(t *testing.T) {
 
 	if matched.GatewayKey != target.GatewayKey {
 		t.Fatalf("matched listener changed to %q after update", matched.GatewayKey)
+	}
+}
+
+// TestGatewayListenerPortServesAfterHostnameChange changes the hostname of the
+// only listener on a port, which replaces the port's server, and checks that
+// the new server binds the port each time.
+func TestGatewayListenerPortServesAfterHostnameChange(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+
+	configFile := filepath.Join(t.TempDir(), "routerConfiguration.yaml")
+	if err := os.WriteFile(configFile, []byte("scheduler:\n  plugins:\n    Score:\n      enabled:\n        - name: least-request\n          weight: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := datastore.New()
+	r := NewRouter(store, configFile, common.NewTransportRegistry())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lm := NewListenerManager(ctx, r, store, &Server{Port: "8080", drainTimeout: time.Second})
+
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	for i := 0; i < 300; i++ {
+		hostname := gatewayv1.Hostname(fmt.Sprintf("host%d.example.com", i))
+		lm.StartListenersForGateway(&gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "gw"},
+			Spec: gatewayv1.GatewaySpec{
+				Listeners: []gatewayv1.Listener{{Name: "http", Port: gatewayv1.PortNumber(port), Protocol: gatewayv1.HTTPProtocolType, Hostname: &hostname}},
+			},
+		})
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", port))
+			if err == nil {
+				resp.Body.Close()
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("change %d: port %d does not serve after the listener hostname changed: %v", i, port, err)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
