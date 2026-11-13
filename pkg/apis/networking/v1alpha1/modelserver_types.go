@@ -72,7 +72,7 @@ type ModelServerSpec struct {
 
 // InferenceEngine defines the inference framework used by the modelServer to serve LLM requests.
 //
-// +kubebuilder:validation:Enum=vLLM;SGLang
+// +kubebuilder:validation:Enum=vLLM;SGLang;Triton
 type InferenceEngine string
 
 const (
@@ -80,6 +80,10 @@ const (
 	VLLM InferenceEngine = "vLLM"
 	// https://github.com/sgl-project/sglang
 	SGLang InferenceEngine = "SGLang"
+	// https://github.com/triton-inference-server/server
+	// Requires Triton's OpenAI frontend (python/openai) exposing /v1/*; the
+	// router does not use Triton's native /v2 inference API.
+	Triton InferenceEngine = "Triton"
 )
 
 // WorkloadSelector is used to match the model serving instances.
