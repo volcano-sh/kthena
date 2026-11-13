@@ -19,6 +19,7 @@ package scheduler
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -781,5 +782,226 @@ func BenchmarkTopNPodInfos(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// countingPlugin counts Filter/Score invocations to verify how often the PD
+// scheduling loop re-scores the same prefill set.
+type countingPlugin struct {
+	filterCalls atomic.Int64
+	scoreCalls  atomic.Int64
+}
+
+func (c *countingPlugin) Name() string { return "counting" }
+
+func (c *countingPlugin) Filter(ctx *framework.Context, pods []*datastore.PodInfo) []*datastore.PodInfo {
+	c.filterCalls.Add(1)
+	return pods
+}
+
+func (c *countingPlugin) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
+	c.scoreCalls.Add(1)
+	res := make(map[*datastore.PodInfo]int, len(pods))
+	for _, p := range pods {
+		res[p] = 0
+	}
+	return res
+}
+
+// setupPDStore builds a 1P x 5D deployment where every decode shares one PD
+// group, so the PD scheduling loop sees repeated prefill sets.
+func setupPDStore(tb testing.TB) (datastore.Store, types.NamespacedName) {
+	return setupPDStoreWithPrefills(tb, 1)
+}
+
+// setupPDStoreWithPrefills builds an nP x 5D deployment in one PD group.
+func setupPDStoreWithPrefills(tb testing.TB, prefillCount int) (datastore.Store, types.NamespacedName) {
+	store := datastore.New()
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Name: "pd-model", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			WorkloadSelector: &aiv1alpha1.WorkloadSelector{
+				PDGroup: &aiv1alpha1.PDGroup{
+					GroupKey:      "pd-group",
+					DecodeLabels:  map[string]string{"role": "decode"},
+					PrefillLabels: map[string]string{"role": "prefill"},
+				},
+			},
+		},
+	}
+	modelServerName := types.NamespacedName{Namespace: "default", Name: "pd-model"}
+	if err := store.AddOrUpdateModelServer(modelServer, nil); err != nil {
+		tb.Fatal(err)
+	}
+
+	addPod := func(name, role string) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels:    map[string]string{"pd-group": "group-1", "role": role},
+			},
+			Status: corev1.PodStatus{PodIP: fmt.Sprintf("10.0.0.%d", len(name)%250+1)},
+		}
+		if err := store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer}); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	for i := 0; i < prefillCount; i++ {
+		addPod(fmt.Sprintf("prefill-pod-%d", i), "prefill")
+	}
+	for i := 0; i < 5; i++ {
+		addPod(fmt.Sprintf("decode-pod-%d", i), "decode")
+	}
+	return store, modelServerName
+}
+
+// TestPDScheduleRepeatedGroupCallsFilterScoreOnce verifies that decodes in the
+// same PD group share one prefill filter/score pass instead of re-scoring the
+// identical prefill set per decode candidate.
+func TestPDScheduleRepeatedGroupCallsFilterScoreOnce(t *testing.T) {
+	store, modelServerName := setupPDStore(t)
+	scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+	counter := &countingPlugin{}
+	scheduler.filterPlugins = []framework.FilterPlugin{counter}
+	scheduler.scorePlugins = []*scorePlugin{{plugin: counter, weight: 1}}
+
+	ctx := &framework.Context{
+		Prompt:          &common.ChatMessage{},
+		ModelServerName: modelServerName,
+		PDGroup: &aiv1alpha1.PDGroup{
+			GroupKey:      "pd-group",
+			DecodeLabels:  map[string]string{"role": "decode"},
+			PrefillLabels: map[string]string{"role": "prefill"},
+		},
+	}
+	if err := scheduler.Schedule(ctx, nil); err != nil {
+		t.Fatalf("Schedule failed: %v", err)
+	}
+
+	// 4 decode candidates, all in one group: prefill must be filtered/scored once.
+	if got := counter.filterCalls.Load(); got != 2 {
+		t.Fatalf("filter calls = %d, want 2 (decode once + shared prefill once)", got)
+	}
+	if got := counter.scoreCalls.Load(); got != 2 {
+		t.Fatalf("score calls = %d, want 2 (decode once + shared prefill once)", got)
+	}
+	if len(ctx.DecodePods) != 5 || len(ctx.PrefillPods) != 5 {
+		t.Fatalf("pairs = %d/%d, want 5/5", len(ctx.DecodePods), len(ctx.PrefillPods))
+	}
+	for i, prefill := range ctx.PrefillPods {
+		if prefill.GetPodNamespacedName().Name != "prefill-pod-0" {
+			t.Fatalf("pair %d prefill = %v, want prefill-pod-0", i, prefill.GetPodNamespacedName())
+		}
+	}
+}
+
+// BenchmarkSchedulePDSameGroup measures one PD group shared by all topN decodes.
+// prefills=3 also exercises the per-decode rotation.
+func BenchmarkSchedulePDSameGroup(b *testing.B) {
+	for _, prefills := range []int{1, 3} {
+		b.Run(fmt.Sprintf("prefills=%d", prefills), func(b *testing.B) {
+			store, modelServerName := setupPDStoreWithPrefills(b, prefills)
+			scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+			ctx := &framework.Context{
+				Prompt:          &common.ChatMessage{},
+				ModelServerName: modelServerName,
+				PDGroup: &aiv1alpha1.PDGroup{
+					GroupKey:      "pd-group",
+					DecodeLabels:  map[string]string{"role": "decode"},
+					PrefillLabels: map[string]string{"role": "prefill"},
+				},
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := scheduler.Schedule(ctx, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// fixedScorePlugin returns deterministic scores and counts plugin calls.
+type fixedScorePlugin struct {
+	filterCalls atomic.Int64
+	scoreCalls  atomic.Int64
+	scores      map[string]int
+}
+
+func (p *fixedScorePlugin) Name() string { return "fixed-score" }
+
+func (p *fixedScorePlugin) Filter(ctx *framework.Context, pods []*datastore.PodInfo) []*datastore.PodInfo {
+	p.filterCalls.Add(1)
+	return pods
+}
+
+func (p *fixedScorePlugin) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
+	p.scoreCalls.Add(1)
+	res := make(map[*datastore.PodInfo]int, len(pods))
+	for _, pod := range pods {
+		res[pod] = p.scores[pod.GetPodNamespacedName().Name]
+	}
+	return res
+}
+
+// TestPDScheduleRepeatedGroupRotatesPrefills verifies same-group decodes take
+// successive ranked prefills, starting with the best one.
+func TestPDScheduleRepeatedGroupRotatesPrefills(t *testing.T) {
+	store, modelServerName := setupPDStoreWithPrefills(t, 3)
+	scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+	plugin := &fixedScorePlugin{scores: map[string]int{
+		"prefill-pod-0": 100,
+		"prefill-pod-1": 50,
+		"prefill-pod-2": 10,
+	}}
+	scheduler.filterPlugins = []framework.FilterPlugin{plugin}
+	scheduler.scorePlugins = []*scorePlugin{{plugin: plugin, weight: 1}}
+
+	ctx := &framework.Context{
+		Prompt:          &common.ChatMessage{},
+		ModelServerName: modelServerName,
+		PDGroup: &aiv1alpha1.PDGroup{
+			GroupKey:      "pd-group",
+			DecodeLabels:  map[string]string{"role": "decode"},
+			PrefillLabels: map[string]string{"role": "prefill"},
+		},
+	}
+	require.NoError(t, scheduler.Schedule(ctx, nil))
+	require.Len(t, ctx.DecodePods, 5)
+	require.Len(t, ctx.PrefillPods, 5)
+
+	// One decode pass + one shared prefill pass.
+	require.Equal(t, int64(2), plugin.filterCalls.Load())
+	require.Equal(t, int64(2), plugin.scoreCalls.Load())
+
+	// Ranked order is fixed by the scores; decodes rotate through it.
+	want := []string{"prefill-pod-0", "prefill-pod-1", "prefill-pod-2", "prefill-pod-0", "prefill-pod-1"}
+	for i, pod := range ctx.PrefillPods {
+		require.Equal(t, want[i], pod.GetPodNamespacedName().Name, "pair %d prefill", i)
+	}
+}
+
+// TestPDScheduleRepeatedGroupPrefillDiversity runs 3P5D with default plugins
+// many times: no schedule may pin every retry pair to one prefill.
+func TestPDScheduleRepeatedGroupPrefillDiversity(t *testing.T) {
+	store, modelServerName := setupPDStoreWithPrefills(t, 3)
+	scheduler := NewScheduler(store, nil).(*SchedulerImpl)
+	ctx := &framework.Context{
+		Prompt:          &common.ChatMessage{},
+		ModelServerName: modelServerName,
+		PDGroup: &aiv1alpha1.PDGroup{
+			GroupKey:      "pd-group",
+			DecodeLabels:  map[string]string{"role": "decode"},
+			PrefillLabels: map[string]string{"role": "prefill"},
+		},
+	}
+	for i := 0; i < 1000; i++ {
+		require.NoError(t, scheduler.Schedule(ctx, nil))
+		seen := map[string]struct{}{}
+		for _, pod := range ctx.PrefillPods {
+			seen[pod.GetPodNamespacedName().Name] = struct{}{}
+		}
+		require.Greater(t, len(seen), 1, "run %d: every retry pair pinned one prefill", i)
 	}
 }
