@@ -45,7 +45,7 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway(t *testing.T) {
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store, gatewayClient)
 	require.NoError(t, err)
 	stop := make(chan struct{})
 	defer close(stop)
@@ -135,7 +135,7 @@ func TestHTTPRouteController_EnqueueHTTPRoutesForGateway_NoMatchingRoutes(t *tes
 	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
 	store := datastore.New()
 
-	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store, gatewayClient)
 	require.NoError(t, err)
 	stop := make(chan struct{})
 	defer close(stop)
@@ -330,7 +330,7 @@ func TestHTTPRouteController_AllowedRoutesNamespaces(t *testing.T) {
 			_, err := gatewayClient.GatewayV1().HTTPRoutes(tt.routeNS).Create(context.Background(), httpRoute, metav1.CreateOptions{})
 			assert.NoError(t, err)
 
-			ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+			ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store, gatewayClient)
 			require.NoError(t, err)
 			stop := make(chan struct{})
 			defer close(stop)
@@ -402,7 +402,7 @@ func TestHTTPRouteController_MultipleParentRefs_FirstPending(t *testing.T) {
 	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store, gatewayClient)
 	require.NoError(t, err)
 	stop := make(chan struct{})
 	defer close(stop)
@@ -462,7 +462,7 @@ func TestHTTPRouteController_SyncHandler_MovesRouteWithGatewayOnlyInInformer(t *
 	_, err = gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store, gatewayClient)
 	require.NoError(t, err)
 	stop := make(chan struct{})
 	defer close(stop)
@@ -500,7 +500,7 @@ func TestHTTPRouteController_SyncHandler_WaitsForGatewayCreatedLater(t *testing.
 	_, err := gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store, gatewayClient)
 	require.NoError(t, err)
 	stop := make(chan struct{})
 	defer close(stop)

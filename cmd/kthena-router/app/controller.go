@@ -23,6 +23,7 @@ import (
 	"strconv"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -43,6 +44,8 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kube"
 )
+
+const maxConflictRetries = 5
 
 type Controller interface {
 	HasSynced() bool
@@ -121,7 +124,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 			klog.Fatalf("Failed to ensure default Gateway: %s", err.Error())
 		}
 		gatewayInformerFactory = gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
-		gatewayController, err = controller.NewGatewayController(gatewayInformerFactory, store)
+		gatewayController, err = controller.NewGatewayController(gatewayInformerFactory, store, gatewayClient)
 		if err != nil {
 			klog.Fatalf("Error creating gateway controller: %s", err.Error())
 		}
@@ -130,7 +133,7 @@ func startControllers(store datastore.Store, stop <-chan struct{}, enableGateway
 			gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced,
 		)
 		if enableGatewayAPIInferenceExtension {
-			httpRouteController, err = controller.NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store)
+			httpRouteController, err = controller.NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store, gatewayClient)
 			if err != nil {
 				klog.Fatalf("Error creating httproute controller: %s", err.Error())
 			}
@@ -222,14 +225,15 @@ func (c *aggregatedController) HasSynced() bool {
 }
 
 // ensureDefaultGatewayClass creates the default GatewayClass if it doesn't exist
+// and updates its status to Accepted=True.
 func ensureDefaultGatewayClass(gatewayClient gatewayclientset.Interface) error {
 	ctx := context.Background()
 
 	// Check if GatewayClass already exists
-	_, err := gatewayClient.GatewayV1().GatewayClasses().Get(ctx, controller.DefaultGatewayClassName, metav1.GetOptions{})
+	existing, err := gatewayClient.GatewayV1().GatewayClasses().Get(ctx, controller.DefaultGatewayClassName, metav1.GetOptions{})
 	if err == nil {
 		klog.V(2).Infof("Default GatewayClass %s already exists", controller.DefaultGatewayClassName)
-		return nil
+		return updateGatewayClassStatus(gatewayClient, existing)
 	}
 
 	if !apierrors.IsNotFound(err) {
@@ -246,17 +250,92 @@ func ensureDefaultGatewayClass(gatewayClient gatewayclientset.Interface) error {
 		},
 	}
 
-	_, err = gatewayClient.GatewayV1().GatewayClasses().Create(ctx, gatewayClass, metav1.CreateOptions{})
+	created, err := gatewayClient.GatewayV1().GatewayClasses().Create(ctx, gatewayClass, metav1.CreateOptions{})
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			klog.V(2).Infof("GatewayClass %s was created by another process", controller.DefaultGatewayClassName)
-			return nil
+			existing, err := gatewayClient.GatewayV1().GatewayClasses().Get(ctx, controller.DefaultGatewayClassName, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to get GatewayClass %s after create race: %w", controller.DefaultGatewayClassName, err)
+			}
+			return updateGatewayClassStatus(gatewayClient, existing)
 		}
 		return fmt.Errorf("failed to create GatewayClass %s: %w", controller.DefaultGatewayClassName, err)
 	}
 
 	klog.Infof("Created default GatewayClass %s", controller.DefaultGatewayClassName)
-	return nil
+	return updateGatewayClassStatus(gatewayClient, created)
+}
+
+// updateGatewayClassStatus patches the GatewayClass status with Accepted=True condition.
+func updateGatewayClassStatus(gatewayClient gatewayclientset.Interface, gatewayClass *gatewayv1.GatewayClass) error {
+	// Verify controller ownership before writing status. A pre-existing class
+	// named "kthena-router" could specify a different controller; writing our
+	// Accepted=True onto it would override that controller's rejection.
+	if string(gatewayClass.Spec.ControllerName) != controller.ControllerName {
+		return fmt.Errorf("GatewayClass %s is not owned by kthena-router controller (controllerName=%s)",
+			controller.DefaultGatewayClassName, gatewayClass.Spec.ControllerName)
+	}
+
+	// Use a conflict-retrying read-modify-write loop: multiple router replicas
+	// starting concurrently can read the same resourceVersion, and one update
+	// will receive a 409 Conflict. Retrying with the latest version prevents
+	// the Conflict from propagating to klog.Fatalf.
+	return retryOnConflict(func() error {
+		ctx := context.Background()
+
+		current, err := gatewayClient.GatewayV1().GatewayClasses().Get(ctx, controller.DefaultGatewayClassName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get GatewayClass for status update: %w", err)
+		}
+
+		// Re-check ownership after re-reading.
+		if string(current.Spec.ControllerName) != controller.ControllerName {
+			return fmt.Errorf("GatewayClass %s is not owned by kthena-router controller",
+				controller.DefaultGatewayClassName)
+		}
+
+		existingAccepted := apimeta.FindStatusCondition(current.Status.Conditions, string(gatewayv1.GatewayClassConditionStatusAccepted))
+		if existingAccepted != nil && existingAccepted.Status == metav1.ConditionTrue {
+			return nil
+		}
+
+		updated := current.DeepCopy()
+		now := metav1.Now()
+		apimeta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
+			Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: updated.Generation,
+			LastTransitionTime: now,
+			Reason:             string(gatewayv1.GatewayClassReasonAccepted),
+			Message:            "GatewayClass is accepted by kthena-router controller",
+		})
+
+		_, err = gatewayClient.GatewayV1().GatewayClasses().UpdateStatus(ctx, updated, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update GatewayClass %s status: %w", controller.DefaultGatewayClassName, err)
+		}
+
+		klog.Infof("Updated GatewayClass %s status: Accepted=True", controller.DefaultGatewayClassName)
+		return nil
+	})
+}
+
+// retryOnConflict retries the given function on HTTP 409 Conflict errors,
+// up to maxRetries times. This handles concurrent status updates safely.
+func retryOnConflict(fn func() error) error {
+	var lastErr error
+	for i := 0; i < maxConflictRetries; i++ {
+		lastErr = fn()
+		if lastErr == nil {
+			return nil
+		}
+		if !apierrors.IsConflict(lastErr) {
+			return lastErr
+		}
+		klog.V(2).Infof("Conflict during status update, retrying (attempt %d/%d)", i+1, maxConflictRetries)
+	}
+	return lastErr
 }
 
 // ensureDefaultGateway creates the default Gateway if it doesn't exist
