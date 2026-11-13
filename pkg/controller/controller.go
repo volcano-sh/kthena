@@ -24,6 +24,7 @@ import (
 	"time"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	autoscaler "github.com/volcano-sh/kthena/pkg/autoscaler/controller"
 	"github.com/volcano-sh/kthena/pkg/kube"
 	modelbooster "github.com/volcano-sh/kthena/pkg/model-booster-controller/controller"
@@ -83,7 +84,7 @@ func SetupController(ctx context.Context, cc Config) {
 		if enable {
 			switch ctrl {
 			case ModelBoosterController:
-				mc = modelbooster.NewModelBoosterController(kubeClient, client)
+				mc = newModelBoosterController(kubeClient, client)
 			case ModelServingController:
 				msc, err = modelserving.NewModelServingController(kubeClient, client, volcanoClient, apiextClient)
 				if err != nil {
@@ -169,6 +170,22 @@ func SetupController(ctx context.Context, cc Config) {
 		klog.Info("Started controllers without leader election")
 	}
 	<-ctx.Done()
+}
+
+// newModelBoosterController returns nil when the networking CRDs it writes are not installed.
+func newModelBoosterController(kubeClient kubernetes.Interface, client clientset.Interface) *modelbooster.ModelBoosterController {
+	for _, kind := range []string{"ModelServer", "ModelRoute"} {
+		exists, err := modelserving.ResourceExists(kubeClient, networkingv1alpha1.SchemeGroupVersion.String(), kind)
+		if err != nil {
+			klog.Warningf("Failed to check the %s CRD, starting the ModelBooster controller anyway: %v", kind, err)
+			break
+		}
+		if !exists {
+			klog.Infof("%s CRD not found, ModelBooster controller disabled", kind)
+			return nil
+		}
+	}
+	return modelbooster.NewModelBoosterController(kubeClient, client)
 }
 
 // initLeaderElector inits a leader elector for leader election
