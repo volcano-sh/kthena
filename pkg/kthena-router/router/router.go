@@ -653,6 +653,7 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 
 	ctx := &framework.Context{
 		Model:           modelName,
+		IsLora:          isLora,
 		Prompt:          prompt,
 		SessionID:       sessionID,
 		ModelServerName: modelServerName,
