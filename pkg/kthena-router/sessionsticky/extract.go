@@ -43,7 +43,7 @@ func ExtractSessionKey(c *gin.Context, spec *networkingv1alpha1.SessionSticky) s
 // LookupBinding extracts the session key and returns a mapped Pod binding when present.
 // owner is the ModelServer identity used to scope the store key.
 func LookupBinding(c *gin.Context, owner types.NamespacedName, spec *networkingv1alpha1.SessionSticky, store Store) (sessionKey, storeKey string, binding Binding, ok bool) {
-	if spec == nil || store == nil || c == nil {
+	if spec == nil || store == nil || c == nil || c.Request == nil {
 		return "", "", Binding{}, false
 	}
 	sessionKey = ExtractSessionKey(c, spec)
