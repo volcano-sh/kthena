@@ -1286,7 +1286,16 @@ func proxyRequest(
 		path = "/v1/responses"
 	}
 	parser := providers.DefaultAdapter().ResponseParser(c, path)
-	return forwardResponseWithUsageParser(c, resp, stream, parser, onUsage)
+
+	// The caller may retry another backend while nothing has been written
+	// downstream. Snapshot what earlier handlers staged so headers copied from a
+	// backend that fails before sending its body cannot leak into the retry.
+	staged := stageResponse(c)
+	forwardErr := forwardResponseWithUsageParser(c, resp, stream, parser, onUsage)
+	if forwardErr != nil {
+		staged.restore(c)
+	}
+	return forwardErr
 }
 
 // originalRequestPath returns the client-facing request path used for wire
@@ -1391,6 +1400,54 @@ func copyResponseHeaders(c *gin.Context, headers http.Header, stream bool) {
 		for _, value := range values {
 			c.Writer.Header().Add(key, value)
 		}
+	}
+}
+
+// cloneResponseHeaders returns a copy of headers so the values stay unchanged
+// after c.Writer.Header() is modified.
+func cloneResponseHeaders(headers http.Header) http.Header {
+	clone := make(http.Header, len(headers))
+	for key, values := range headers {
+		clone[key] = append([]string(nil), values...)
+	}
+	return clone
+}
+
+// stagedResponse is the downstream status and headers captured before an
+// upstream attempt starts writing. A retry uses it to drop the entries the
+// failed attempt staged.
+type stagedResponse struct {
+	headers http.Header
+	status  int
+}
+
+// stageResponse captures the current downstream status and headers.
+func stageResponse(c *gin.Context) stagedResponse {
+	return stagedResponse{
+		headers: cloneResponseHeaders(c.Writer.Header()),
+		status:  c.Writer.Status(),
+	}
+}
+
+// restore puts the downstream status and headers back to the staged state. It
+// does nothing once a byte has been written, because the response is already
+// committed to the client and a retry cannot follow.
+func (s stagedResponse) restore(c *gin.Context) {
+	if c.Writer.Written() {
+		return
+	}
+	restoreResponseHeaders(c.Writer.Header(), s.headers)
+	c.Status(s.status)
+}
+
+// restoreResponseHeaders replaces the staged downstream headers with a copy of
+// headers, dropping the entries a failed upstream attempt added.
+func restoreResponseHeaders(dst http.Header, headers http.Header) {
+	for key := range dst {
+		delete(dst, key)
+	}
+	for key, values := range headers {
+		dst[key] = append([]string(nil), values...)
 	}
 }
 
@@ -1569,13 +1626,19 @@ func (r *Router) proxyToPDDisaggregated(
 			DecrDecode:  func() { r.store.DecrPodOnFlightRequests(decodePodName) },
 		}
 
-		// Execute the PD disaggregated proxy operation
+		// Execute the PD disaggregated proxy operation. The connector stages the
+		// decode response's status and headers before forwarding the body, so a
+		// failure before the first byte leaves them behind. Snapshot the writer
+		// first and roll back on a failed attempt, the same way the aggregated
+		// retry loop does, so the next pair starts clean.
+		staged := stageResponse(c)
 		outputTokens, err := kvConnector.Proxy(c, modelRequest, prefillAddr, decodeAddr, timeout, hooks)
 		if c.Writer.Written() {
 			accesslog.SetUpstreamInfo(c, c.Writer.Status(), 0)
 		}
 
 		if err != nil {
+			staged.restore(c)
 			klog.Errorf("proxy failed for prefill pod %s, decode pod %s: %v",
 				prefillPod.Name, decodePod.Name, err)
 			if c.Writer.Written() {
