@@ -273,6 +273,13 @@ func (c *ModelServerController) syncPodHandler(key string) error {
 		return err
 	}
 
+	// Terminating Pods stay tracked (in-flight metrics keep being scraped) and
+	// are excluded from candidates by the store queries; the store is cleared
+	// by the object-delete event above.
+	if pod.DeletionTimestamp != nil {
+		return c.addOrUpdatePod(pod)
+	}
+
 	if !isPodReady(pod) {
 		_ = c.store.DeletePod(types.NamespacedName{Namespace: namespace, Name: name})
 		return nil
