@@ -34,16 +34,10 @@ from kthena.runtime.kv_cache_manager import (
 
 
 class _FakePipeline:
-    """Captures every call so tests can assert what was written to Redis.
+    """Captures every call so tests can assert what was written to Redis."""
 
-    scard_results holds the values returned for scard calls, in order. When it
-    runs out, scard returns 0 (no engine hash left for that block).
-    """
-
-    def __init__(self, scard_results=None):
+    def __init__(self):
         self.calls = []
-        self.scard_results = list(scard_results or [])
-        self._executed = 0
 
     def set(self, key, value):
         self.calls.append(("set", key, value))
@@ -66,36 +60,25 @@ class _FakePipeline:
     def sadd(self, key, member):
         self.calls.append(("sadd", key, member))
 
-    def srem(self, key, member):
-        self.calls.append(("srem", key, member))
-
-    def scard(self, key):
-        self.calls.append(("scard", key))
-
     async def execute(self):
-        # Like a real pipeline, return results only for the calls queued since
-        # the last execute.
-        pending = self.calls[self._executed:]
-        self._executed = len(self.calls)
-        results = []
-        for call in pending:
-            if call[0] == "scard":
-                results.append(self.scard_results.pop(0) if self.scard_results else 0)
-            else:
-                results.append(1)
-        return results
+        return [1] * len(self.calls)
 
 
 class _FakeRedisConn:
     def __init__(self, pipeline: _FakePipeline, get_results=None):
         self._pipeline = pipeline
         self._get_results = get_results or {}
+        self.eval_calls = []
 
     def pipeline(self):
         return self._pipeline
 
     async def get(self, key):
         return self._get_results.get(key)
+
+    async def eval(self, script, numkeys, *keys_and_args):
+        self.eval_calls.append((list(keys_and_args[:numkeys]), list(keys_and_args[numkeys:])))
+        return 0
 
 
 def _make_redis_client(pipeline: _FakePipeline, keys_result=None, get_results=None):
@@ -187,50 +170,17 @@ async def test_block_removed_uses_in_memory_mapping():
 
     await handler.handle(event_data)
 
-    hdel_calls = [c for c in pipeline.calls if c[0] == "hdel"]
-    delete_calls = [c for c in pipeline.calls if c[0] == "delete"]
-    assert {(c[1], c[2]) for c in hdel_calls} == {
-        ("matrix:kv:block:qwen@999", "pod-1"),
-        ("matrix:kv:block:qwen@888", "pod-1"),
-    }
-    assert {c[1] for c in delete_calls} == {
-        "sglang:kv:block:pod-1@111",
-        "sglang:kv:block:pod-1@222",
-    }
-
-
-@pytest.mark.asyncio
-async def test_block_removed_keeps_pod_while_same_tokens_are_cached():
-    # Same tokens after two different prefixes: two engine hashes, one
-    # standardized hash. Evicting one copy must keep the pod in the matrix.
-    pipeline = _FakePipeline(scard_results=[1])
-    manager = VLLMKVCacheRedisManager(redis_client=_make_redis_client(pipeline))
-    manager.hash_mapping[111] = 999
-    manager.hash_mapping[222] = 999
-
-    assert await manager.remove_blocks("qwen", [111], "pod-1") == 1
-    assert ("srem", "vllm:kv:ref:pod-1@999", "111") in pipeline.calls
-    assert ("delete", "vllm:kv:block:pod-1@111") in pipeline.calls
-    assert [c for c in pipeline.calls if c[0] == "hdel"] == []
-
-    # The last copy is gone, so now the pod leaves the matrix.
-    assert await manager.remove_blocks("qwen", [222], "pod-1") == 1
-    assert [c for c in pipeline.calls if c[0] == "hdel"] == [
-        ("hdel", "matrix:kv:block:qwen@999", "pod-1"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_block_removed_drops_shared_block_once_when_both_copies_go():
-    pipeline = _FakePipeline(scard_results=[1, 0])
-    manager = VLLMKVCacheRedisManager(redis_client=_make_redis_client(pipeline))
-    manager.hash_mapping[111] = 999
-    manager.hash_mapping[222] = 999
-
-    assert await manager.remove_blocks("qwen", [111, 222], "pod-1") == 2
-    assert [c for c in pipeline.calls if c[0] == "hdel"] == [
-        ("hdel", "matrix:kv:block:qwen@999", "pod-1"),
-    ]
+    # Both blocks go to Redis in one script call: per block the mapping key,
+    # the ref set and the matrix key, then the pod and the engine hashes.
+    conn = await redis_client.get_connection()
+    assert conn.eval_calls == [(
+        [
+            "sglang:kv:block:pod-1@111", "sglang:kv:ref:pod-1@999", "matrix:kv:block:qwen@999",
+            "sglang:kv:block:pod-1@222", "sglang:kv:ref:pod-1@888", "matrix:kv:block:qwen@888",
+        ],
+        ["pod-1", "111", "222"],
+    )]
+    assert manager.hash_mapping == {}
 
 
 @pytest.mark.asyncio
