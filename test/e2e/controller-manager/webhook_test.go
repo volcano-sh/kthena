@@ -160,6 +160,24 @@ func TestWebhook(t *testing.T) {
 			errorMsg:    "plugin modelexpress is managed by spec.bootstrapAccelerateStrategy",
 		},
 		{
+			name:        "Invalid ModelServing (bootstrapAccelerateStrategy missing engine container)",
+			resource:    createInvalidBootstrapModelServingMissingEngineContainer(),
+			expectError: true,
+			errorMsg:    "must contain one of the ModelExpress engine containers",
+		},
+		{
+			name:        "Invalid ModelServing (bootstrapAccelerateStrategy non-positive initialSeedReplicas)",
+			resource:    createInvalidBootstrapModelServingInvalidSeed(),
+			expectError: true,
+			errorMsg:    "must be a positive integer",
+		},
+		{
+			name:        "Invalid ModelServing (bootstrapAccelerateStrategy invalid readyURL)",
+			resource:    createInvalidBootstrapModelServingInvalidReadyURL(),
+			expectError: true,
+			errorMsg:    "must be an absolute http or https URL",
+		},
+		{
 			name:        "Valid ModelServing with BootstrapAccelerateStrategy (DryRun)",
 			resource:    createValidBootstrapModelServingForWebhookTest(),
 			expectError: false,
