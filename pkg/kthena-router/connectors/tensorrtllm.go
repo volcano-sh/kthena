@@ -105,9 +105,12 @@ func (t *TensorRTLLMConnector) Proxy(c *gin.Context, reqBody map[string]interfac
 		return 0, err
 	}
 
-	// Official disagg server returns the context response immediately when
-	// generation is not needed (finish_reason other than length / not_finished).
+	// Official disagg server skips generation when finish_reason is terminal
+	// (not length / not_finished): JSON body for non-stream, SSE DONE for stream.
 	if !needsGeneration(ctxResult.finishReason) {
+		if stream, _ := reqBody["stream"].(bool); stream {
+			return writeSSEDone(c)
+		}
 		return writeJSONResponse(c, ctxResult.cleanedResponse)
 	}
 
@@ -262,6 +265,17 @@ func writeJSONResponse(c *gin.Context, payload map[string]interface{}) (int, err
 	}
 	// Approximate output tokens for metrics as 1 (context-only produced one token).
 	return 1, nil
+}
+
+// writeSSEDone matches openai_disagg_server early-return for stream=true:
+// only `data: [DONE]` (no chat.completion JSON body).
+func writeSSEDone(c *gin.Context) (int, error) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Status(http.StatusOK)
+	if _, err := io.WriteString(c.Writer, "data: [DONE]\n\n"); err != nil {
+		return 0, err
+	}
+	return 0, nil
 }
 
 func (t *TensorRTLLMConnector) decode(c *gin.Context, req *http.Request, decodeAddr string, timeout time.Duration, rt http.RoundTripper) (int, error) {

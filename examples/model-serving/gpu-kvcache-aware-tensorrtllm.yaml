@@ -1,3 +1,6 @@
+# TensorRT-LLM 1.0.0 has no /v1/*/render tokenize routes. Pair this example with
+# router kvcache-aware using tokenizerService + blockSizeToHash: 32
+# (see docs/kthena/docs/user-guide/kvcache-aware.md).
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:

@@ -191,52 +191,90 @@ func TestTensorRTLLMConnectorProxyCompletionsPromptRewrite(t *testing.T) {
 func TestTensorRTLLMConnectorEarlyReturnOnStop(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	var decodeHits atomic.Int32
-	prefillSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "cmpl-early",
-			"choices": []interface{}{
-				map[string]interface{}{
-					"index":         0,
-					"text":          "done",
-					"finish_reason": "stop",
-					"disaggregated_params": map[string]interface{}{
-						"request_type":   "context_only",
-						"ctx_request_id": 1,
+	newPrefill := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "cmpl-early",
+				"choices": []interface{}{
+					map[string]interface{}{
+						"index":         0,
+						"text":          "done",
+						"finish_reason": "stop",
+						"disaggregated_params": map[string]interface{}{
+							"request_type":   "context_only",
+							"ctx_request_id": 1,
+						},
 					},
 				},
-			},
-		})
-	}))
-	defer prefillSrv.Close()
+			})
+		}))
+	}
 
-	decodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		decodeHits.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer decodeSrv.Close()
+	t.Run("non-stream", func(t *testing.T) {
+		var decodeHits atomic.Int32
+		prefillSrv := newPrefill()
+		defer prefillSrv.Close()
+		decodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			decodeHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer decodeSrv.Close()
 
-	req, _ := http.NewRequest("POST", "/v1/completions", nil)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = req
+		req, _ := http.NewRequest("POST", "/v1/completions", nil)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = req
 
-	if _, err := NewTensorRTLLMConnector().Proxy(c, map[string]interface{}{"model": "m", "prompt": "x", "max_tokens": 4},
-		prefillSrv.Listener.Addr().String(), decodeSrv.Listener.Addr().String(), 0, nil); err != nil {
-		t.Fatalf("Proxy failed: %v", err)
-	}
-	if decodeHits.Load() != 0 {
-		t.Fatalf("decode should be skipped on early stop, hits=%d", decodeHits.Load())
-	}
-	var out map[string]interface{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("parse response: %v", err)
-	}
-	choices := out["choices"].([]interface{})
-	choice := choices[0].(map[string]interface{})
-	if _, ok := choice["disaggregated_params"]; ok {
-		t.Error("early-return response must strip disaggregated_params")
-	}
+		if _, err := NewTensorRTLLMConnector().Proxy(c, map[string]interface{}{"model": "m", "prompt": "x", "max_tokens": 4},
+			prefillSrv.Listener.Addr().String(), decodeSrv.Listener.Addr().String(), 0, nil); err != nil {
+			t.Fatalf("Proxy failed: %v", err)
+		}
+		if decodeHits.Load() != 0 {
+			t.Fatalf("decode should be skipped on early stop, hits=%d", decodeHits.Load())
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+			t.Fatalf("Content-Type=%q, want application/json", ct)
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("parse response: %v", err)
+		}
+		choice := out["choices"].([]interface{})[0].(map[string]interface{})
+		if _, ok := choice["disaggregated_params"]; ok {
+			t.Error("early-return response must strip disaggregated_params")
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		var decodeHits atomic.Int32
+		prefillSrv := newPrefill()
+		defer prefillSrv.Close()
+		decodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			decodeHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer decodeSrv.Close()
+
+		req, _ := http.NewRequest("POST", "/v1/completions", nil)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = req
+
+		if _, err := NewTensorRTLLMConnector().Proxy(c, map[string]interface{}{
+			"model": "m", "prompt": "x", "max_tokens": 4, "stream": true,
+		}, prefillSrv.Listener.Addr().String(), decodeSrv.Listener.Addr().String(), 0, nil); err != nil {
+			t.Fatalf("Proxy failed: %v", err)
+		}
+		if decodeHits.Load() != 0 {
+			t.Fatalf("decode should be skipped on early stop, hits=%d", decodeHits.Load())
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+			t.Fatalf("Content-Type=%q, want text/event-stream", ct)
+		}
+		if got := rec.Body.String(); got != "data: [DONE]\n\n" {
+			t.Fatalf("body=%q, want SSE DONE only", got)
+		}
+	})
 }
 
 func TestNeedsGeneration(t *testing.T) {
