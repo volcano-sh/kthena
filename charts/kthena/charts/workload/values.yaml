@@ -46,6 +46,10 @@ controllerManager:
   # Smaller values react faster to traffic spikes but increase API server load.
   # If 0 or not specified, uses the binary default (15).
   autoscalingSyncPeriodSeconds: 0
+  # modelExpressServerAddress is the host:port of the ModelExpress server. It is injected
+  # as MX_SERVER_ADDRESS into the engine containers of ModelServings that enable
+  # spec.bootstrapAccelerateStrategy. If empty, the variable is not injected.
+  modelExpressServerAddress: ""
   # downloaderImage is the container image used for downloading models.
   downloaderImage:
     repository: ghcr.io/volcano-sh/downloader

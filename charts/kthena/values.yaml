@@ -16,6 +16,9 @@ workload:
     # -- Reconcile interval in seconds for the autoscaler. Smaller values react
     # faster to traffic spikes but increase API server load. 0 uses the binary default (15).
     autoscalingSyncPeriodSeconds: 0
+    # -- host:port of the ModelExpress server injected as MX_SERVER_ADDRESS into
+    # engine containers of ModelServings using spec.bootstrapAccelerateStrategy. Empty leaves it unset.
+    modelExpressServerAddress: ""
     downloaderImage:
       # -- Image repository for the Downloader.
       repository: ghcr.io/volcano-sh/downloader
