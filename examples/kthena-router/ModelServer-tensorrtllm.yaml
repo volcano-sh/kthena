@@ -1,0 +1,16 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: trtllm-tinyllama
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      modelserving.volcano.sh/name: trtllm-tinyllama
+  workloadPort:
+    port: 8000
+  # trtllm-serve uses the local directory basename as the OpenAI model id.
+  model: "TinyLlama-1.1B-Chat-v1.0"
+  inferenceEngine: "TensorRTLLM"
+  trafficPolicy:
+    timeout: 120s

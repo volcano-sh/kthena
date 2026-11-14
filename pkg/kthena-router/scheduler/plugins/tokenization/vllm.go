@@ -35,7 +35,7 @@ func newVLLMAdapter(model string) *vllmAdapter {
 	}
 }
 
-func (va *vllmAdapter) GetTokenizePath() string {
+func (va *vllmAdapter) GetTokenizePath(_ TokenizeInputType) string {
 	return vllmTokenizePath
 }
 

@@ -31,7 +31,7 @@ func newSGLangAdapter(model string) *sglangAdapter {
 	return &sglangAdapter{model: model}
 }
 
-func (sa *sglangAdapter) GetTokenizePath() string {
+func (sa *sglangAdapter) GetTokenizePath(_ TokenizeInputType) string {
 	return sglangTokenizePath
 }
 

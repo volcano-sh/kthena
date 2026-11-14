@@ -1,0 +1,200 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: trtllm-tinyllama-pd
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  recoveryPolicy: ServingGroupRecreate
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          spec:
+            initContainers:
+              - name: downloader
+                imagePullPolicy: IfNotPresent
+                image: ghcr.io/volcano-sh/downloader:latest
+                args:
+                  - --source
+                  - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+                  - --output-dir
+                  - /models/TinyLlama-1.1B-Chat-v1.0/
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+            containers:
+              - name: prefill
+                # Official NGC TensorRT-LLM release image (NIXL KV transceiver).
+                image: nvcr.io/nvidia/tensorrt-llm/release:1.0.0
+                command: ["sh", "-c"]
+                args:
+                  - |
+                    # --extra_llm_api_options points at this file:
+                    #
+                    #   disable_overlap_scheduler: true
+                    #   enable_iter_perf_stats: true
+                    #   cache_transceiver_config:
+                    #     backend: NIXL
+                    #
+                    cat >/tmp/extra_llm_api_options.yaml <<'EOF'
+                    disable_overlap_scheduler: true
+                    enable_iter_perf_stats: true
+                    cache_transceiver_config:
+                      backend: NIXL
+                    EOF
+                    trtllm-serve serve /models/TinyLlama-1.1B-Chat-v1.0 \
+                      --host 0.0.0.0 \
+                      --port 8000 \
+                      --backend pytorch \
+                      --extra_llm_api_options /tmp/extra_llm_api_options.yaml
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+                    readOnly: true
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                securityContext:
+                  capabilities:
+                    add:
+                      - IPC_LOCK
+                readinessProbe:
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                  timeoutSeconds: 10
+                  failureThreshold: 60
+                  httpGet:
+                    path: /health
+                    port: 8000
+                livenessProbe:
+                  initialDelaySeconds: 900
+                  periodSeconds: 10
+                  timeoutSeconds: 10
+                  failureThreshold: 10
+                  httpGet:
+                    path: /health
+                    port: 8000
+            volumes:
+              - name: models
+                emptyDir: {}
+              - name: shared-mem
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 8Gi
+        workerReplicas: 0
+      - name: decode
+        replicas: 1
+        entryTemplate:
+          spec:
+            initContainers:
+              - name: downloader
+                imagePullPolicy: IfNotPresent
+                image: ghcr.io/volcano-sh/downloader:latest
+                args:
+                  - --source
+                  - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+                  - --output-dir
+                  - /models/TinyLlama-1.1B-Chat-v1.0/
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+            containers:
+              - name: decode
+                image: nvcr.io/nvidia/tensorrt-llm/release:1.0.0
+                command: ["sh", "-c"]
+                args:
+                  - |
+                    # --extra_llm_api_options points at this file:
+                    #
+                    #   enable_iter_perf_stats: true
+                    #   cache_transceiver_config:
+                    #     backend: NIXL
+                    #
+                    cat >/tmp/extra_llm_api_options.yaml <<'EOF'
+                    enable_iter_perf_stats: true
+                    cache_transceiver_config:
+                      backend: NIXL
+                    EOF
+                    trtllm-serve serve /models/TinyLlama-1.1B-Chat-v1.0 \
+                      --host 0.0.0.0 \
+                      --port 8000 \
+                      --backend pytorch \
+                      --extra_llm_api_options /tmp/extra_llm_api_options.yaml
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+                    readOnly: true
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                securityContext:
+                  capabilities:
+                    add:
+                      - IPC_LOCK
+                readinessProbe:
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                  timeoutSeconds: 10
+                  failureThreshold: 60
+                  httpGet:
+                    path: /health
+                    port: 8000
+                livenessProbe:
+                  initialDelaySeconds: 900
+                  periodSeconds: 10
+                  timeoutSeconds: 10
+                  failureThreshold: 10
+                  httpGet:
+                    path: /health
+                    port: 8000
+            volumes:
+              - name: models
+                emptyDir: {}
+              - name: shared-mem
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 8Gi
+        workerReplicas: 0
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: trtllm-tinyllama-pd
+  namespace: default
+spec:
+  # TensorRTLLM engine auto-selects the native NIXL PD connector
+  workloadSelector:
+    matchLabels:
+      modelserving.volcano.sh/name: trtllm-tinyllama-pd
+    pdGroup:
+      groupKey: "modelserving.volcano.sh/group-name"
+      prefillLabels:
+        modelserving.volcano.sh/role: prefill
+      decodeLabels:
+        modelserving.volcano.sh/role: decode
+  workloadPort:
+    port: 8000
+  model: "TinyLlama-1.1B-Chat-v1.0"
+  inferenceEngine: "TensorRTLLM"
+  trafficPolicy:
+    timeout: 120s
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: trtllm-tinyllama-pd
+  namespace: default
+spec:
+  modelName: "TinyLlama-1.1B-Chat-v1.0"
+  rules:
+    - name: default
+      targetModels:
+        - modelServerName: trtllm-tinyllama-pd

@@ -51,9 +51,20 @@ Stale entries are garbage-collected in the router after 24 hours, and ownership 
 ## Prerequisites
 
 - **Redis** (Redis backend only): A Redis instance accessible by both the router and the runtime sidecars. Deploy Redis using the provided [redis-standalone.yaml](../assets/examples/redis/redis-standalone.yaml) example. Memory mode does not need Redis.
-- **Kthena Runtime sidecar**: Must be deployed alongside each vLLM pod. The sidecar listens to vLLM's ZMQ `kv-events` stream and either writes token block hashes into Redis or streams them to registered routers.
-- **vLLM v1 with KV event support**: The vLLM engine must be running with `VLLM_USE_V1=1` and expose the ZMQ kv-events topic.
+- **Kthena Runtime sidecar**: Must be deployed alongside each engine pod. For vLLM/SGLang the sidecar listens to the ZMQ `kv-events` stream; for TensorRT-LLM (`--engine tensorrtllm`) it polls `POST /kv_cache_events` and reuses the same vLLM-compatible Redis / memory index path. See [`examples/model-serving/gpu-kvcache-aware-tensorrtllm.yaml`](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/gpu-kvcache-aware-tensorrtllm.yaml).
+- **Engine KV events**: vLLM v1 with `VLLM_USE_V1=1` and ZMQ kv-events; or TensorRT-LLM with `kv_cache_config.enable_block_reuse=true` and `event_buffer_max_size>0`.
 - **Multi-pod inference deployment**: The plugin is meaningful only when multiple pods serve the same model.
+- **Tokenizer**: TensorRT-LLM **1.0.0** (the example image) has no `/v1/*/render` routes, so enable [`tokenizerService`](./tokenizer-service.md) or every tokenize call 404s. Engine-side `/render` needs a newer TensorRT-LLM build with `TRTLLM_ENABLE_RENDER_ENDPOINTS=1`. Set `blockSizeToHash` to the engine tokens-per-block (commonly **32** for TinyLlama). Router snippet for [`gpu-kvcache-aware-tensorrtllm.yaml`](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/gpu-kvcache-aware-tensorrtllm.yaml):
+
+  ```yaml
+  pluginConfig:
+    - name: kvcache-aware
+      args:
+        blockSizeToHash: 32
+        tokenizerService:
+          enabled: true
+          endpoint: http://tokenizer-service.kthena-system.svc.cluster.local:8080
+  ```
 
 ## Architecture
 
@@ -475,8 +486,8 @@ kubectl logs <vllm-pod> -c runtime -n <namespace> | grep -iE "redis|zmq|kv"
 
 Expected messages:
 - `Redis client initialized successfully`
-- `vLLM ZMQ subscriber initialized successfully` (or `SGLang ZMQ subscriber initialized successfully`)
-- `vLLM KV-cache event handler registered` (or `SGLang KV-cache event handler registered`)
+- `vLLM ZMQ subscriber initialized successfully` (or `SGLang ZMQ subscriber initialized successfully`, or `TensorRT-LLM KV event poller initialized successfully`)
+- `vLLM KV-cache event handler registered` (or `SGLang KV-cache event handler registered`, or `TensorRT-LLM KV-cache event handler registered (vLLM-compatible)`)
 
 ### 3. Inspect Redis Keys
 
