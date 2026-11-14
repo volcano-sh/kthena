@@ -108,6 +108,7 @@ class VLLMZMQSubscriber:
         self.map_decoder = Decoder(type=MapKVEventBatch)
         self._connection_lock = asyncio.Lock()
         self._shutdown_event = asyncio.Event()
+        self._last_seq: Optional[int] = None
 
     async def start(self) -> None:
         async with self._connection_lock:
@@ -178,6 +179,8 @@ class VLLMZMQSubscriber:
             logger.info(f"Connected to ZMQ endpoint: {self.config.zmq_endpoint}")
 
             expected_topic = self.config.zmq_topic_filter
+            # Batches sent while we were not connected are unknown.
+            self._last_seq = None
 
             while self.running:
                 try:
@@ -190,6 +193,7 @@ class VLLMZMQSubscriber:
                     if expected_topic and topic != expected_topic:
                         continue
 
+                    await self._track_sequence(parts[1])
                     await self._process_message(payload, self.config.pod_identifier, self.config.model_name)
 
                 except zmq.Again:
@@ -223,6 +227,29 @@ class VLLMZMQSubscriber:
         except (UnicodeDecodeError, IndexError, AttributeError) as e:
             logger.warning(f"Error extracting message data: {e}")
             return None, None
+
+    async def _track_sequence(self, seq_frame: bytes) -> None:
+        """Publish VLLM_STREAM_STARTED when the batch sequence does not continue.
+
+        vLLM numbers its batches from 0 in every engine process. The first batch
+        we see, a number that goes back (engine restart) and a gap (lost batches)
+        all mean removal events may be missing for blocks stored before.
+        """
+        if not isinstance(seq_frame, bytes) or len(seq_frame) != 8:
+            return
+
+        seq = int.from_bytes(seq_frame, byteorder='big')
+        last_seq, self._last_seq = self._last_seq, seq
+        if last_seq is not None and seq == last_seq + 1:
+            return
+
+        logger.info(f"vLLM KV event stream started at seq {seq} (last seen {last_seq})")
+        await self.event_publisher.publish(VLLMEventData(
+            event_type=EventType.VLLM_STREAM_STARTED,
+            timestamp=datetime.now(),
+            model_name=self.config.model_name,
+            pod_identifier=self.config.pod_identifier,
+        ))
 
     async def _process_message(self, payload: bytes, pod_identifier: str, model_name: str) -> None:
         if not payload:

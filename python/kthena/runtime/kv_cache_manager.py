@@ -43,6 +43,25 @@ def get_sglang_mapping_key_prefix() -> str:
 # pkg/kthena-router/scheduler/plugins/kvcache_aware.go; change both together.
 MAPPING_KEY_TTL_SECONDS = 86400
 
+# Removes evicted blocks in one atomic step, so a failure cannot leave the pod
+# in the matrix after its mapping is gone. Each block passes three KEYS: its
+# mapping key, its ref set and its matrix key. ARGV[1] is the pod and ARGV[i + 1]
+# the engine hash of block i. Blocks stored before the ref sets existed have no
+# set, so SCARD is 0 and the pod is dropped as before.
+REMOVE_BLOCKS_SCRIPT = """
+local dropped = 0
+for i = 1, #KEYS / 3 do
+    local ref_key = KEYS[3 * i - 1]
+    redis.call('DEL', KEYS[3 * i - 2])
+    redis.call('SREM', ref_key, ARGV[i + 1])
+    if redis.call('SCARD', ref_key) == 0 then
+        redis.call('HDEL', KEYS[3 * i], ARGV[1])
+        dropped = dropped + 1
+    end
+end
+return dropped
+"""
+
 
 def compute_standardized_hash(token_ids: List[int]) -> int:
     if not token_ids:
@@ -85,6 +104,12 @@ def standardize_block_hashes(engine_hashes: List[int],
 class VLLMKVCacheRedisManager:
 
     MAPPING_KEY_PREFIX: str = "vllm:kv:block"
+    # Set of the engine hashes a pod currently holds for one standardized hash.
+    # Blocks with the same tokens after a different prefix (or with another LoRA
+    # adapter or cache salt) have different engine hashes but the same
+    # standardized hash, so the pod may only leave the matrix with the last one.
+    # The sets are reset when a new engine event stream starts (reset_block_refs).
+    REF_KEY_PREFIX: str = "vllm:kv:ref"
 
     def __init__(self, redis_client: Optional[RedisClient] = None):
         self.redis_client = redis_client or get_redis_client()
@@ -97,6 +122,10 @@ class VLLMKVCacheRedisManager:
     @classmethod
     def _get_hash_mapping_key(cls, engine_hash: int, pod_identifier: str) -> str:
         return f"{cls.MAPPING_KEY_PREFIX}:{pod_identifier}@{engine_hash}"
+
+    @classmethod
+    def _get_ref_key(cls, std_hash: int, pod_identifier: str) -> str:
+        return f"{cls.REF_KEY_PREFIX}:{pod_identifier}@{std_hash}"
 
     async def add_blocks(self, model_name: str, block_hashes: List[int],
                          pod_identifier: str, token_ids: Optional[List[int]] = None) -> bool:
@@ -142,6 +171,9 @@ class VLLMKVCacheRedisManager:
             pipe.set(mapping_key, str(std_hash))
             pipe.expire(mapping_key, MAPPING_KEY_TTL_SECONDS)
             pipe.hset(matrix_block_key, pod_identifier, timestamp)
+            ref_key = self._get_ref_key(std_hash, pod_identifier)
+            pipe.sadd(ref_key, str(engine_hash))
+            pipe.expire(ref_key, MAPPING_KEY_TTL_SECONDS)
         return True
 
     async def remove_blocks(self, model_name: str, block_hashes: List[int],
@@ -154,26 +186,29 @@ class VLLMKVCacheRedisManager:
 
         try:
             client = await self.redis_client.get_connection()
-            pipe = client.pipeline()
 
-            removed_count = 0
+            keys = []
+            args = [pod_identifier]
+            removed = []
 
             for engine_hash in block_hashes:
                 std_hash = await self._get_std_hash(client, engine_hash, pod_identifier)
 
                 if std_hash is not None:
-                    matrix_block_key = self._get_matrix_block_key(model_name, std_hash)
-                    mapping_key = self._get_hash_mapping_key(engine_hash, pod_identifier)
+                    keys.append(self._get_hash_mapping_key(engine_hash, pod_identifier))
+                    keys.append(self._get_ref_key(std_hash, pod_identifier))
+                    keys.append(self._get_matrix_block_key(model_name, std_hash))
+                    args.append(str(engine_hash))
+                    removed.append(engine_hash)
 
-                    pipe.hdel(matrix_block_key, pod_identifier)
-                    pipe.delete(mapping_key)
-
+            if removed:
+                await client.eval(REMOVE_BLOCKS_SCRIPT, len(keys), *keys, *args)
+                # Forget the local mapping only once Redis applied the removal.
+                for engine_hash in removed:
                     self.hash_mapping.pop(engine_hash, None)
-                    removed_count += 1
 
-            await pipe.execute()
-            logger.info(f"Removed {removed_count} blocks for model {model_name}, pod {pod_identifier}")
-            return removed_count
+            logger.info(f"Removed {len(removed)} blocks for model {model_name}, pod {pod_identifier}")
+            return len(removed)
 
         except Exception as e:
             logger.error(f"Error removing blocks from Redis: {e}")
@@ -237,16 +272,18 @@ class VLLMKVCacheRedisManager:
             pod_field = pod_identifier
             matrix_pattern = f"{get_matrix_key_prefix()}:{model_name}@*"
             mapping_pattern = f"{self.MAPPING_KEY_PREFIX}:{pod_identifier}@*"
+            ref_pattern = f"{self.REF_KEY_PREFIX}:{pod_identifier}@*"
 
             matrix_keys = await self.redis_client.scan_keys(matrix_pattern)
             mapping_keys = await self.redis_client.scan_keys(mapping_pattern)
+            ref_keys = await self.redis_client.scan_keys(ref_pattern)
 
             if not matrix_keys:
-                if mapping_keys:
+                if mapping_keys or ref_keys:
                     client = await self.redis_client.get_connection()
                     pipe = client.pipeline()
-                    for mapping_key in mapping_keys:
-                        pipe.delete(mapping_key)
+                    for key in mapping_keys + ref_keys:
+                        pipe.delete(key)
                     await pipe.execute()
                     logger.info(f"Cleared {len(mapping_keys)} mapping keys for pod {pod_identifier}")
                 return 0
@@ -257,8 +294,8 @@ class VLLMKVCacheRedisManager:
             for key in matrix_keys:
                 pipe.hdel(key, pod_field)
 
-            for mapping_key in mapping_keys:
-                pipe.delete(mapping_key)
+            for key in mapping_keys + ref_keys:
+                pipe.delete(key)
 
             results = await pipe.execute()
             deleted_count = sum(1 for result in results[:len(matrix_keys)] if result > 0)
@@ -270,6 +307,33 @@ class VLLMKVCacheRedisManager:
 
         except Exception as e:
             logger.error(f"Error clearing blocks from Redis: {e}")
+            return 0
+
+    async def reset_block_refs(self, pod_identifier: str) -> int:
+        """Delete the pod's ref sets when a new engine event stream starts.
+
+        An engine that restarts loses its cache without sending removal events,
+        so the members from before would keep the pod in the matrix after its
+        last real copy of a block is evicted. Blocks stored before the reset are
+        then dropped on their first eviction, as before the ref sets existed.
+        """
+        if not pod_identifier:
+            return 0
+
+        try:
+            ref_keys = await self.redis_client.scan_keys(f"{self.REF_KEY_PREFIX}:{pod_identifier}@*")
+            if ref_keys:
+                client = await self.redis_client.get_connection()
+                pipe = client.pipeline()
+                for key in ref_keys:
+                    pipe.delete(key)
+                await pipe.execute()
+
+            logger.info(f"Reset {len(ref_keys)} block ref sets for pod {pod_identifier}")
+            return len(ref_keys)
+
+        except Exception as e:
+            logger.error(f"Error resetting block refs in Redis: {e}")
             return 0
 
 
@@ -298,6 +362,8 @@ class VLLMKVCacheEventHandler(EventHandler):
                 await self._handle_block_removed(event_data)
             elif event_data.event_type == EventType.VLLM_ALL_BLOCKS_CLEARED:
                 await self._handle_all_blocks_cleared(event_data)
+            elif event_data.event_type == EventType.VLLM_STREAM_STARTED:
+                await self._handle_stream_started(event_data)
 
             logger.info(f"Successfully handled vLLM event: {event_data.event_type.value}")
 
@@ -334,6 +400,11 @@ class VLLMKVCacheEventHandler(EventHandler):
             pod_identifier=event_data.pod_identifier
         )
 
+    async def _handle_stream_started(self, event_data: VLLMEventData) -> None:
+        # Only the Redis manager keeps ref sets outside the sidecar process.
+        if isinstance(self.kv_manager, VLLMKVCacheRedisManager):
+            await self.kv_manager.reset_block_refs(event_data.pod_identifier)
+
 
 def get_vllm_kv_cache_handler(kv_manager=None) -> VLLMKVCacheEventHandler:
     return VLLMKVCacheEventHandler(kv_manager)
@@ -343,6 +414,7 @@ class SGLangKVCacheRedisManager(VLLMKVCacheRedisManager):
     "KV cache Redis manager for SGLang. Reuses the vLLM logic."
 
     MAPPING_KEY_PREFIX: str = "sglang:kv:block"
+    REF_KEY_PREFIX: str = "sglang:kv:ref"
 
 
 class SGLangKVCacheEventHandler(EventHandler):
@@ -370,6 +442,8 @@ class SGLangKVCacheEventHandler(EventHandler):
                 await self._handle_block_removed(event_data)
             elif event_data.event_type == EventType.SGLANG_ALL_BLOCKS_CLEARED:
                 await self._handle_all_blocks_cleared(event_data)
+            elif event_data.event_type == EventType.SGLANG_STREAM_STARTED:
+                await self._handle_stream_started(event_data)
 
             logger.info(f"Successfully handled SGLang event: {event_data.event_type.value}")
 
@@ -405,6 +479,10 @@ class SGLangKVCacheEventHandler(EventHandler):
             model_name=event_data.model_name,
             pod_identifier=event_data.pod_identifier,
         )
+
+    async def _handle_stream_started(self, event_data: SGLangEventData) -> None:
+        if isinstance(self.kv_manager, VLLMKVCacheRedisManager):
+            await self.kv_manager.reset_block_refs(event_data.pod_identifier)
 
 
 def get_sglang_kv_cache_handler(kv_manager=None) -> SGLangKVCacheEventHandler:

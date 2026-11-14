@@ -68,6 +68,7 @@ class SGLangZMQSubscriber:
         self.decoder = Decoder(type=KVEventBatch)
         self._connection_lock = asyncio.Lock()
         self._shutdown_event = asyncio.Event()
+        self._last_seq: Optional[int] = None
 
     async def start(self) -> None:
         async with self._connection_lock:
@@ -136,6 +137,8 @@ class SGLangZMQSubscriber:
             logger.info(f"Connected to SGLang ZMQ endpoint: {self.config.zmq_endpoint}")
 
             expected_topic = self.config.zmq_topic_filter
+            # Batches sent while we were not connected are unknown.
+            self._last_seq = None
 
             while self.running:
                 try:
@@ -148,6 +151,7 @@ class SGLangZMQSubscriber:
                     if expected_topic and topic != expected_topic:
                         continue
 
+                    await self._track_sequence(parts[1])
                     await self._process_message(payload, self.config.pod_identifier, self.config.model_name)
 
                 except zmq.Again:
@@ -181,6 +185,27 @@ class SGLangZMQSubscriber:
         except (UnicodeDecodeError, IndexError, AttributeError) as e:
             logger.warning(f"Error extracting message data: {e}")
             return None, None
+
+    async def _track_sequence(self, seq_frame: bytes) -> None:
+        """Publish SGLANG_STREAM_STARTED when the batch sequence does not continue.
+
+        SGLang numbers its batches from 0 in every server process, like vLLM.
+        """
+        if not isinstance(seq_frame, bytes) or len(seq_frame) != 8:
+            return
+
+        seq = int.from_bytes(seq_frame, byteorder='big')
+        last_seq, self._last_seq = self._last_seq, seq
+        if last_seq is not None and seq == last_seq + 1:
+            return
+
+        logger.info(f"SGLang KV event stream started at seq {seq} (last seen {last_seq})")
+        await self.event_publisher.publish(SGLangEventData(
+            event_type=EventType.SGLANG_STREAM_STARTED,
+            timestamp=datetime.now(),
+            model_name=self.config.model_name,
+            pod_identifier=self.config.pod_identifier,
+        ))
 
     async def _process_message(self, payload: bytes, pod_identifier: str, model_name: str) -> None:
         if not payload:
