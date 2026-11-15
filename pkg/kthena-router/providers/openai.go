@@ -105,10 +105,34 @@ func openAIProviderURL(baseURL, requestPath, rawQuery string) (*url.URL, error) 
 	return appendProviderPath(parsed, requestPath, rawQuery), nil
 }
 
+// openAIUsage decodes the Chat Completions / Completions usage object. Pointer
+// fields stay nil when the upstream omits a field or sends null, which is how
+// an explicit 0 is told apart from a missing count.
 type openAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens     *int `json:"prompt_tokens"`
+	CompletionTokens int  `json:"completion_tokens"`
+	TotalTokens      int  `json:"total_tokens"`
+	// PromptTokensDetails is decoded on its own by cachedPromptTokens, so a
+	// malformed optional detail cannot invalidate the counts above.
+	PromptTokensDetails json.RawMessage `json:"prompt_tokens_details"`
+}
+
+type openAIPromptTokenDetails struct {
+	CachedTokens *int `json:"cached_tokens"`
+}
+
+// cachedPromptTokens returns prompt_tokens_details.cached_tokens and whether
+// the upstream reported it as an integer. A missing, null or malformed value
+// is not reported.
+func cachedPromptTokens(rawDetails json.RawMessage) (int, bool) {
+	if len(rawDetails) == 0 {
+		return 0, false
+	}
+	var details openAIPromptTokenDetails
+	if err := json.Unmarshal(rawDetails, &details); err != nil || details.CachedTokens == nil {
+		return 0, false
+	}
+	return *details.CachedTokens, true
 }
 
 type openAIResponse struct {
@@ -270,9 +294,16 @@ func tokenUsageFromOpenAIResponses(response openAIResponsesResponse) TokenUsage 
 
 func tokenUsageFromOpenAIResponse(response openAIResponse) TokenUsage {
 	usage := TokenUsage{
-		PromptTokens:     response.Usage.PromptTokens,
 		CompletionTokens: response.Usage.CompletionTokens,
 		TotalTokens:      response.Usage.TotalTokens,
+	}
+	if response.Usage.PromptTokens != nil {
+		usage.PromptTokens = *response.Usage.PromptTokens
+		usage.PromptTokensReported = true
+	}
+	if cached, ok := cachedPromptTokens(response.Usage.PromptTokensDetails); ok {
+		usage.CachedPromptTokens = cached
+		usage.CachedPromptTokensReported = true
 	}
 	if usage.TotalTokens == 0 {
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
