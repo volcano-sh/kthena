@@ -19,6 +19,7 @@ package connectors
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -301,4 +302,62 @@ func TestSGLangConnectorReqBodyNotMutated(t *testing.T) {
 			t.Errorf("Proxy() mutated caller reqBody by adding key %q", k)
 		}
 	}
+}
+
+func TestSGLangConnectorProxyErrorReturns(t *testing.T) {
+	t.Run("BuildRequestErrorIsNonRetryableWithZeroTokens", func(t *testing.T) {
+		connector := NewSGLangConnector()
+		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = req
+
+		reqBody := map[string]interface{}{
+			"model": "test-model",
+			"bad":   make(chan int),
+		}
+
+		tokens, err := connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
+		if err == nil {
+			t.Fatal("expected error when request body cannot be marshaled")
+		}
+		if tokens != 0 {
+			t.Errorf("expected 0 output tokens on build error, got %d", tokens)
+		}
+		var nonRetryable *NonRetryableError
+		if !errors.As(err, &nonRetryable) {
+			t.Errorf("expected NonRetryableError, got %T: %v", err, err)
+		}
+	})
+
+	t.Run("PrefillErrorReturnsZeroTokens", func(t *testing.T) {
+		prefillServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer prefillServer.Close()
+
+		decodeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer decodeServer.Close()
+
+		connector := NewSGLangConnector()
+		req, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = req
+
+		reqBody := map[string]interface{}{
+			"model": "test-model",
+			"messages": []interface{}{
+				map[string]interface{}{"role": "user", "content": "hello"},
+			},
+		}
+
+		tokens, err := connector.Proxy(c, reqBody, prefillServer.Listener.Addr().String(), decodeServer.Listener.Addr().String(), 0, nil)
+		if err == nil {
+			t.Fatal("expected error when prefill fails")
+		}
+		if tokens != 0 {
+			t.Errorf("expected 0 output tokens on prefill error, got %d", tokens)
+		}
+	})
 }
