@@ -17,7 +17,7 @@ Access logs support two formats:
 The text representation is a single line with this shape:
 
 ```text
-[timestamp] "METHOD /path PROTOCOL" status_code [error=type:message] [model_name=name] [model_route=route] [model_server=server] [selected_pod=pod] [request_id=id] [gateway=gateway] [http_route=route] [inference_pool=pool] [tokens=input/output] timings=totalms(request+upstream+response)
+[timestamp] "METHOD /path PROTOCOL" status_code [error=type:message] [model_name=name] [model_route=route] [model_server=server] [selected_pod=pod] [request_id=id] [gateway=gateway] [http_route=route] [inference_pool=pool] [tokens=input/output] [upstream_input_tokens=n] [cached_input_tokens=n] timings=totalms(request+upstream+response)
 ```
 
 Fields in square brackets are omitted when no value is available. JSON uses
@@ -88,9 +88,15 @@ An HTTP status is not uniquely determined by `error.type`; consult
 | Field | Type | Presence | Description | Example |
 | --- | --- | --- | --- | --- |
 | `input_tokens` | Integer | JSON omits zero | Prompt-token count calculated by the router | `150` |
+| `upstream_input_tokens` | Integer | When `accessLog.includeUpstreamUsage` is set and the upstream reported it; an explicit `0` is kept | Prompt-token count from the upstream usage (`prompt_tokens`) | `1830` |
+| `cached_input_tokens` | Integer | When `accessLog.includeUpstreamUsage` is set and the upstream reported it; an explicit `0` is kept | Cached prompt-token count from the upstream usage (`prompt_tokens_details.cached_tokens`) | `1536` |
 | `output_tokens` | Integer | JSON omits zero | Completion-token count parsed from the backend response when available | `75` |
 
-Text output includes `tokens=input/output` when either count is nonzero.
+Text output includes `tokens=input/output` when either count is nonzero, and
+`upstream_input_tokens=n` and `cached_input_tokens=n` when the upstream reported
+them. An explicit `0` is kept only within a usage report whose token total is
+positive; an all-zero usage report is ignored, so neither field is written. See [Upstream-reported token usage](../user-guide/router-observability.md#upstream-reported-token-usage)
+for the protocols that report these counts.
 
 ## Timing fields
 
@@ -174,9 +180,12 @@ networking:
       enabled: true
       format: text
       output: stdout
+      includeUpstreamUsage: false
 ```
 
 Set `format: json` explicitly when a structured log pipeline requires JSON.
+`includeUpstreamUsage` is rendered into the router ConfigMap as
+`accessLog.includeUpstreamUsage` rather than an environment variable.
 
 For the standalone networking subchart, omit the `networking` prefix:
 
