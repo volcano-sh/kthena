@@ -106,7 +106,8 @@ Each configured field whose claim has a usable value is written under the
 configured name as a string: in JSON after all other fields, and in text just
 before `timings`. Fields appear in field name order. See
 [JWT claim fields](../user-guide/router-observability.md#jwt-claim-fields) for
-setup and the value rules.
+setup, the value rules, example mappings for common issuers, and privacy
+guidance.
 
 | Field | Type | Presence | Description | Example |
 | --- | --- | --- | --- | --- |

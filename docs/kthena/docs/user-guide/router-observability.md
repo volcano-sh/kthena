@@ -429,10 +429,37 @@ Values follow these rules:
   requests while JWT authentication or access logging is disabled, carry no
   claim fields.
 
+Example mappings for common issuers. They are starting points; decode one of
+your own tokens to confirm which claims it carries:
+
+| Issuer | Example mapping | Notes |
+| --- | --- | --- |
+| Keycloak | `user_id: sub`, `client_id: azp`, `tenant: <claim>` | Keycloak adds no tenant claim by default; add one to the token with a protocol mapper and map its name |
+| Microsoft Entra ID | `user_id: oid`, `tenant: tid` | `oid` is stable across applications in a tenant; `sub` differs per application |
+| Auth0 | `user_id: sub`, `tenant: https://example.com/tenant` | Namespaced custom claims are top-level claim names, so map the full URL |
+| In-house issuer or gateway | Any top-level claim | Nested claims cannot be mapped |
+
+The Helm values file carries the same examples, commented out under
+`claimFields`.
+
 A misspelled claim name cannot be detected at startup, so the router counts the
 records that leave out a configured field in
 `kthena_router_access_log_claim_missing_total`. Only requests with a validated
 JWT are counted, once per request.
+
+#### Privacy and retention
+
+Claim fields put user and tenant identifiers into every access log record, so
+treat the access log as personal data where those identifiers identify people:
+
+- Only the claims named in `claimFields` are logged. The raw token and every
+  other claim are never written, and there is no wildcard.
+- Map the least identifying claim that serves the purpose, for example an
+  opaque subject ID rather than an email address or a name.
+- Restrict who can read the router logs and the log store they are shipped to,
+  and set a retention period that matches your billing or audit requirement.
+- Prometheus metrics still never carry user identifiers: the claim-missing
+  counter is labeled only with configured field names.
 
 When `ACCESS_LOG_OUTPUT` is `stdout` or `stderr`, `kubectl logs` can contain
 access-log records alongside other process logs. Parse each input line as JSON
