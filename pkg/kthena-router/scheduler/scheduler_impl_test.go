@@ -605,7 +605,7 @@ func TestRunScorePluginsKeepsUnscoredPods(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		plugins  []*scorePlugin
+		plugins  []framework.WeightedScorePlugin
 		expected map[*datastore.PodInfo]int
 	}{
 		{
@@ -615,22 +615,22 @@ func TestRunScorePluginsKeepsUnscoredPods(t *testing.T) {
 		},
 		{
 			name:     "plugin returns nil",
-			plugins:  []*scorePlugin{{plugin: &partialScorer{}, weight: 1}},
+			plugins:  []framework.WeightedScorePlugin{{Plugin: &partialScorer{}, Weight: 1}},
 			expected: map[*datastore.PodInfo]int{podA: 0, podB: 0},
 		},
 		{
 			name: "plugin scores one pod",
-			plugins: []*scorePlugin{{
-				plugin: &partialScorer{scores: map[*datastore.PodInfo]int{podA: 100}},
-				weight: 2,
+			plugins: []framework.WeightedScorePlugin{{
+				Plugin: &partialScorer{scores: map[*datastore.PodInfo]int{podA: 100}},
+				Weight: 2,
 			}},
 			expected: map[*datastore.PodInfo]int{podA: 200, podB: 0},
 		},
 		{
 			name: "plugin scores a pod that is not a candidate",
-			plugins: []*scorePlugin{{
-				plugin: &partialScorer{scores: map[*datastore.PodInfo]int{podA: 100, filteredOut: 100}},
-				weight: 1,
+			plugins: []framework.WeightedScorePlugin{{
+				Plugin: &partialScorer{scores: map[*datastore.PodInfo]int{podA: 100, filteredOut: 100}},
+				Weight: 1,
 			}},
 			expected: map[*datastore.PodInfo]int{podA: 100, podB: 0},
 		},
@@ -657,7 +657,7 @@ func TestScheduleWhenScorePluginReturnsNoScores(t *testing.T) {
 
 	scheduler := &SchedulerImpl{
 		store:       datastore.New(),
-		globalChain: &PluginChain{scores: []*scorePlugin{{plugin: &partialScorer{}, weight: 1}}},
+		globalChain: &PluginChain{scores: []framework.WeightedScorePlugin{{Plugin: &partialScorer{}, Weight: 1}}},
 	}
 	ctx := &framework.Context{
 		Prompt:          &common.ChatMessage{Text: "hello"},

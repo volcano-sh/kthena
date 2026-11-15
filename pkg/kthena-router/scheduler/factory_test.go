@@ -281,11 +281,11 @@ func TestGetScorePlugins(t *testing.T) {
 
 			// Verify weights and plugin names
 			for _, scorePlugin := range scorePlugins {
-				pluginName := scorePlugin.plugin.Name()
+				pluginName := scorePlugin.Plugin.Name()
 				expectedWeight, exists := tt.expectedWeights[pluginName]
 
 				assert.True(t, exists, "Plugin %s should have expected weight", pluginName)
-				assert.Equal(t, expectedWeight, scorePlugin.weight, "Weight for plugin %s should match", pluginName)
+				assert.Equal(t, expectedWeight, scorePlugin.Weight, "Weight for plugin %s should match", pluginName)
 			}
 		})
 	}

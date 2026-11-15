@@ -98,8 +98,8 @@ func getFilterPlugins(registry *PluginRegistry, filterPlugins []string, pluginsA
 	return list, nil
 }
 
-func getScorePlugins(registry *PluginRegistry, store datastore.Store, scorePluginMap map[string]int, pluginsArgMap map[string]runtime.RawExtension) ([]*scorePlugin, error) {
-	var list []*scorePlugin
+func getScorePlugins(registry *PluginRegistry, store datastore.Store, scorePluginMap map[string]int, pluginsArgMap map[string]runtime.RawExtension) ([]framework.WeightedScorePlugin, error) {
+	var list []framework.WeightedScorePlugin
 	for pluginName, weight := range scorePluginMap {
 		if weight < 0 {
 			klog.Errorf("Weight for plugin '%s' is invalid, value is %d. Setting to 0", pluginName, weight)
@@ -118,19 +118,19 @@ func getScorePlugins(registry *PluginRegistry, store datastore.Store, scorePlugi
 			return nil, fmt.Errorf("failed to build score plugin %s: %w", pluginName, err)
 		}
 		if plugin != nil {
-			list = append(list, &scorePlugin{
-				plugin: plugin,
-				weight: weight,
+			list = append(list, framework.WeightedScorePlugin{
+				Plugin: plugin,
+				Weight: weight,
 			})
 		}
 	}
 	return list, nil
 }
 
-func getPostScheduleHooks(scorePlugins []*scorePlugin) []framework.PostScheduleHook {
+func getPostScheduleHooks(scorePlugins []framework.WeightedScorePlugin) []framework.PostScheduleHook {
 	var hooks []framework.PostScheduleHook
 	for _, scorePlugin := range scorePlugins {
-		if hook, ok := scorePlugin.plugin.(framework.PostScheduleHook); ok {
+		if hook, ok := scorePlugin.Plugin.(framework.PostScheduleHook); ok {
 			hooks = append(hooks, hook)
 		}
 	}

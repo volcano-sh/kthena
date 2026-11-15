@@ -44,11 +44,6 @@ type SchedulerImpl struct {
 	globalChain *PluginChain
 }
 
-type scorePlugin struct {
-	plugin framework.ScorePlugin
-	weight int
-}
-
 type podInfoWithValue struct {
 	pod   *datastore.PodInfo
 	score int
@@ -110,8 +105,8 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 	// The router (doLoadbalance) resolves the chain for this round and carries
 	// it on the context. Fall back to resolving here for callers that skip
 	// doLoadbalance (e.g. tests).
-	chain, ok := ctx.ScheduleChain.(*PluginChain)
-	if !ok || chain == nil {
+	chain := ctx.ScheduleChain
+	if chain == nil {
 		chain = s.globalChain
 		ctx.ScheduleChain = chain
 		klog.V(4).Infof("ModelServer %s: scheduling model %s on the global chain", ctx.ModelServerName, ctx.Model)
@@ -121,7 +116,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 	// set includes least-request (per-chain derived state), so cross-router
 	// traffic is reflected in pod scores. Rate-limited internally; no-op when
 	// Redis is not enabled.
-	if chain.syncOnFlight {
+	if chain.NeedsOnFlightSync() {
 		s.store.SyncOnFlightCounts()
 	}
 
@@ -142,7 +137,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		// The initial pod list contains both prefill and decode roles. Filter the
 		// role-specific list after retrieving it from the store so overloaded
 		// decode pods cannot bypass filters in the optimized PD path.
-		decodePods, err = s.RunFilterPlugins(chain.filters, decodePods, ctx)
+		decodePods, err = s.RunFilterPlugins(chain.Filters(), decodePods, ctx)
 		if err != nil {
 			return err
 		}
@@ -163,7 +158,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 				stickyPrefillPods, stickyErr := s.store.GetPrefillPodsForDecodeGroup(
 					ctx.ModelServerName, stickyDecode.GetPodNamespacedName())
 				if stickyErr == nil {
-					stickyPrefillPods, stickyErr = s.RunFilterPlugins(chain.filters, stickyPrefillPods, ctx)
+					stickyPrefillPods, stickyErr = s.RunFilterPlugins(chain.Filters(), stickyPrefillPods, ctx)
 				}
 				// 4. Sticky prefill must still be selectable in that group.
 				stickyPrefillIndex := slices.IndexFunc(stickyPrefillPods, func(pod *datastore.PodInfo) bool {
@@ -183,7 +178,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		}
 
 		klog.V(4).Info("Running score plugins for decode pod")
-		scores := s.RunScorePlugins(chain.scores, decodePods, ctx)
+		scores := s.RunScorePlugins(chain.Scores(), decodePods, ctx)
 		topNDecodePods := TopNPodInfos(scores, topN)
 
 		for _, decodePod := range topNDecodePods {
@@ -198,14 +193,14 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 				continue
 			}
 
-			selectedPods, err = s.RunFilterPlugins(chain.filters, selectedPods, ctx)
+			selectedPods, err = s.RunFilterPlugins(chain.Filters(), selectedPods, ctx)
 			if err != nil {
 				klog.V(4).InfoS("prefill pods were filtered out", "decode instance", decodePodName, "error", err)
 				continue
 			}
 
 			klog.V(4).Info("Running score plugins for prefill pod")
-			scores = s.RunScorePlugins(chain.scores, selectedPods, ctx)
+			scores = s.RunScorePlugins(chain.Scores(), selectedPods, ctx)
 			bestPrefillPod := TopNPodInfos(scores, 1)
 			if len(bestPrefillPod) == 0 {
 				klog.V(4).InfoS("no valid prefill pods after scoring, skipping",
@@ -224,7 +219,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		return nil
 	}
 
-	pods, err := s.RunFilterPlugins(chain.filters, pods, ctx)
+	pods, err := s.RunFilterPlugins(chain.Filters(), pods, ctx)
 	if err != nil {
 		return err
 	}
@@ -241,7 +236,7 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 	}
 
 	klog.V(4).Info("Running score plugins for PD aggregated pod")
-	scores := s.RunScorePlugins(chain.scores, pods, ctx)
+	scores := s.RunScorePlugins(chain.Scores(), pods, ctx)
 	ctx.BestPods = TopNPodInfos(scores, topN)
 
 	return nil
@@ -267,7 +262,7 @@ func (s *SchedulerImpl) RunFilterPlugins(filters []framework.FilterPlugin, pods 
 	return pods, nil
 }
 
-func (s *SchedulerImpl) RunScorePlugins(scores []*scorePlugin, pods []*datastore.PodInfo, ctx *framework.Context) map[*datastore.PodInfo]int {
+func (s *SchedulerImpl) RunScorePlugins(scores []framework.WeightedScorePlugin, pods []*datastore.PodInfo, ctx *framework.Context) map[*datastore.PodInfo]int {
 	res := make(map[*datastore.PodInfo]int, len(pods))
 	for _, pod := range pods {
 		res[pod] = 0
@@ -277,16 +272,16 @@ func (s *SchedulerImpl) RunScorePlugins(scores []*scorePlugin, pods []*datastore
 	for _, scorePlugin := range scores {
 		// Record score plugin execution time
 		startTime := time.Now()
-		scores := scorePlugin.plugin.Score(ctx, pods)
+		scores := scorePlugin.Plugin.Score(ctx, pods)
 		duration := time.Since(startTime)
 
 		// Use the MetricsRecorder from context to record plugin duration
 		if ctx.MetricsRecorder != nil {
-			ctx.MetricsRecorder.RecordSchedulerPluginDuration(scorePlugin.plugin.Name(), metrics.PluginTypeScore, duration)
+			ctx.MetricsRecorder.RecordSchedulerPluginDuration(scorePlugin.Plugin.Name(), metrics.PluginTypeScore, duration)
 		}
 
 		if logScores {
-			klog.Infof("ScorePlugin: %s", scorePlugin.plugin.Name())
+			klog.Infof("ScorePlugin: %s", scorePlugin.Plugin.Name())
 		}
 		for k, v := range scores {
 			if logScores {
@@ -297,7 +292,7 @@ func (s *SchedulerImpl) RunScorePlugins(scores []*scorePlugin, pods []*datastore
 			if _, ok := res[k]; !ok {
 				continue
 			}
-			res[k] += v * scorePlugin.weight
+			res[k] += v * scorePlugin.Weight
 		}
 	}
 
@@ -318,12 +313,12 @@ func (s *SchedulerImpl) RunPostHooks(ctx *framework.Context, index int) {
 	// back to the global chain when absent (e.g. a caller skipped Schedule).
 	// Log at V(2): a profile-chain request landing on the global chain here
 	// is a semantic deviation that must be visible in the logs.
-	chain, ok := ctx.ScheduleChain.(*PluginChain)
-	if !ok || chain == nil {
+	chain := ctx.ScheduleChain
+	if chain == nil {
 		chain = s.globalChain
 		klog.V(2).Infof("ModelServer %s: no schedule chain on context, running post hooks on the global chain", ctx.ModelServerName)
 	}
-	for _, hook := range chain.postScheduleHooks {
+	for _, hook := range chain.PostScheduleHooks() {
 		hook.PostSchedule(ctx, index)
 	}
 }

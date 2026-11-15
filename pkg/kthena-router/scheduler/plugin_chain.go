@@ -34,13 +34,15 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 )
 
+var _ framework.ScheduleChain = &PluginChain{}
+
 // PluginChain bundles the plugin instances one scheduling round uses.
 type PluginChain struct {
 	// profile is the SchedulerProfile this chain was built from, empty for
 	// the global chain; it identifies the chain in lifecycle logs.
 	profile           types.NamespacedName
 	filters           []framework.FilterPlugin
-	scores            []*scorePlugin
+	scores            []framework.WeightedScorePlugin
 	postScheduleHooks []framework.PostScheduleHook
 	// syncOnFlight is true when least-request is among the plugins: its
 	// scoring requires on-flight counts synced from Redis first (multiple
@@ -85,16 +87,21 @@ func (c *PluginChain) tryClose() {
 	}
 }
 
+func (c *PluginChain) NeedsOnFlightSync() bool                         { return c.syncOnFlight }
+func (c *PluginChain) Filters() []framework.FilterPlugin               { return c.filters }
+func (c *PluginChain) Scores() []framework.WeightedScorePlugin         { return c.scores }
+func (c *PluginChain) PostScheduleHooks() []framework.PostScheduleHook { return c.postScheduleHooks }
+
 // least-request scoring requires on-flight counts synced from Redis first
 // (multiple router replicas each only see their own dispatches).
-func chainNeedsOnFlightSync(filters []framework.FilterPlugin, scores []*scorePlugin) bool {
+func chainNeedsOnFlightSync(filters []framework.FilterPlugin, scores []framework.WeightedScorePlugin) bool {
 	for _, f := range filters {
 		if f.Name() == plugins.LeastRequestPluginName {
 			return true
 		}
 	}
 	for _, sc := range scores {
-		if sc.plugin.Name() == plugins.LeastRequestPluginName {
+		if sc.Plugin.Name() == plugins.LeastRequestPluginName {
 			return true
 		}
 	}
@@ -113,7 +120,7 @@ func (c *PluginChain) close() {
 // (a closed chain, or a failed/discarded build whose instances were never
 // served). Plugins without framework.PluginCloser hold nothing and are
 // skipped; Close must be idempotent.
-func closeBuiltPlugins(owner types.NamespacedName, filters []framework.FilterPlugin, scores []*scorePlugin) {
+func closeBuiltPlugins(owner types.NamespacedName, filters []framework.FilterPlugin, scores []framework.WeightedScorePlugin) {
 	for _, f := range filters {
 		if closer, ok := f.(framework.PluginCloser); ok {
 			if err := closer.Close(); err != nil {
@@ -123,10 +130,10 @@ func closeBuiltPlugins(owner types.NamespacedName, filters []framework.FilterPlu
 		}
 	}
 	for _, sc := range scores {
-		if closer, ok := sc.plugin.(framework.PluginCloser); ok {
+		if closer, ok := sc.Plugin.(framework.PluginCloser); ok {
 			if err := closer.Close(); err != nil {
 				klog.Warningf("SchedulerProfile %s: failed to close score plugin %s: %v",
-					owner.String(), sc.plugin.Name(), err)
+					owner.String(), sc.Plugin.Name(), err)
 			}
 		}
 	}
@@ -140,10 +147,10 @@ func pluginNames(filters []framework.FilterPlugin) string {
 	return strings.Join(names, ", ")
 }
 
-func scorePluginNames(scores []*scorePlugin) string {
+func scorePluginNames(scores []framework.WeightedScorePlugin) string {
 	names := make([]string, 0, len(scores))
 	for _, sc := range scores {
-		names = append(names, sc.plugin.Name())
+		names = append(names, sc.Plugin.Name())
 	}
 	return strings.Join(names, ", ")
 }
@@ -301,10 +308,12 @@ func (m *ProfileChainManager) reconcileProfile(key types.NamespacedName, profile
 		_, hadErr := m.buildErrs[key]
 		delete(m.chains, key)
 		delete(m.buildErrs, key)
+		m.mu.Unlock()
+		// Unreachable once deleted — must retire unconditionally, no early
+		// return between the delete above and here.
 		if old != nil {
 			old.retire()
 		}
-		m.mu.Unlock()
 		if hadChain || hadErr {
 			m.notifyStatusNotify(key)
 		}
@@ -352,10 +361,12 @@ func (m *ProfileChainManager) reconcileProfile(key types.NamespacedName, profile
 		retired = m.chains[key]
 		m.chains[key] = chain
 	}
+	m.mu.Unlock()
+	// Same rule: retired unconditionally once removed, no early return
+	// between the swap above and here.
 	if retired != nil {
 		retired.retire()
 	}
-	m.mu.Unlock()
 
 	if err != nil {
 		klog.Warningf("SchedulerProfile %s: failed to build plugin chain: %v", key.String(), err)
@@ -374,7 +385,7 @@ func (m *ProfileChainManager) reconcileProfile(key types.NamespacedName, profile
 // instances are closed so a rejected profile leaks nothing.
 func (m *ProfileChainManager) buildChain(profile *aiv1alpha1.SchedulerProfile) (chain *PluginChain, buildErr error) {
 	var filters []framework.FilterPlugin
-	var scores []*scorePlugin
+	var scores []framework.WeightedScorePlugin
 	bc := plugins.BuildContext{Profile: types.NamespacedName{Namespace: profile.Namespace, Name: profile.Name}}
 	//If chain construction fails, close the already constructed plugin instance.
 	defer func() {
@@ -434,9 +445,9 @@ func (m *ProfileChainManager) buildChain(profile *aiv1alpha1.SchedulerProfile) (
 		if err != nil {
 			return nil, fmt.Errorf("plugins.Score.enabled[%d] (%s): %w", i, pw.Name, err)
 		}
-		scores = append(scores, &scorePlugin{
-			plugin: sc,
-			weight: int(pw.Weight),
+		scores = append(scores, framework.WeightedScorePlugin{
+			Plugin: sc,
+			Weight: int(pw.Weight),
 		})
 		enabledScoreNames = append(enabledScoreNames, pw.Name)
 	}

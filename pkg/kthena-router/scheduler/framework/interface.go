@@ -64,13 +64,24 @@ type Context struct {
 	ScheduleChain ScheduleChain
 }
 
+// WeightedScorePlugin pairs a score plugin with the weight its chain
+// configuration assigns it for aggregation.
+type WeightedScorePlugin struct {
+	Plugin ScorePlugin
+	Weight int
+}
+
 // ScheduleChain is the request-scoped handle to the plugin chain in use.
 type ScheduleChain interface {
-	// Acquire marks a request as using the chain; pair it with Release.
-	Acquire()
-	// Release marks the request done; the chain may close once retired and
-	// fully drained.
-	Release()
+	// NeedsOnFlightSync reports whether on-flight request counts must be
+	// synced from Redis before this chain's scoring round.
+	NeedsOnFlightSync() bool
+	// Filters returns the chain's filter plugins.
+	Filters() []FilterPlugin
+	// Scores returns the chain's score plugins with their weights.
+	Scores() []WeightedScorePlugin
+	// PostScheduleHooks returns the chain's post-schedule hooks.
+	PostScheduleHooks() []PostScheduleHook
 }
 
 type ScorePlugin interface {

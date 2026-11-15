@@ -298,11 +298,11 @@ func TestProfileChainManager_BuildChainValidation(t *testing.T) {
 
 func TestChainNeedsOnFlightSync(t *testing.T) {
 	store := datastore.New()
-	newScore := func(t *testing.T, name string) *scorePlugin {
+	newScore := func(t *testing.T, name string) framework.WeightedScorePlugin {
 		t.Helper()
 		p, err := plugins.SchedulerPlugins[name].NewScore(plugins.BuildContext{}, store, runtime.RawExtension{})
 		require.NoError(t, err)
-		return &scorePlugin{plugin: p}
+		return framework.WeightedScorePlugin{Plugin: p}
 	}
 	newFilter := func(t *testing.T, name string) framework.FilterPlugin {
 		t.Helper()
@@ -314,7 +314,7 @@ func TestChainNeedsOnFlightSync(t *testing.T) {
 	tests := []struct {
 		name    string
 		filters []framework.FilterPlugin
-		scores  []*scorePlugin
+		scores  []framework.WeightedScorePlugin
 		want    bool
 	}{
 		{
@@ -324,13 +324,13 @@ func TestChainNeedsOnFlightSync(t *testing.T) {
 		},
 		{
 			name:   "least-request score",
-			scores: []*scorePlugin{newScore(t, plugins.LeastRequestPluginName)},
+			scores: []framework.WeightedScorePlugin{newScore(t, plugins.LeastRequestPluginName)},
 			want:   true,
 		},
 		{
 			name:    "no least-request",
 			filters: []framework.FilterPlugin{newFilter(t, plugins.LoraAffinityPluginName)},
-			scores:  []*scorePlugin{newScore(t, plugins.GPUCacheUsagePluginName)},
+			scores:  []framework.WeightedScorePlugin{newScore(t, plugins.GPUCacheUsagePluginName)},
 			want:    false,
 		},
 		{name: "empty chain", want: false},
@@ -539,7 +539,7 @@ func (f *filterCloserSpy) Close() error {
 // closed only after every in-flight request released it.
 func TestPluginChain_CloseWaitsForInflightDrain(t *testing.T) {
 	spy := &closerSpy{}
-	chain := &PluginChain{scores: []*scorePlugin{{plugin: spy}}}
+	chain := &PluginChain{scores: []framework.WeightedScorePlugin{{Plugin: spy}}}
 
 	chain.Acquire()
 	chain.retire()
@@ -558,7 +558,7 @@ func TestPluginChain_CloseCoversFiltersAndReportsErrors(t *testing.T) {
 	scoreErr := &closerSpy{err: errors.New("close failed")}
 	chain := &PluginChain{
 		filters: []framework.FilterPlugin{filterOK, filterErr},
-		scores:  []*scorePlugin{{plugin: scoreErr}},
+		scores:  []framework.WeightedScorePlugin{{Plugin: scoreErr}},
 	}
 
 	chain.Acquire()
@@ -574,7 +574,7 @@ func TestPluginChain_CloseCoversFiltersAndReportsErrors(t *testing.T) {
 // converge to a single close, and double releases are harmless.
 func TestPluginChain_CloseExactlyOnce(t *testing.T) {
 	spy := &closerSpy{}
-	chain := &PluginChain{scores: []*scorePlugin{{plugin: spy}}}
+	chain := &PluginChain{scores: []framework.WeightedScorePlugin{{Plugin: spy}}}
 
 	// Drain-first ordering: released before retire.
 	chain.Acquire()
