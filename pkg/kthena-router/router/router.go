@@ -209,14 +209,15 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 	if err != nil {
 		klog.Fatalf("failed to create access logger: %v", err)
 	}
-	if routerConfig.AccessLog.IncludeUpstreamUsage && !accessLogConfig.Enabled {
-		klog.Infof("accessLog.includeUpstreamUsage is set but access logging is disabled; upstream usage is not logged")
+	authenticator := auth.NewJWTAuthenticator(routerConfig)
+	for _, note := range inactiveAccessLogOptions(routerConfig.AccessLog, accessLogConfig.Enabled, authenticator.IsEnabled()) {
+		klog.Info(note)
 	}
 
 	return &Router{
 		store:             store,
 		scheduler:         scheduler.NewScheduler(store, routerConfig),
-		authenticator:     auth.NewJWTAuthenticator(routerConfig),
+		authenticator:     authenticator,
 		loadRateLimiter:   loadRateLimiter,
 		accessLogger:      accessLogger,
 		metrics:           metricsInstance,
@@ -232,6 +233,26 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 
 		includeUpstreamUsage: routerConfig.AccessLog.IncludeUpstreamUsage,
 	}
+}
+
+// inactiveAccessLogOptions explains each configured accessLog option that
+// takes no effect: with access logging disabled nothing is logged, and claim
+// fields are read only from a JWT the router validated, so they need JWT
+// authentication.
+func inactiveAccessLogOptions(cfg conf.AccessLogConfig, accessLogEnabled, jwtEnabled bool) []string {
+	var notes []string
+	if cfg.IncludeUpstreamUsage && !accessLogEnabled {
+		notes = append(notes, "accessLog.includeUpstreamUsage is set but access logging is disabled; upstream usage is not logged")
+	}
+	if len(cfg.ClaimFields) > 0 {
+		if !accessLogEnabled {
+			notes = append(notes, "accessLog.claimFields is set but access logging is disabled; claim fields are not logged")
+		}
+		if !jwtEnabled {
+			notes = append(notes, "accessLog.claimFields is set but JWT authentication is disabled (auth.jwksUri is empty); claim fields are not logged")
+		}
+	}
+	return notes
 }
 
 // recordUpstreamUsage copies the upstream-reported input and cached-input

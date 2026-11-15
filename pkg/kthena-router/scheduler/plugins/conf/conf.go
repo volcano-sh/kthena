@@ -24,6 +24,7 @@ import (
 	"k8s.io/klog/v2"
 	yaml "sigs.k8s.io/yaml/goyaml.v3"
 
+	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 )
 
@@ -41,6 +42,9 @@ type AccessLogConfig struct {
 	// upstream reports in its usage as upstream_input_tokens and
 	// cached_input_tokens.
 	IncludeUpstreamUsage bool `yaml:"includeUpstreamUsage"`
+	// ClaimFields maps access log field names to top-level JWT claim names.
+	// Values are taken only from a JWT the router has validated.
+	ClaimFields map[string]string `yaml:"claimFields,omitempty"`
 }
 
 // SessionStickyConfig selects the session affinity backing store for the router.
@@ -129,6 +133,9 @@ func ParseRouterConfig(configMapPath string) (*RouterConfiguration, error) {
 	if err := yaml.Unmarshal(data, &routerConfig); err != nil {
 		klog.Errorf("failed to Unmarshal routerConfiguration: %v", err)
 		return nil, fmt.Errorf("failed to Unmarshal routerConfiguration: %v", err)
+	}
+	if err := accesslog.ValidateClaimFields(routerConfig.AccessLog.ClaimFields); err != nil {
+		return nil, fmt.Errorf("invalid accessLog.claimFields: %w", err)
 	}
 	return &routerConfig, nil
 }
