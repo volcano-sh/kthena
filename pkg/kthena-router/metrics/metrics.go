@@ -42,6 +42,7 @@ const (
 	LabelEngine        = "engine"
 	LabelUserID        = "user_id"
 	LabelStage         = "stage"
+	LabelField         = "field"
 
 	UnknownModel            = "unknown"
 	UnknownPath             = "other"
@@ -121,6 +122,9 @@ type Metrics struct {
 
 	// Tokenizer unsupported engine metrics
 	TokenizerUnsupportedEngineTotal prometheus.CounterVec
+
+	// Access log metrics
+	AccessLogClaimMissingTotal prometheus.CounterVec
 
 	// prefix-cache score plugin metrics
 	PrefixCacheMatchRatio      prometheus.HistogramVec
@@ -284,6 +288,14 @@ func NewMetrics() *Metrics {
 				Help: "Number of tokenizer lookups where no pod had a supported inference engine",
 			},
 			[]string{LabelModel, LabelEngine},
+		),
+
+		AccessLogClaimMissingTotal: *promauto.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "kthena_router_access_log_claim_missing_total",
+				Help: "Number of requests with a validated JWT whose access log entry omits a configured claim field because the token has no usable value for the claim",
+			},
+			[]string{LabelField},
 		),
 
 		PrefixCacheMatchRatio: *promauto.NewHistogramVec(
@@ -674,6 +686,12 @@ func (m *Metrics) IncFairnessQueuePriorityRefresh(model string) {
 // RecordTokenizerUnsupportedEngine records a tokenizer failure due to an unsupported inference engine
 func (m *Metrics) RecordTokenizerUnsupportedEngine(model, engine string) {
 	m.TokenizerUnsupportedEngineTotal.WithLabelValues(model, engine).Inc()
+}
+
+// RecordAccessLogClaimMissing records that a request with a validated JWT has
+// no usable value for the claim behind the configured claim field field.
+func (m *Metrics) RecordAccessLogClaimMissing(field string) {
+	m.AccessLogClaimMissingTotal.WithLabelValues(field).Inc()
 }
 
 // IncFairnessQueueHeapRebuild increments the heap rebuild counter

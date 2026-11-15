@@ -76,3 +76,25 @@ func TestInactiveAccessLogOptions(t *testing.T) {
 		})
 	}
 }
+
+func TestNewClaimFieldExtractor(t *testing.T) {
+	cfg := conf.AccessLogConfig{ClaimFields: map[string]string{"user_id": "sub"}}
+	tests := []struct {
+		name             string
+		cfg              conf.AccessLogConfig
+		accessLogEnabled bool
+		jwtEnabled       bool
+		wantExtractor    bool
+	}{
+		{name: "active", cfg: cfg, accessLogEnabled: true, jwtEnabled: true, wantExtractor: true},
+		{name: "access logging disabled", cfg: cfg, jwtEnabled: true},
+		{name: "JWT authentication disabled", cfg: cfg, accessLogEnabled: true},
+		{name: "no claim fields", accessLogEnabled: true, jwtEnabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			extractor := newClaimFieldExtractor(tt.cfg, tt.accessLogEnabled, tt.jwtEnabled, nil)
+			assert.Equal(t, tt.wantExtractor, extractor != nil)
+		})
+	}
+}

@@ -103,6 +103,7 @@ kthenaRouter:
 | `kthenaRouter.accessLog.format`            | string  | `"text"`         | Access-log format: `text` or `json`                                            |
 | `kthenaRouter.accessLog.output`            | string  | `"stdout"`       | Access-log destination: `stdout`, `stderr`, or a file path                     |
 | `kthenaRouter.accessLog.includeUpstreamUsage` | boolean | `false`       | Record upstream-reported input and cached-input token counts                   |
+| `kthenaRouter.accessLog.claimFields`       | map     | `{}`             | Access-log field names mapped to top-level JWT claim names                     |
 
 #### Session Boost Configuration
 

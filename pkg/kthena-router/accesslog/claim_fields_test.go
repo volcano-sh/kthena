@@ -17,10 +17,12 @@ limitations under the License.
 package accesslog
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/lestrrat-go/jwx/v3/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -182,4 +184,122 @@ func TestIsReservedFieldName(t *testing.T) {
 	for _, name := range []string{"user_id", "tenant", "client_id", "type", "message"} {
 		assert.False(t, IsReservedFieldName(name), "%q should not be reserved", name)
 	}
+}
+
+// tokenFromClaims decodes payload the way the auth filter's jwt.Parse does,
+// so claim values have the types a real token carries.
+func tokenFromClaims(t *testing.T, payload string) jwt.Token {
+	t.Helper()
+	token := jwt.New()
+	require.NoError(t, json.Unmarshal([]byte(payload), token))
+	return token
+}
+
+func TestClaimValue(t *testing.T) {
+	longest := strings.Repeat("v", MaxClaimValueBytes)
+	// 85 three-byte runes are 255 bytes, one more is 258.
+	multiByteFits := strings.Repeat("租", 85)
+	multiByteTooLong := multiByteFits + "租"
+
+	tests := []struct {
+		name      string
+		claim     string
+		payload   string
+		wantValue string
+		wantOK    bool
+	}{
+		{name: "string", claim: "tid", payload: `{"tid":"team-search"}`, wantValue: "team-search", wantOK: true},
+		{name: "string is trimmed", claim: "tid", payload: `{"tid":"  team-search\n"}`, wantValue: "team-search", wantOK: true},
+		{name: "registered string claim", claim: "sub", payload: `{"sub":"u-1024"}`, wantValue: "u-1024", wantOK: true},
+		{name: "namespaced claim", claim: "https://example.com/tenant", payload: `{"https://example.com/tenant":"acme"}`, wantValue: "acme", wantOK: true},
+		{name: "integer", claim: "org_id", payload: `{"org_id":1024}`, wantValue: "1024", wantOK: true},
+		{name: "negative decimal", claim: "score", payload: `{"score":-1.5}`, wantValue: "-1.5", wantOK: true},
+		{name: "large integer", claim: "org_id", payload: `{"org_id":1e21}`, wantValue: "1000000000000000000000", wantOK: true},
+		{name: "true", claim: "admin", payload: `{"admin":true}`, wantValue: "true", wantOK: true},
+		{name: "false", claim: "admin", payload: `{"admin":false}`, wantValue: "false", wantOK: true},
+		{name: "numeric date", claim: "iat", payload: `{"iat":1700000000}`, wantValue: "1700000000", wantOK: true},
+		{name: "value at the length limit", claim: "tid", payload: `{"tid":"` + longest + `"}`, wantValue: longest, wantOK: true},
+		{name: "multi-byte value under the limit", claim: "tid", payload: `{"tid":"` + multiByteFits + `"}`, wantValue: multiByteFits, wantOK: true},
+		{name: "missing", claim: "tid", payload: `{"sub":"u-1024"}`},
+		{name: "claim names are case sensitive", claim: "TID", payload: `{"tid":"team-search"}`},
+		{name: "null", claim: "tid", payload: `{"tid":null}`},
+		{name: "empty string", claim: "tid", payload: `{"tid":""}`},
+		{name: "blank string", claim: "tid", payload: `{"tid":"   "}`},
+		{name: "object", claim: "tenant", payload: `{"tenant":{"id":"acme"}}`},
+		{name: "nested path is not followed", claim: "tenant.id", payload: `{"tenant":{"id":"acme"}}`},
+		{name: "array", claim: "groups", payload: `{"groups":["a","b"]}`},
+		{name: "audience array", claim: "aud", payload: `{"aud":["kthena.io"]}`},
+		{name: "value over the length limit is not truncated", claim: "tid", payload: `{"tid":"` + longest + `v"}`},
+		{name: "multi-byte value over the length limit", claim: "tid", payload: `{"tid":"` + multiByteTooLong + `"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value, ok := claimValue(tokenFromClaims(t, tt.payload), tt.claim)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantValue, value)
+		})
+	}
+}
+
+func TestClaimFieldExtractor(t *testing.T) {
+	assert.Nil(t, NewClaimFieldExtractor(nil, nil))
+	assert.Nil(t, NewClaimFieldExtractor(map[string]string{}, nil))
+
+	var nilExtractor *ClaimFieldExtractor
+	assert.Nil(t, nilExtractor.Extract(tokenFromClaims(t, `{"sub":"u-1024"}`)))
+
+	claimFields := map[string]string{
+		"user_id":   "sub",
+		"tenant":    "tid",
+		"client_id": "azp",
+		"groups":    "groups",
+	}
+	tests := []struct {
+		name        string
+		payload     string
+		want        []ClaimField
+		wantMissing []string
+	}{
+		{
+			name:    "all claims present",
+			payload: `{"sub":"u-1024","tid":"team-search","azp":"web","groups":"ops"}`,
+			want: []ClaimField{
+				{Name: "client_id", Value: "web"},
+				{Name: "groups", Value: "ops"},
+				{Name: "tenant", Value: "team-search"},
+				{Name: "user_id", Value: "u-1024"},
+			},
+		},
+		{
+			name:        "missing and unusable claims are reported",
+			payload:     `{"sub":"u-1024","tid":"","groups":["ops"]}`,
+			want:        []ClaimField{{Name: "user_id", Value: "u-1024"}},
+			wantMissing: []string{"client_id", "groups", "tenant"},
+		},
+		{
+			name:        "no claim present",
+			payload:     `{}`,
+			wantMissing: []string{"client_id", "groups", "tenant", "user_id"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var missing []string
+			extractor := NewClaimFieldExtractor(claimFields, func(field string) { missing = append(missing, field) })
+			assert.Equal(t, tt.want, extractor.Extract(tokenFromClaims(t, tt.payload)))
+			assert.Equal(t, tt.wantMissing, missing)
+		})
+	}
+
+	t.Run("nil token", func(t *testing.T) {
+		called := false
+		extractor := NewClaimFieldExtractor(claimFields, func(string) { called = true })
+		assert.Nil(t, extractor.Extract(nil))
+		assert.False(t, called)
+	})
+
+	t.Run("nil missing callback", func(t *testing.T) {
+		extractor := NewClaimFieldExtractor(claimFields, nil)
+		assert.Equal(t, []ClaimField{{Name: "user_id", Value: "u-1024"}}, extractor.Extract(tokenFromClaims(t, `{"sub":"u-1024"}`)))
+	})
 }

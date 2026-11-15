@@ -82,6 +82,8 @@ networking:
       output: "stdout"
       # -- Record the upstream-reported input and cached-input token counts as `upstream_input_tokens` and `cached_input_tokens`.
       includeUpstreamUsage: false
+      # -- Map access-log field names to top-level JWT claim names, for example `user_id: sub`. Logged only for requests with a validated JWT.
+      claimFields: {}
     tls:
       # -- Enable TLS for Kthena Router server.
       enabled: false

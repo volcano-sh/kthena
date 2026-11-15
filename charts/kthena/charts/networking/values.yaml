@@ -97,6 +97,13 @@ kthenaRouter:
     # in the upstream usage as upstream_input_tokens and cached_input_tokens.
     # Rendered into the router ConfigMap as accessLog.includeUpstreamUsage.
     includeUpstreamUsage: false
+    # claimFields maps access log field names to top-level JWT claim names. Each
+    # request with a JWT validated by the router's auth section logs the mapped
+    # claims under these names; it has no effect while JWT authentication or
+    # access logging is disabled. Field names must match ^[a-z][a-z0-9_]*$ and
+    # cannot reuse a built-in field; at most 8 fields are allowed.
+    # Rendered into the router ConfigMap as accessLog.claimFields.
+    claimFields: {}
   # gatewayAPI configuration
   gatewayAPI:
     # enabled controls whether Gateway API related features are enabled

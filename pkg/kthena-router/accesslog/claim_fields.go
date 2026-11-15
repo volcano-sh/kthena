@@ -17,11 +17,16 @@ limitations under the License.
 package accesslog
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/lestrrat-go/jwx/v3/jwt"
 )
 
 const (
@@ -109,4 +114,105 @@ func ValidateClaimFields(claimFields map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// ClaimField is one claim field written to an access log entry.
+type ClaimField struct {
+	// Name is the access log field name.
+	Name string
+	// Value is the claim value converted to a string.
+	Value string
+}
+
+type claimMapping struct {
+	field string
+	claim string
+}
+
+// ClaimFieldExtractor reads the configured claim fields from a validated JWT.
+type ClaimFieldExtractor struct {
+	// mappings is sorted by field name, which is also the output order.
+	mappings []claimMapping
+	// onMissing is called with the field name when a token has no usable value
+	// for the field's claim.
+	onMissing func(field string)
+}
+
+// NewClaimFieldExtractor returns an extractor for claimFields, a mapping
+// already checked by ValidateClaimFields, or nil when claimFields is empty.
+// onMissing may be nil.
+func NewClaimFieldExtractor(claimFields map[string]string, onMissing func(field string)) *ClaimFieldExtractor {
+	if len(claimFields) == 0 {
+		return nil
+	}
+	mappings := make([]claimMapping, 0, len(claimFields))
+	for field, claim := range claimFields {
+		mappings = append(mappings, claimMapping{field: field, claim: claim})
+	}
+	sort.Slice(mappings, func(i, j int) bool { return mappings[i].field < mappings[j].field })
+	return &ClaimFieldExtractor{mappings: mappings, onMissing: onMissing}
+}
+
+// Extract returns the claim fields token has usable values for, in field name
+// order, and reports every other configured field to onMissing.
+func (e *ClaimFieldExtractor) Extract(token jwt.Token) []ClaimField {
+	if e == nil || token == nil {
+		return nil
+	}
+	var fields []ClaimField
+	for _, m := range e.mappings {
+		value, ok := claimValue(token, m.claim)
+		if !ok {
+			if e.onMissing != nil {
+				e.onMissing(m.field)
+			}
+			continue
+		}
+		fields = append(fields, ClaimField{Name: m.field, Value: value})
+	}
+	return fields
+}
+
+// claimValue converts the top-level claim name of token to a log value.
+// Strings are trimmed; numbers and booleans are formatted. A missing claim,
+// null, an object, an array, an empty string and a value longer than
+// MaxClaimValueBytes have no usable value; long values are not truncated.
+//
+// Unlike claimString in the auth filter, which session stickiness relies on,
+// this never formats arbitrary values with fmt.
+func claimValue(token jwt.Token, name string) (string, bool) {
+	if !token.Has(name) {
+		return "", false
+	}
+	var raw any
+	if err := token.Get(name, &raw); err != nil {
+		return "", false
+	}
+
+	var value string
+	switch v := raw.(type) {
+	case string:
+		value = strings.TrimSpace(v)
+	case bool:
+		value = strconv.FormatBool(v)
+	case float64:
+		value = strconv.FormatFloat(v, 'f', -1, 64)
+	case int:
+		value = strconv.Itoa(v)
+	case int64:
+		value = strconv.FormatInt(v, 10)
+	case json.Number:
+		value = v.String()
+	case time.Time:
+		// exp, iat and nbf are NumericDate values: seconds since the epoch.
+		value = strconv.FormatInt(v.Unix(), 10)
+	default:
+		// nil, objects (map[string]any) and arrays ([]any, and the []string
+		// of aud) are not written.
+		return "", false
+	}
+	if value == "" || len(value) > MaxClaimValueBytes {
+		return "", false
+	}
+	return value, true
 }
