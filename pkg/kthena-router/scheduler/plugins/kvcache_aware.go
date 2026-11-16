@@ -319,6 +319,14 @@ func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 		return nil
 	}
 
+	// The engine mixes the hashes of media items into the hashes of the KV
+	// blocks that hold them, which cannot be reproduced from text tokens.
+	// Leave multimodal requests to the other score plugins.
+	if ctx.Prompt.HasMultiModal() {
+		klog.V(4).Infof("KVCacheAware.Score: early return — multimodal request is not scored (model=%q)", ctx.UpstreamModel)
+		return nil
+	}
+
 	start := time.Now()
 	tokens, err := t.normalizeAndTokenizePrompt(ctx, pods)
 	tokenizerDuration := time.Since(start)

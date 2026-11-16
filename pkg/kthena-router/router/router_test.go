@@ -864,6 +864,74 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 	assert.Equal(t, float64(1), requestCounterValue(t, router, "test-model", "/v1/chat/completions", "200", "successful_request")-requestsBefore)
 }
 
+// TestRouter_HandlerFunc_MultiModalChat verifies that a chat request carrying
+// media reaches the model server with its content parts unchanged.
+func TestRouter_HandlerFunc_MultiModalChat(t *testing.T) {
+	content := []interface{}{
+		map[string]interface{}{"type": "text", "text": "Compare these images."},
+		map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "https://example.com/cat.png?size=large&fmt=png"}},
+		map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}},
+	}
+	var gotContent interface{}
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody map[string]interface{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
+		assert.Equal(t, "test-model-base", reqBody["model"])
+		messages, ok := reqBody["messages"].([]interface{})
+		require.True(t, ok)
+		require.Len(t, messages, 1)
+		gotContent = messages[0].(map[string]interface{})["content"]
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"mm-response"}`)
+	})
+	router, store, backend := setupTestRouter(t, backendHandler)
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-mm", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("test-model-base"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-mm", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-mm", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "test-model",
+			Rules:     []*aiv1alpha1.Rule{{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-mm"}}}},
+		},
+	}
+	store.AddOrUpdateModelServer(modelServer, sets.New(types.NamespacedName{Name: "pod-mm", Namespace: "default"}))
+	store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdateModelRoute(modelRoute)
+
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"model":    "test-model",
+		"messages": []interface{}{map[string]interface{}{"role": "user", "content": content}},
+	})
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"id":"mm-response"`)
+	assert.Equal(t, content, gotContent)
+	prompt, ok := c.Get(PromptKey)
+	require.True(t, ok)
+	assert.True(t, prompt.(*common.ChatMessage).HasMultiModal())
+}
+
 // TestRouter_HandlerFunc_UsesPerModelServerTransport verifies that when a
 // ModelServer has a per-ModelServer transport registered, the aggregated
 // forwarding path uses it instead of the shared default and still succeeds.

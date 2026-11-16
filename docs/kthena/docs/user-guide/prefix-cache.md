@@ -30,7 +30,7 @@ The plugin matches text, so it first renders the request into one string:
   What is Kthena?<|im_end|>
   ```
 
-  A top-level `system` field is placed first as a `system` message. Only text content is used: for content given as a list of parts, `text`, `input_text` and `output_text` parts are kept and other parts such as images are skipped.
+  A top-level `system` field is placed first as a `system` message. For content given as a list of parts, `text`, `input_text` and `output_text` parts are joined, and each media part, such as an image, is rendered as a placeholder holding a hash of the media at the start of its message (see [Multimodal Requests](./multimodal#prefix-cache)). Other parts are skipped.
 - **Responses** (`/v1/responses`): `instructions` becomes a `developer` message, followed by `input`. A plain string `input` becomes a `user` message.
 
 Since messages are rendered in order, two chat requests share a prefix when they start with the same system prompt and conversation history. A value that changes per request near the start, such as a timestamp in the system prompt, breaks the prefix for everything after it.

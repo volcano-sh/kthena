@@ -60,11 +60,8 @@ func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 		}
 
 		msgs := make([]common.Message, 0, len(messageList)+1)
-		if systemContent, ok := parseMessageContent(body["system"]); ok {
-			msgs = append(msgs, common.Message{
-				Role:    "system",
-				Content: systemContent,
-			})
+		if systemMsg, ok := parseMessage("system", body["system"]); ok {
+			msgs = append(msgs, systemMsg)
 		}
 		for _, message := range messageList {
 			msgMap, ok := message.(map[string]interface{})
@@ -77,15 +74,12 @@ func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 				continue
 			}
 
-			content, ok := parseMessageContent(msgMap["content"])
+			msg, ok := parseMessage(role, msgMap["content"])
 			if !ok {
 				continue
 			}
 
-			msgs = append(msgs, common.Message{
-				Role:    role,
-				Content: content,
-			})
+			msgs = append(msgs, msg)
 		}
 
 		return &common.ChatMessage{
@@ -128,11 +122,11 @@ func parseResponsesPrompt(instructions, input any) (*common.ChatMessage, error) 
 			if !ok || role == "" {
 				continue
 			}
-			content, ok := parseMessageContent(itemMap["content"])
+			msg, ok := parseMessage(role, itemMap["content"])
 			if !ok {
 				continue
 			}
-			msgs = append(msgs, common.Message{Role: role, Content: content})
+			msgs = append(msgs, msg)
 		}
 	default:
 		return nil, fmt.Errorf("input is not a string or list")
@@ -143,17 +137,22 @@ func parseResponsesPrompt(instructions, input any) (*common.ChatMessage, error) 
 	return &common.ChatMessage{Messages: msgs}, nil
 }
 
-func parseMessageContent(content any) (string, bool) {
+// parseMessage builds a message from its role and content. The content is
+// either a string or a list of content parts, whose text parts are joined into
+// Content and whose media parts are kept in MultiModal. It returns false when
+// the content has neither text nor media.
+func parseMessage(role string, content any) (common.Message, bool) {
 	if contentStr, ok := content.(string); ok {
-		return contentStr, true
+		return common.Message{Role: role, Content: contentStr}, true
 	}
 
 	contentList, ok := content.([]interface{})
 	if !ok {
-		return "", false
+		return common.Message{}, false
 	}
 
 	parts := make([]string, 0, len(contentList))
+	var media []common.MultiModalItem
 	for _, item := range contentList {
 		contentMap, ok := item.(map[string]interface{})
 		if !ok {
@@ -163,6 +162,9 @@ func parseMessageContent(content any) (string, bool) {
 			switch contentType {
 			case "text", "input_text", "output_text":
 			default:
+				if mediaItem, ok := parseMediaPart(contentType, contentMap); ok {
+					media = append(media, mediaItem)
+				}
 				continue
 			}
 		}
@@ -172,13 +174,26 @@ func parseMessageContent(content any) (string, bool) {
 		}
 		parts = append(parts, text)
 	}
-	if len(parts) == 0 {
-		return "", false
+	if len(parts) == 0 && len(media) == 0 {
+		return common.Message{}, false
 	}
-	return strings.Join(parts, "\n"), true
+	return common.Message{Role: role, Content: strings.Join(parts, "\n"), MultiModal: media}, true
 }
 
+// GetPromptString renders the text of a prompt. Media is not rendered, and
+// messages that only hold media are skipped.
 func GetPromptString(chatMessage *common.ChatMessage) string {
+	return renderPrompt(chatMessage, false)
+}
+
+// GetPromptStringWithMedia renders a prompt like GetPromptString, and renders
+// each media item as a placeholder holding its hash at the start of its
+// message, so prompts that differ only in their media do not render the same.
+func GetPromptStringWithMedia(chatMessage *common.ChatMessage) string {
+	return renderPrompt(chatMessage, true)
+}
+
+func renderPrompt(chatMessage *common.ChatMessage, withMedia bool) string {
 	// If Text field is present, return text directly (for prompt format)
 	if chatMessage.Text != "" {
 		return chatMessage.Text
@@ -187,7 +202,16 @@ func GetPromptString(chatMessage *common.ChatMessage) string {
 	// For chat messages, convert to ChatML format
 	var result strings.Builder
 	for _, msg := range chatMessage.Messages {
-		fmt.Fprintf(&result, "<|im_start|>%s\n%s<|im_end|>\n", msg.Role, msg.Content)
+		if !withMedia && msg.Content == "" && len(msg.MultiModal) > 0 {
+			continue
+		}
+		fmt.Fprintf(&result, "<|im_start|>%s\n", msg.Role)
+		if withMedia {
+			for _, item := range msg.MultiModal {
+				fmt.Fprintf(&result, "<|%s:%016x|>", item.Modality, item.Hash)
+			}
+		}
+		fmt.Fprintf(&result, "%s<|im_end|>\n", msg.Content)
 	}
 	return result.String()
 }

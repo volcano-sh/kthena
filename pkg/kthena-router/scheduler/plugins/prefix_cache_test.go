@@ -39,6 +39,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/cache"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
 func TestHashPrompt(t *testing.T) {
@@ -160,6 +161,31 @@ func TestPrefixCacheScore(t *testing.T) {
 		if scores[pod3] != 0 {
 			t.Errorf("pod3 score should be 0, got %d", scores[pod3])
 		}
+	})
+
+	t.Run("same text with different media does not match", func(t *testing.T) {
+		prefixStore := cache.NewModelPrefixStore(datastore.New(), 100, 5)
+		plugin := &PrefixCache{
+			name:             PrefixCachePluginName,
+			blockSizeToHash:  64,
+			maxBlocksToMatch: 128,
+			store:            prefixStore,
+		}
+		pod := &datastore.PodInfo{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1", Namespace: "ns1"}}}
+		promptWithImage := func(hash uint64) *common.ChatMessage {
+			return &common.ChatMessage{Messages: []common.Message{{
+				Role:       "user",
+				Content:    "What is in this image?",
+				MultiModal: []common.MultiModalItem{{Modality: common.ModalityImage, Hash: hash}},
+			}}}
+		}
+		prefixStore.Add("test-model", plugin.hashPrompt("test-model", utils.GetPromptStringWithMedia(promptWithImage(1))), pod)
+
+		sameImage := plugin.Score(&framework.Context{Model: "test-model", Prompt: promptWithImage(1)}, []*datastore.PodInfo{pod})
+		otherImage := plugin.Score(&framework.Context{Model: "test-model", Prompt: promptWithImage(2)}, []*datastore.PodInfo{pod})
+
+		assert.Equal(t, 100, sameImage[pod])
+		assert.Equal(t, 0, otherImage[pod])
 	})
 
 	t.Run("empty prompt returns nil", func(t *testing.T) {

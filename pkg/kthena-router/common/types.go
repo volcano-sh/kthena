@@ -24,17 +24,53 @@ const (
 	UpstreamTransportKey = "upstream_transport"
 )
 
+// Modality is the kind of a non-text input carried by a request.
+type Modality string
+
+const (
+	ModalityImage Modality = "image"
+	ModalityAudio Modality = "audio"
+	ModalityVideo Modality = "video"
+)
+
+// MultiModalItem is a non-text input (image, audio or video) of a request.
+// The router never fetches or decodes media; it only records what is needed
+// to tell items apart.
+type MultiModalItem struct {
+	Modality Modality
+	// Hash identifies the item by what the client sent: the URL for media
+	// passed by reference, or the encoded payload for inline media.
+	Hash uint64
+}
+
 // Message represents a single message in a chat conversation
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+
+	// MultiModal lists the non-text items of the message in request order.
+	// It is not serialized, so tokenizer requests built from Message stay text-only.
+	MultiModal []MultiModalItem `json:"-"`
 }
 
-// ChatMessage represents either a direct text prompt or structured chat messages
+// ChatMessage represents either a direct text prompt or structured chat message
 type ChatMessage struct {
 	// Text is used for direct prompt input (completion mode)
 	Text string `json:"text,omitempty"`
 
 	// Messages is used for chat conversation input (chat mode)
 	Messages []Message `json:"messages,omitempty"`
+}
+
+// HasMultiModal reports whether any message carries a non-text input.
+func (m *ChatMessage) HasMultiModal() bool {
+	if m == nil {
+		return false
+	}
+	for _, msg := range m.Messages {
+		if len(msg.MultiModal) > 0 {
+			return true
+		}
+	}
+	return false
 }

@@ -370,7 +370,7 @@ data:
 ```
 
 :::note
-Always enable `kvcache-aware` together with at least one other score plugin (e.g. `least-request`). The plugin returns no scores when there are no cached blocks yet (cold start) or when tokenization fails. Pods it does not score stay candidates with a score of 0, so if it were the only score plugin, those requests would go to an arbitrary pod instead of the least loaded one.
+Always enable `kvcache-aware` together with at least one other score plugin (e.g. `least-request`). The plugin returns no scores when there are no cached blocks yet (cold start), when tokenization fails, or when the request contains media such as images (see [Multimodal Requests](./multimodal#kv-cache-aware)). Pods it does not score stay candidates with a score of 0, so if it were the only score plugin, those requests would go to an arbitrary pod instead of the least loaded one.
 :::
 
 **Plugin arguments:**

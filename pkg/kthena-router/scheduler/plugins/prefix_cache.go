@@ -171,7 +171,7 @@ func matchRatio(matched, total int) float64 {
 
 func (p *PrefixCache) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
 	// Hash the prompt
-	hashes := p.hashPrompt(ctx.Model, utils.GetPromptString(ctx.Prompt))
+	hashes := p.hashPrompt(ctx.Model, utils.GetPromptStringWithMedia(ctx.Prompt))
 	if len(hashes) == 0 {
 		return nil
 	}

@@ -2379,6 +2379,36 @@ func TestKVCacheAware_ScoreMetrics_TokenizeError(t *testing.T) {
 	}
 }
 
+func TestKVCacheAware_ScoreSkipsMultiModal(t *testing.T) {
+	plugin := &KVCacheAware{
+		name:             KVCacheAwarePluginName,
+		maxBlocksToMatch: 128,
+		keyPrefix:        kvCacheKeyPrefix,
+		processor:        &TokenBlockProcessor{blockSize: 128},
+		// tokenizerManager nil -> any tokenization attempt is recorded as an error
+	}
+
+	const model = "kvmetrics-multimodal"
+	recorder := metrics.NewRequestMetricsRecorder(metrics.DefaultMetrics, model, "/v1/chat/completions")
+	ctx := &framework.Context{
+		UpstreamModel: model,
+		Prompt: &common.ChatMessage{Messages: []common.Message{{
+			Role:       "user",
+			Content:    "What is in this image?",
+			MultiModal: []common.MultiModalItem{{Modality: common.ModalityImage, Hash: 1}},
+		}}},
+		MetricsRecorder: recorder,
+	}
+
+	before := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize)
+	if scores := plugin.Score(ctx, createTestPods("pod1")); scores != nil {
+		t.Errorf("Score() = %v, want nil for a multimodal request", scores)
+	}
+	if got := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize) - before; got != 0 {
+		t.Errorf("kvcache tokenize errors delta = %v, want 0 (no tokenization)", got)
+	}
+}
+
 func TestKVCacheAware_CalculatePodScoresAndMatch_LongestMatch(t *testing.T) {
 	plugin := &KVCacheAware{}
 	blockHashes := []uint64{1, 2, 3, 4}
