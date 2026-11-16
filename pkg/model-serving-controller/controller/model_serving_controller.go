@@ -746,11 +746,14 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 		klog.Errorf("failed to start PodGroup informer: %v", err)
 	}
 
-	cache.WaitForCacheSync(ctx.Done(),
+	if !cache.WaitForCacheSync(ctx.Done(),
 		c.podsInformer.HasSynced,
 		c.servicesInformer.HasSynced,
 		c.modelServingsInformer.HasSynced,
-	)
+	) {
+		klog.Error("failed to wait for caches to sync")
+		return
+	}
 
 	// sync pods first
 	c.syncAll()
