@@ -217,6 +217,12 @@ func (s *State) UnexpectedRestart(pod *corev1.Pod) bool {
 		return false
 	}
 	for _, status := range pod.Status.InitContainerStatuses {
+		// kubelet is still retrying while the Pod is Pending, and a clean exit
+		// keeps its restarts for good. Neither means it is down now.
+		terminatedOK := status.State.Terminated != nil && status.State.Terminated.ExitCode == 0
+		if pod.Status.Phase == corev1.PodPending || terminatedOK {
+			continue
+		}
 		if status.RestartCount > 0 {
 			return true
 		}
