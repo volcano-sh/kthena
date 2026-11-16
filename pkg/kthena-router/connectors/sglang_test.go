@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -336,7 +337,9 @@ func TestSGLangConnectorProxyErrorReturns(t *testing.T) {
 		defer prefillServer.Close()
 
 		decodeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"completion_tokens":5}}`))
 		}))
 		defer decodeServer.Close()
 
@@ -355,6 +358,13 @@ func TestSGLangConnectorProxyErrorReturns(t *testing.T) {
 		tokens, err := connector.Proxy(c, reqBody, prefillServer.Listener.Addr().String(), decodeServer.Listener.Addr().String(), 0, nil)
 		if err == nil {
 			t.Fatal("expected error when prefill fails")
+		}
+		var nonRetryable *NonRetryableError
+		if errors.As(err, &nonRetryable) {
+			t.Errorf("expected retryable error on prefill 500, got NonRetryableError: %v", err)
+		}
+		if !strings.Contains(err.Error(), "prefill request failed with status 500") {
+			t.Errorf("expected prefill 500 error, got %T: %v", err, err)
 		}
 		if tokens != 0 {
 			t.Errorf("expected 0 output tokens on prefill error, got %d", tokens)
