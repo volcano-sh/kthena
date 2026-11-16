@@ -127,7 +127,7 @@ func TestHTTPConnectorProxy(t *testing.T) {
 
 		// The HTTP connector does support the Proxy method, but it will fail
 		// because the test addresses don't exist and the prefill/decode calls will fail
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", 0, nil)
+		_, err := connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
 		if err == nil {
 			t.Error("Expected HTTP connector Proxy to return error due to network/connection issues")
 		}
@@ -213,7 +213,7 @@ func TestHTTPConnectorProxy(t *testing.T) {
 		}
 
 		// The HTTP connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", 0, nil)
+		_, err := connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
 		if err == nil {
 			t.Error("Expected HTTP connector Proxy to return error due to network/connection issues")
 		}
@@ -307,7 +307,7 @@ func TestHTTPConnectorProxy(t *testing.T) {
 		}
 
 		// The HTTP connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", 0, nil)
+		_, err := connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
 		if err == nil {
 			t.Error("Expected HTTP connector Proxy to return error due to network/connection issues")
 		}
@@ -365,7 +365,7 @@ func TestHTTPConnectorProxy(t *testing.T) {
 		}
 
 		// The HTTP connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", 0, nil)
+		_, err := connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
 		if err == nil {
 			t.Error("Expected HTTP connector Proxy to return error due to network/connection issues")
 		}
@@ -458,7 +458,7 @@ func TestHTTPConnectorProxy(t *testing.T) {
 		}
 
 		// The HTTP connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBodyCopy, "localhost:8000", "localhost:8001", 0, nil)
+		_, err := connector.Proxy(c, reqBodyCopy, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
 		if err == nil {
 			t.Error("Expected HTTP connector Proxy to return error due to network/connection issues")
 		}
