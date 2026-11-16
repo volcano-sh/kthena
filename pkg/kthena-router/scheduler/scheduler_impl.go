@@ -22,13 +22,11 @@ import (
 	"sort"
 	"time"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
-	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 )
 
 const (
@@ -38,10 +36,6 @@ const (
 
 type SchedulerImpl struct {
 	store datastore.Store
-
-	// globalChain is the plugin chain built from the router ConfigMap at
-	// startup, used when the request context carries no profile chain.
-	globalChain *PluginChain
 }
 
 type podInfoWithValue struct {
@@ -49,67 +43,18 @@ type podInfoWithValue struct {
 	score int
 }
 
-func NewScheduler(store datastore.Store, routerConfig *conf.RouterConfiguration) (Scheduler, error) {
-	// For backward compatibility, use the default registry and ensure plugins are registered
-	registry := NewPluginRegistry()
-	registerDefaultPlugins(registry)
-
-	// Default plugin configuration.
-	scorePluginMap := map[string]int{
-		"least-request": 1,
-		"least-latency": 1,
-		"prefix-cache":  1,
+func NewScheduler(store datastore.Store) Scheduler {
+	return &SchedulerImpl{
+		store: store,
 	}
-	filterPlugins := []string{
-		"least-request",
-	}
-	pluginsArgMap := map[string]runtime.RawExtension{
-		"least-request": {Raw: []byte(`{"maxWaitingRequests": 10}`)},
-		"least-latency": {Raw: []byte(`{"TTFTTPOTWeightFactor": 0.5}`)},
-		"prefix-cache":  {Raw: []byte(`{"blockSizeToHash": 64, "maxBlocksToMatch": 128, "maxHashCacheSize": 50000, "topKMatches": 5}`)},
-	}
-
-	var err error
-	if routerConfig == nil {
-		// If no scheduler configuration is provided, use the default configuration
-		klog.Warning("No scheduler configuration found, using default configuration")
-	} else {
-		scorePluginMap, filterPlugins, pluginsArgMap, err = conf.LoadSchedulerConfig(&routerConfig.Scheduler)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load scheduler config: %w", err)
-		}
-	}
-
-	scorePlugins, err := getScorePlugins(registry, store, scorePluginMap, pluginsArgMap)
-	if err != nil {
-		return nil, err
-	}
-	filters, err := getFilterPlugins(registry, filterPlugins, pluginsArgMap)
-	if err != nil {
-		return nil, err
-	}
-	globalChain := &PluginChain{
-		filters:           filters,
-		scores:            scorePlugins,
-		postScheduleHooks: getPostScheduleHooks(scorePlugins),
-		syncOnFlight:      chainNeedsOnFlightSync(filters, scorePlugins),
-	}
-	s := &SchedulerImpl{
-		store:       store,
-		globalChain: globalChain,
-	}
-	return s, nil
 }
 
 func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodInfo) error {
 	// The router (doLoadbalance) resolves the chain for this round and carries
-	// it on the context. Fall back to resolving here for callers that skip
-	// doLoadbalance (e.g. tests).
+	// it on the context; a missing chain means the caller skipped that step.
 	chain := ctx.ScheduleChain
 	if chain == nil {
-		chain = s.globalChain
-		ctx.ScheduleChain = chain
-		klog.V(4).Infof("ModelServer %s: scheduling model %s on the global chain", ctx.ModelServerName, ctx.Model)
+		return fmt.Errorf("no schedule chain on context for ModelServer %s", ctx.ModelServerName)
 	}
 
 	// Sync on-flight counts from Redis before scoring when THIS chain's plugin
@@ -309,14 +254,11 @@ func (s *SchedulerImpl) RunScorePlugins(scores []framework.WeightedScorePlugin, 
 }
 
 func (s *SchedulerImpl) RunPostHooks(ctx *framework.Context, index int) {
-	// Reuse the chain resolved in Schedule (carried on the context); fall
-	// back to the global chain when absent (e.g. a caller skipped Schedule).
-	// Log at V(2): a profile-chain request landing on the global chain here
-	// is a semantic deviation that must be visible in the logs.
+	// Reuse the chain resolved in Schedule (carried on the context).
 	chain := ctx.ScheduleChain
 	if chain == nil {
-		chain = s.globalChain
-		klog.V(2).Infof("ModelServer %s: no schedule chain on context, running post hooks on the global chain", ctx.ModelServerName)
+		klog.Errorf("ModelServer %s: no schedule chain on context, skipping post hooks", ctx.ModelServerName)
+		return
 	}
 	for _, hook := range chain.PostScheduleHooks() {
 		hook.PostSchedule(ctx, index)

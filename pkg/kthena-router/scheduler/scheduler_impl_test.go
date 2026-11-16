@@ -221,13 +221,14 @@ func TestSchedulePDGroup(t *testing.T) {
 			}
 
 			// Create scheduler with minimal configuration
-			sched, _ := NewScheduler(store, nil)
+			sched := NewScheduler(store)
 			scheduler := sched.(*SchedulerImpl)
 
 			// Create scheduling context with PDGroup enabled
 			ctx := &framework.Context{
 				Prompt:          &common.ChatMessage{},
 				ModelServerName: modelServerName,
+				ScheduleChain:   newDefaultTestChain(t, store),
 				PDGroup: &aiv1alpha1.PDGroup{
 					GroupKey:      "pd-group",
 					DecodeLabels:  map[string]string{"role": "decode"},
@@ -399,7 +400,7 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 				}
 			}
 
-			sched, _ := NewScheduler(store, nil)
+			sched := NewScheduler(store)
 			scheduler := sched.(*SchedulerImpl)
 			if tt.updatePods {
 				scheduler = schedulerWithoutFilters(store)
@@ -407,9 +408,15 @@ func TestSchedulePDGroupStickyPair(t *testing.T) {
 			ctx := &framework.Context{
 				Prompt:               &common.ChatMessage{},
 				ModelServerName:      modelServerName,
+				ScheduleChain:        newDefaultTestChain(t, store),
 				PDGroup:              modelServer.Spec.WorkloadSelector.PDGroup,
 				StickyPodName:        tt.stickyDecode,
 				StickyPrefillPodName: tt.stickyPrefill,
+			}
+			if tt.updatePods {
+				// Empty chain: no filters, so the concurrent update lands
+				// before the sticky read instead of being ordered by one.
+				ctx.ScheduleChain = &PluginChain{}
 			}
 			if tt.updatePods {
 				wait := updatePodsConcurrently(podsByName(pods, tt.stickyDecode, tt.stickyPrefill)...)
@@ -465,14 +472,20 @@ func TestScheduleStickyPod(t *testing.T) {
 				testutil.PodInfoWithEngine("pod-a", "default", "10.0.0.1", ""),
 				testutil.PodInfoWithEngine("pod-b", "default", "10.0.0.2", ""),
 			}
-			sched, _ := NewScheduler(datastore.New(), nil)
+			store := datastore.New()
+			sched := NewScheduler(store)
 			scheduler := sched.(*SchedulerImpl)
+			chain := newDefaultTestChain(t, store)
 			if tt.updatePods {
-				scheduler = schedulerWithoutFilters(datastore.New())
+				scheduler = schedulerWithoutFilters(store)
+				// Empty chain: no filters, so the concurrent update lands
+				// before the sticky read instead of being ordered by one.
+				chain = &PluginChain{}
 			}
 			ctx := &framework.Context{
 				Prompt:          &common.ChatMessage{},
 				ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
+				ScheduleChain:   chain,
 				StickyPodName:   "pod-b",
 			}
 
@@ -491,12 +504,21 @@ func TestScheduleStickyPod(t *testing.T) {
 	}
 }
 
+// newDefaultTestChain builds the default global plugin chain, the same one
+// the router builds when no scheduler section is configured.
+func newDefaultTestChain(t *testing.T, store datastore.Store) *PluginChain {
+	t.Helper()
+	m := NewPluginChainManager(store)
+	require.NoError(t, m.InitGlobalPluginChain(nil))
+	return m.globalChain
+}
+
 // schedulerWithoutFilters returns a scheduler with no filter plugins. The
 // filter plugins take the PodInfo lock just before the sticky check, which
 // orders a concurrent update before the read and hides a missing lock from
-// -race.
+// -race. Pair it with an empty ScheduleChain on the context.
 func schedulerWithoutFilters(store datastore.Store) *SchedulerImpl {
-	return &SchedulerImpl{store: store, globalChain: &PluginChain{}}
+	return &SchedulerImpl{store: store}
 }
 
 // updatePodsConcurrently updates each pod's Pod object from another goroutine,
@@ -529,12 +551,13 @@ func podsByName(pods []*datastore.PodInfo, names ...string) []*datastore.PodInfo
 // TestScheduleNonPDGroupWithEmptyScores tests non-PD scheduling with empty scores
 func TestScheduleNonPDGroupWithEmptyScores(t *testing.T) {
 	store := datastore.New()
-	sched, _ := NewScheduler(store, nil)
+	sched := NewScheduler(store)
 	scheduler := sched.(*SchedulerImpl)
 
 	ctx := &framework.Context{
 		Prompt:          &common.ChatMessage{},
 		ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
+		ScheduleChain:   newDefaultTestChain(t, store),
 		PDGroup:         nil, // Non-PD scheduling
 	}
 
@@ -567,9 +590,7 @@ func TestRunScorePluginsEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := datastore.New()
-			sched, _ := NewScheduler(store, nil)
-			scheduler := sched.(*SchedulerImpl)
+			scheduler := &SchedulerImpl{store: datastore.New()}
 
 			ctx := &framework.Context{
 				Prompt:          &common.ChatMessage{},
@@ -577,7 +598,7 @@ func TestRunScorePluginsEdgeCases(t *testing.T) {
 			}
 
 			// Should return empty map without panic
-			result := scheduler.RunScorePlugins(scheduler.globalChain.scores, tt.pods, ctx)
+			result := scheduler.RunScorePlugins(nil, tt.pods, ctx)
 			assert.NotNil(t, result)
 			assert.Equal(t, 0, len(result))
 		})
@@ -638,13 +659,13 @@ func TestRunScorePluginsKeepsUnscoredPods(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scheduler := &SchedulerImpl{store: datastore.New(), globalChain: &PluginChain{scores: tt.plugins}}
+			scheduler := &SchedulerImpl{store: datastore.New()}
 			ctx := &framework.Context{
 				Prompt:          &common.ChatMessage{},
 				ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
 			}
 
-			assert.Equal(t, tt.expected, scheduler.RunScorePlugins(scheduler.globalChain.scores, pods, ctx))
+			assert.Equal(t, tt.expected, scheduler.RunScorePlugins(tt.plugins, pods, ctx))
 		})
 	}
 }
@@ -655,14 +676,13 @@ func TestScheduleWhenScorePluginReturnsNoScores(t *testing.T) {
 	podA := createTestPodInfo("pod-a")
 	podB := createTestPodInfo("pod-b")
 
-	scheduler := &SchedulerImpl{
-		store:       datastore.New(),
-		globalChain: &PluginChain{scores: []framework.WeightedScorePlugin{{Plugin: &partialScorer{}, Weight: 1}}},
-	}
+	scheduler := &SchedulerImpl{store: datastore.New()}
+	chain := &PluginChain{scores: []framework.WeightedScorePlugin{{Plugin: &partialScorer{}, Weight: 1}}}
 	ctx := &framework.Context{
 		Prompt:          &common.ChatMessage{Text: "hello"},
 		Model:           "test-model",
 		ModelServerName: types.NamespacedName{Namespace: "default", Name: "test"},
+		ScheduleChain:   chain,
 	}
 
 	require.NoError(t, scheduler.Schedule(ctx, []*datastore.PodInfo{podA, podB}))
@@ -727,22 +747,27 @@ func TestPDSchedulerFiltersOverloadedDecodePod(t *testing.T) {
 	ctx := &framework.Context{
 		Prompt:          &common.ChatMessage{},
 		ModelServerName: modelServerName,
+		ScheduleChain:   newDefaultTestChain(t, store),
 		PDGroup:         modelServer.Spec.WorkloadSelector.PDGroup,
 	}
 
 	// Expected behavior: the only decode pod exceeds the default threshold of
 	// 10 and must be filtered out before PD pairing.
-	sched, _ := NewScheduler(store, nil)
+	sched := NewScheduler(store)
 	err = sched.Schedule(ctx, pods)
 	require.Error(t, err)
 }
 
 // BenchmarkRunScorePlugins measures the scoring loop at default verbosity
 func BenchmarkRunScorePlugins(b *testing.B) {
+	store := datastore.New()
+	m := NewPluginChainManager(store)
+	if err := m.InitGlobalPluginChain(nil); err != nil {
+		b.Fatal(err)
+	}
+	scheduler := &SchedulerImpl{store: store}
 	for _, podCount := range []int{8, 32} {
 		b.Run(fmt.Sprintf("pods=%d", podCount), func(b *testing.B) {
-			sched, _ := NewScheduler(datastore.New(), nil)
-			scheduler := sched.(*SchedulerImpl)
 			pods := make([]*datastore.PodInfo, podCount)
 			for i := range pods {
 				pods[i] = createTestPodInfo(fmt.Sprintf("pod-%d", i))
@@ -757,7 +782,7 @@ func BenchmarkRunScorePlugins(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_ = scheduler.RunScorePlugins(scheduler.globalChain.scores, pods, ctx)
+				_ = scheduler.RunScorePlugins(m.globalChain.scores, pods, ctx)
 			}
 		})
 	}

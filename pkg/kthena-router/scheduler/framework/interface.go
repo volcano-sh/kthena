@@ -58,9 +58,9 @@ type Context struct {
 	// MetricsRecorder for recording scheduler plugin metrics
 	MetricsRecorder *metrics.RequestMetricsRecorder
 
-	// ScheduleChain is the plugin chain this scheduling round uses; set by
-	// the router before Schedule, read back by RunPostHooks. Nil means the
-	// global chain.
+	// ScheduleChain is the plugin chain this scheduling round uses; the
+	// router resolves it (profile chain or global chain) before Schedule
+	// and RunPostHooks reads it back. Must not be nil when Schedule runs.
 	ScheduleChain ScheduleChain
 }
 
@@ -104,7 +104,7 @@ type PostScheduleHook interface {
 }
 
 // PluginCloser is implemented by plugins that hold per-chain resources
-// (background workers, store callbacks). The ProfileChainManager closes the plugins
+// (background workers, store callbacks). The PluginChainManager closes the plugins
 // of replaced or deleted chains. Close must be idempotent.
 type PluginCloser interface {
 	Close() error

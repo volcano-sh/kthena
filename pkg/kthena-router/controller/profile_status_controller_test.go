@@ -39,25 +39,25 @@ import (
 )
 
 // newProfileStatusTestController builds a ProfileStatusController wired to a
-// fake kthena clientset and a real ProfileChainManager over the store, with the
+// fake kthena clientset and a real PluginChainManager over the store, with the
 // status signal connected.
-func newProfileStatusTestController(t *testing.T) (*ProfileStatusController, *kthenafake.Clientset, datastore.Store, *scheduler.ProfileChainManager, informersv1alpha1.SharedInformerFactory, informers.SharedInformerFactory) {
+func newProfileStatusTestController(t *testing.T) (*ProfileStatusController, *kthenafake.Clientset, datastore.Store, *scheduler.PluginChainManager, informersv1alpha1.SharedInformerFactory, informers.SharedInformerFactory) {
 	t.Helper()
 	kubeClient := kubefake.NewSimpleClientset()
 	kthenaClient := kthenafake.NewSimpleClientset()
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 	store := newStoreWithMockBackend()
-	chainManager := scheduler.NewProfileChainManager(store)
+	chainManager := scheduler.NewPluginChainManager(store)
 	controller, err := NewProfileStatusController(kthenaInformerFactory, chainManager, kthenaClient)
 	require.NoError(t, err)
 	return controller, kthenaClient, store, chainManager, kthenaInformerFactory, kubeInformerFactory
 }
 
-// waitForChainBuild waits until the ProfileChainManager settles the profile's build
+// waitForChainBuild waits until the PluginChainManager settles the profile's build
 // outcome: store callbacks run asynchronously (triggerCallbacks spawns a
 // goroutine per callback), so a right-after-write BuildStatus query races.
-func waitForChainBuild(t *testing.T, chainManager *scheduler.ProfileChainManager, key types.NamespacedName) {
+func waitForChainBuild(t *testing.T, chainManager *scheduler.PluginChainManager, key types.NamespacedName) {
 	t.Helper()
 	waitForObjectInCache(t, 2*time.Second, func() bool {
 		built, buildErr := chainManager.BuildStatus(key)
@@ -187,7 +187,7 @@ func TestProfileStatusController_SchedulerProfileCondition(t *testing.T) {
 		controller, kthenaClient, _, _, kthenaInformerFactory, _ := newProfileStatusTestController(t)
 
 		// The profile is visible to the lister but was never added to the
-		// store, so the ProfileChainManager has not built (or finished building)
+		// store, so the PluginChainManager has not built (or finished building)
 		// its chain — the async store callback may still be in flight.
 		require.NoError(t, kthenaInformerFactory.Networking().V1alpha1().SchedulerProfiles().
 			Informer().GetIndexer().Add(&aiv1alpha1.SchedulerProfile{

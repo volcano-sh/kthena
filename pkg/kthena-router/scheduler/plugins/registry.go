@@ -27,12 +27,15 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 )
 
-// schedulerPlugin describes a scheduler plugin: how to build it for each
+type ScorePluginBuilder = func(bc BuildContext, store datastore.Store, arg runtime.RawExtension) (framework.ScorePlugin, error)
+type FilterPluginBuilder = func(bc BuildContext, arg runtime.RawExtension) (framework.FilterPlugin, error)
+
+// SchedulerPlugin describes a scheduler plugin: how to build it for each
 // role it serves, and how to validate its configured arguments.
-type schedulerPlugin struct {
+type SchedulerPlugin struct {
 	ValidateArgs func(runtime.RawExtension) error
-	NewScore     func(BuildContext, datastore.Store, runtime.RawExtension) (framework.ScorePlugin, error)
-	NewFilter    func(BuildContext, runtime.RawExtension) (framework.FilterPlugin, error)
+	NewScore     ScorePluginBuilder
+	NewFilter    FilterPluginBuilder
 }
 
 type BuildContext struct {
@@ -45,9 +48,9 @@ func (bc BuildContext) IsGlobal() bool {
 	return bc.Profile == types.NamespacedName{}
 }
 
-// SchedulerPlugins registers every scheduler plugin with its builders and
-// args validator. Adding a plugin means adding one entry here.
-var SchedulerPlugins = map[string]schedulerPlugin{
+// schedulerPlugins holds every scheduler plugin. Adding a plugin means
+// adding one entry here; use RegisterPlugin/GetPlugin to access it.
+var schedulerPlugins = map[string]SchedulerPlugin{
 	GPUCacheUsagePluginName: {
 		ValidateArgs: ValidateGPUCacheUsageArgs,
 		NewScore: func(bc BuildContext, _ datastore.Store, _ runtime.RawExtension) (framework.ScorePlugin, error) {
@@ -95,24 +98,35 @@ var SchedulerPlugins = map[string]schedulerPlugin{
 	},
 }
 
+// RegisterPlugin adds or replaces the plugin registered under name.
+func RegisterPlugin(name string, p SchedulerPlugin) {
+	schedulerPlugins[name] = p
+}
+
+// GetPlugin returns the plugin registered under name.
+func GetPlugin(name string) (SchedulerPlugin, bool) {
+	p, ok := schedulerPlugins[name]
+	return p, ok
+}
+
 // SupportsFilterRole reports whether the named plugin can serve as a filter.
 // Unknown plugins return false.
 func SupportsFilterRole(name string) bool {
-	plugin, ok := SchedulerPlugins[name]
+	plugin, ok := GetPlugin(name)
 	return ok && plugin.NewFilter != nil
 }
 
 // SupportsScoreRole reports whether the named plugin can serve as a score
 // plugin. Unknown plugins return false.
 func SupportsScoreRole(name string) bool {
-	plugin, ok := SchedulerPlugins[name]
+	plugin, ok := GetPlugin(name)
 	return ok && plugin.NewScore != nil
 }
 
 // ValidateScorePluginCombination checks semantic rules across the set of
 // enabled score plugins: the random plugin must be the only score plugin,
 // since mixing random scores with meaningful scores defeats the purpose of
-// scheduling (mirrors handleRandomPluginConflicts for the global config).
+// scheduling
 func ValidateScorePluginCombination(names []string) error {
 	hasRandom := slices.Contains(names, RandomPluginName)
 	if hasRandom && len(names) > 1 {
@@ -123,24 +137,27 @@ func ValidateScorePluginCombination(names []string) error {
 
 // IsKnownPlugin reports whether name refers to a registered scheduler plugin.
 func IsKnownPlugin(name string) bool {
-	_, ok := SchedulerPlugins[name]
+	_, ok := GetPlugin(name)
 	return ok
 }
 
 // ValidatePluginArgs validates the arguments of the named plugin. It returns
 // an error for unknown plugins as well, so callers get a single entry point.
 func ValidatePluginArgs(name string, pluginArg runtime.RawExtension) error {
-	plugin, ok := SchedulerPlugins[name]
+	plugin, ok := GetPlugin(name)
 	if !ok {
 		return fmt.Errorf("unknown plugin %q, known plugins: %v", name, knownPluginNames())
+	}
+	if plugin.ValidateArgs == nil {
+		return nil
 	}
 	return plugin.ValidateArgs(pluginArg)
 }
 
 // knownPluginNames returns the names of all registered scheduler plugins.
 func knownPluginNames() []string {
-	names := make([]string, 0, len(SchedulerPlugins))
-	for name := range SchedulerPlugins {
+	names := make([]string, 0, len(schedulerPlugins))
+	for name := range schedulerPlugins {
 		names = append(names, name)
 	}
 	return names

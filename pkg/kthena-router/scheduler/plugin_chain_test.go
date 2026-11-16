@@ -33,6 +33,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins/conf"
 )
 
 func newTestProfile(name string, spec aiv1alpha1.SchedulerProfileSpec) *aiv1alpha1.SchedulerProfile {
@@ -82,12 +83,12 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, msg string
 	}
 }
 
-// TestProfileChainManager_BuildStatusOnProfileEvents drives events through
+// TestPluginChainManager_BuildStatusOnProfileEvents drives events through
 // the store (as in production: the controller writes the store, the async
 // callback builds) and checks the reported build outcome.
-func TestProfileChainManager_BuildStatusOnProfileEvents(t *testing.T) {
+func TestPluginChainManager_BuildStatusOnProfileEvents(t *testing.T) {
 	store := datastore.New()
-	m := NewProfileChainManager(store)
+	m := NewPluginChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p1"}
 
 	// Chains are lazy: only profiles referenced by a ModelServer in the
@@ -142,9 +143,9 @@ func TestProfileChainManager_BuildStatusOnProfileEvents(t *testing.T) {
 	}, "delete must remove the chain")
 }
 
-func TestProfileChainManager_BuildStatusReportsBuildError(t *testing.T) {
+func TestPluginChainManager_BuildStatusReportsBuildError(t *testing.T) {
 	store := datastore.New()
-	m := NewProfileChainManager(store)
+	m := NewPluginChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p1"}
 
 	// Lazy: a build failure is only reached once something references the
@@ -163,7 +164,7 @@ func TestProfileChainManager_BuildStatusReportsBuildError(t *testing.T) {
 	assert.Contains(t, buildErr.Error(), "no-such-plugin")
 }
 
-func TestProfileChainManager_BuildChainValidation(t *testing.T) {
+func TestPluginChainManager_BuildChainValidation(t *testing.T) {
 	tests := []struct {
 		name    string
 		spec    aiv1alpha1.SchedulerProfileSpec
@@ -275,7 +276,7 @@ func TestProfileChainManager_BuildChainValidation(t *testing.T) {
 	}
 
 	store := datastore.New()
-	m := NewProfileChainManager(store)
+	m := NewPluginChainManager(store)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			chain, err := m.buildChain(newTestProfile("p1", tt.spec))
@@ -300,13 +301,17 @@ func TestChainNeedsOnFlightSync(t *testing.T) {
 	store := datastore.New()
 	newScore := func(t *testing.T, name string) framework.WeightedScorePlugin {
 		t.Helper()
-		p, err := plugins.SchedulerPlugins[name].NewScore(plugins.BuildContext{}, store, runtime.RawExtension{})
+		meta, ok := plugins.GetPlugin(name)
+		require.True(t, ok)
+		p, err := meta.NewScore(plugins.BuildContext{}, store, runtime.RawExtension{})
 		require.NoError(t, err)
 		return framework.WeightedScorePlugin{Plugin: p}
 	}
 	newFilter := func(t *testing.T, name string) framework.FilterPlugin {
 		t.Helper()
-		f, err := plugins.SchedulerPlugins[name].NewFilter(plugins.BuildContext{}, runtime.RawExtension{})
+		meta, ok := plugins.GetPlugin(name)
+		require.True(t, ok)
+		f, err := meta.NewFilter(plugins.BuildContext{}, runtime.RawExtension{})
 		require.NoError(t, err)
 		return f
 	}
@@ -342,9 +347,10 @@ func TestChainNeedsOnFlightSync(t *testing.T) {
 	}
 }
 
-func TestProfileChainManager_AcquireProfile(t *testing.T) {
+func TestPluginChainManager_AcquireProfile(t *testing.T) {
 	store := datastore.New()
-	m := NewProfileChainManager(store)
+	m := NewPluginChainManager(store)
+	require.NoError(t, m.InitGlobalPluginChain(nil))
 	// The referencing ModelServers must be in the store: AcquireProfile's
 	// synchronous fallback build commits only for referenced profiles.
 	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms-built", "built"), nil)
@@ -362,20 +368,20 @@ func TestProfileChainManager_AcquireProfile(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		ms      *aiv1alpha1.ModelServer
-		wantNil bool
-		wantErr string
+		name       string
+		ms         *aiv1alpha1.ModelServer
+		wantGlobal bool
+		wantErr    string
 	}{
 		{
-			name:    "nil modelserver",
-			ms:      nil,
-			wantNil: true,
+			name:       "nil modelserver",
+			ms:         nil,
+			wantGlobal: true,
 		},
 		{
-			name:    "no traffic policy",
-			ms:      noRef,
-			wantNil: true,
+			name:       "no traffic policy",
+			ms:         noRef,
+			wantGlobal: true,
 		},
 		{
 			name: "no load balancer",
@@ -383,7 +389,7 @@ func TestProfileChainManager_AcquireProfile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms"},
 				Spec:       aiv1alpha1.ModelServerSpec{TrafficPolicy: &aiv1alpha1.TrafficPolicy{}},
 			},
-			wantNil: true,
+			wantGlobal: true,
 		},
 		{
 			name: "no profile reference",
@@ -393,7 +399,7 @@ func TestProfileChainManager_AcquireProfile(t *testing.T) {
 					TrafficPolicy: &aiv1alpha1.TrafficPolicy{LoadBalancer: &aiv1alpha1.LoadBalancer{}},
 				},
 			},
-			wantNil: true,
+			wantGlobal: true,
 		},
 		{
 			name: "built profile resolves to its chain",
@@ -421,8 +427,8 @@ func TestProfileChainManager_AcquireProfile(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			if tt.wantNil {
-				assert.Nil(t, chain)
+			if tt.wantGlobal {
+				assert.Same(t, m.globalChain, chain, "no reference must resolve to the global chain")
 				return
 			}
 			require.NotNil(t, chain)
@@ -464,11 +470,11 @@ func TestProfileChainManager_AcquireProfile(t *testing.T) {
 	})
 }
 
-// TestProfileChainManager_StatusNotifyCarriesKeys verifies the manager signals
+// TestPluginChainManager_StatusNotifyCarriesKeys verifies the manager signals
 // a changed profile key once its build status changes.
-func TestProfileChainManager_StatusNotifyCarriesKeys(t *testing.T) {
+func TestPluginChainManager_StatusNotifyCarriesKeys(t *testing.T) {
 	store := datastore.New()
-	m := NewProfileChainManager(store)
+	m := NewPluginChainManager(store)
 
 	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "built"), nil)
 	store.AddOrUpdateSchedulerProfile(validProfile("built"))
@@ -481,10 +487,10 @@ func TestProfileChainManager_StatusNotifyCarriesKeys(t *testing.T) {
 	assert.Contains(t, m.TakePendingNotifies(), types.NamespacedName{Namespace: "default", Name: "built"})
 }
 
-// TestProfileChainManager_StatusNotifyNeverDrops verifies a burst of status
+// TestPluginChainManager_StatusNotifyNeverDrops verifies a burst of status
 // changes coalesce in the pending set instead of being dropped.
-func TestProfileChainManager_StatusNotifyNeverDrops(t *testing.T) {
-	m := NewProfileChainManager(datastore.New())
+func TestPluginChainManager_StatusNotifyNeverDrops(t *testing.T) {
+	m := NewPluginChainManager(datastore.New())
 
 	const burst = 500
 	done := make(chan struct{})
@@ -535,11 +541,21 @@ func (f *filterCloserSpy) Close() error {
 	return f.err
 }
 
+// testOwnedChain returns a chain built from a profile (not the global chain),
+// so Release participates in the retire/drain lifecycle under test.
+func testOwnedChain(scores []framework.WeightedScorePlugin, filters []framework.FilterPlugin) *PluginChain {
+	return &PluginChain{
+		filters:   filters,
+		scores:    scores,
+		builtFrom: newTestProfile("test", aiv1alpha1.SchedulerProfileSpec{}),
+	}
+}
+
 // TestPluginChain_CloseWaitsForInflightDrain verifies a replaced chain is
 // closed only after every in-flight request released it.
 func TestPluginChain_CloseWaitsForInflightDrain(t *testing.T) {
 	spy := &closerSpy{}
-	chain := &PluginChain{scores: []framework.WeightedScorePlugin{{Plugin: spy}}}
+	chain := testOwnedChain([]framework.WeightedScorePlugin{{Plugin: spy}}, nil)
 
 	chain.Acquire()
 	chain.retire()
@@ -556,10 +572,10 @@ func TestPluginChain_CloseCoversFiltersAndReportsErrors(t *testing.T) {
 	filterOK := &filterCloserSpy{}
 	filterErr := &filterCloserSpy{err: errors.New("close failed")}
 	scoreErr := &closerSpy{err: errors.New("close failed")}
-	chain := &PluginChain{
-		filters: []framework.FilterPlugin{filterOK, filterErr},
-		scores:  []framework.WeightedScorePlugin{{Plugin: scoreErr}},
-	}
+	chain := testOwnedChain(
+		[]framework.WeightedScorePlugin{{Plugin: scoreErr}},
+		[]framework.FilterPlugin{filterOK, filterErr},
+	)
 
 	chain.Acquire()
 	chain.retire()
@@ -574,7 +590,7 @@ func TestPluginChain_CloseCoversFiltersAndReportsErrors(t *testing.T) {
 // converge to a single close, and double releases are harmless.
 func TestPluginChain_CloseExactlyOnce(t *testing.T) {
 	spy := &closerSpy{}
-	chain := &PluginChain{scores: []framework.WeightedScorePlugin{{Plugin: spy}}}
+	chain := testOwnedChain([]framework.WeightedScorePlugin{{Plugin: spy}}, nil)
 
 	// Drain-first ordering: released before retire.
 	chain.Acquire()
@@ -589,13 +605,13 @@ func TestPluginChain_CloseExactlyOnce(t *testing.T) {
 	assert.EqualValues(t, 1, spy.closes.Load())
 }
 
-// TestProfileChainManager_StaleSuccessDiscarded verifies a delayed event for
+// TestPluginChainManager_StaleSuccessDiscarded verifies a delayed event for
 // an older profile version cannot disturb the current chain: reconcile reads
 // the store's current object, sees the chain already built from it, and
 // skips — no rebuild, no settle hint.
-func TestProfileChainManager_StaleSuccessDiscarded(t *testing.T) {
+func TestPluginChainManager_StaleSuccessDiscarded(t *testing.T) {
 	store := datastore.New()
-	m := NewProfileChainManager(store)
+	m := NewPluginChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p1"}
 
 	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "p1"), nil)
@@ -632,12 +648,12 @@ func TestProfileChainManager_StaleSuccessDiscarded(t *testing.T) {
 	}
 }
 
-// TestProfileChainManager_StaleFailureDiscarded verifies a stale build
+// TestPluginChainManager_StaleFailureDiscarded verifies a stale build
 // failure is not recorded — not when a newer version exists, and not when
 // the profile is already gone (e.g. deleted mid-build).
-func TestProfileChainManager_StaleFailureDiscarded(t *testing.T) {
+func TestPluginChainManager_StaleFailureDiscarded(t *testing.T) {
 	store := datastore.New()
-	m := NewProfileChainManager(store)
+	m := NewPluginChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p2"}
 
 	// An add event for a profile that is not in the store (e.g. deleted
@@ -655,11 +671,11 @@ func TestProfileChainManager_StaleFailureDiscarded(t *testing.T) {
 	}
 }
 
-// TestProfileChainManager_UpdateReplacesChain verifies a successful update
+// TestPluginChainManager_UpdateReplacesChain verifies a successful update
 // swaps in a new chain and retires the replaced one.
-func TestProfileChainManager_UpdateReplacesChain(t *testing.T) {
+func TestPluginChainManager_UpdateReplacesChain(t *testing.T) {
 	store := datastore.New()
-	m := NewProfileChainManager(store)
+	m := NewPluginChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p1"}
 
 	store.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms", "p1"), nil)
@@ -693,13 +709,13 @@ func TestProfileChainManager_UpdateReplacesChain(t *testing.T) {
 	}, "the replaced chain must be retired")
 }
 
-// TestProfileChainManager_LazyCreation verifies the lazy lifecycle: a
+// TestPluginChainManager_LazyCreation verifies the lazy lifecycle: a
 // profile that nothing references holds no chain, the first reference
 // builds it, losing the reference retires it at once, and a dangling
 // reference builds nothing.
-func TestProfileChainManager_LazyCreation(t *testing.T) {
+func TestPluginChainManager_LazyCreation(t *testing.T) {
 	store := datastore.New()
-	m := NewProfileChainManager(store)
+	m := NewPluginChainManager(store)
 	key := types.NamespacedName{Namespace: "default", Name: "p1"}
 
 	store.AddOrUpdateSchedulerProfile(validProfile("p1"))
@@ -737,12 +753,12 @@ func TestProfileChainManager_LazyCreation(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found in namespace")
 }
 
-// TestProfileChainManager_ReferenceSwitchLifecycle verifies a ModelServer
+// TestPluginChainManager_ReferenceSwitchLifecycle verifies a ModelServer
 // switching profiles retires the old chain immediately and builds the new
 // one.
-func TestProfileChainManager_ReferenceSwitchLifecycle(t *testing.T) {
+func TestPluginChainManager_ReferenceSwitchLifecycle(t *testing.T) {
 	store := datastore.New()
-	m := NewProfileChainManager(store)
+	m := NewPluginChainManager(store)
 	a := types.NamespacedName{Namespace: "default", Name: "a"}
 	b := types.NamespacedName{Namespace: "default", Name: "b"}
 
@@ -771,4 +787,175 @@ func TestProfileChainManager_ReferenceSwitchLifecycle(t *testing.T) {
 	waitUntil(t, 2*time.Second, func() bool {
 		return oldA.retired.Load()
 	}, "the switched-away chain must be retired")
+}
+
+// TestInitGlobalPluginChainRejectsInvalidLeastLatencyWeight mirrors the
+// conf-level weight validation the global chain must keep enforcing.
+func TestInitGlobalPluginChainRejectsInvalidLeastLatencyWeight(t *testing.T) {
+	tt := []struct {
+		name  string
+		value string
+	}{
+		{name: "not a number", value: ".nan"},
+		{name: "positive infinity", value: ".inf"},
+		{name: "negative infinity", value: "-.inf"},
+		{name: "below minimum", value: "-0.1"},
+		{name: "above maximum", value: "1.1"},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			routerConfig := &conf.RouterConfiguration{
+				Scheduler: conf.SchedulerConfiguration{
+					PluginConfig: []conf.PluginConfig{{
+						Name: plugins.LeastLatencyPluginName,
+						Args: runtime.RawExtension{Raw: []byte("TTFTTPOTWeightFactor: " + tc.value)},
+					}},
+				},
+			}
+			m := NewPluginChainManager(datastore.New())
+			err := m.InitGlobalPluginChain(routerConfig)
+			require.Error(t, err, "expected invalid weight %q to be rejected", tc.value)
+		})
+	}
+}
+
+// TestInitGlobalPluginChainRejectsNonPositiveScoreWeight mirrors the
+// conf-level weight validation the global chain must keep enforcing.
+func TestInitGlobalPluginChainRejectsNonPositiveScoreWeight(t *testing.T) {
+	tt := []struct {
+		name      string
+		weight    int
+		setWeight bool
+		wantErr   bool
+	}{
+		{name: "weight omitted", weight: 0, setWeight: false, wantErr: true},
+		{name: "weight zero", weight: 0, setWeight: true, wantErr: true},
+		{name: "weight negative", weight: -1, setWeight: true, wantErr: true},
+		{name: "weight set", weight: 3, setWeight: true, wantErr: false},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			pw := conf.PluginWithWeight{Name: plugins.LeastRequestPluginName}
+			if tc.setWeight {
+				pw.Weight = tc.weight
+			}
+			routerConfig := &conf.RouterConfiguration{
+				Scheduler: conf.SchedulerConfiguration{
+					Plugins: conf.Plugins{
+						Score: conf.Score{Enabled: []conf.PluginWithWeight{pw}},
+					},
+				},
+			}
+			m := NewPluginChainManager(datastore.New())
+			err := m.InitGlobalPluginChain(routerConfig)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "must set a weight greater than 0")
+				return
+			}
+			require.NoError(t, err)
+			for _, sc := range m.globalChain.scores {
+				if sc.Plugin.Name() == plugins.LeastRequestPluginName {
+					assert.Equal(t, 3, sc.Weight)
+				}
+			}
+		})
+	}
+}
+
+// TestInitGlobalPluginChainRemovesConflictingRandom checks the legacy lenient
+// rule: random mixed with other score plugins is dropped, the rest builds.
+func TestInitGlobalPluginChainRemovesConflictingRandom(t *testing.T) {
+	tests := []struct {
+		name       string
+		enabled    []conf.PluginWithWeight
+		wantRandom bool
+	}{
+		{
+			name: "random with other score plugins - should remove random",
+			enabled: []conf.PluginWithWeight{
+				{Name: plugins.RandomPluginName, Weight: 10},
+				{Name: plugins.LeastLatencyPluginName, Weight: 20},
+				{Name: plugins.GPUCacheUsagePluginName, Weight: 30},
+			},
+			wantRandom: false,
+		},
+		{
+			name:       "only random plugin - should keep random",
+			enabled:    []conf.PluginWithWeight{{Name: plugins.RandomPluginName, Weight: 10}},
+			wantRandom: true,
+		},
+		{
+			name: "no random plugin - should keep all",
+			enabled: []conf.PluginWithWeight{
+				{Name: plugins.LeastLatencyPluginName, Weight: 20},
+				{Name: plugins.GPUCacheUsagePluginName, Weight: 30},
+			},
+			wantRandom: false,
+		},
+		{
+			name:       "empty score config - empty chain",
+			enabled:    nil,
+			wantRandom: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			routerConfig := &conf.RouterConfiguration{
+				Scheduler: conf.SchedulerConfiguration{
+					Plugins: conf.Plugins{
+						Score: conf.Score{Enabled: tt.enabled},
+					},
+				},
+			}
+			m := NewPluginChainManager(datastore.New())
+			require.NoError(t, m.InitGlobalPluginChain(routerConfig))
+
+			names := scorePluginNames(m.globalChain.scores)
+			if tt.wantRandom {
+				assert.Contains(t, names, plugins.RandomPluginName)
+			} else {
+				assert.NotContains(t, names, plugins.RandomPluginName)
+			}
+		})
+	}
+}
+
+// TestInitGlobalPluginChainRejectsNegativeMaxWaitingRequests mirrors the
+// conf-level least-request args validation the global chain must keep.
+func TestInitGlobalPluginChainRejectsNegativeMaxWaitingRequests(t *testing.T) {
+	tt := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{name: "negative", value: -1, wantErr: true},
+		{name: "large negative", value: -100, wantErr: true},
+		{name: "zero keeps the default", value: 0, wantErr: false},
+		{name: "positive", value: 4, wantErr: false},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			routerConfig := &conf.RouterConfiguration{
+				Scheduler: conf.SchedulerConfiguration{
+					PluginConfig: []conf.PluginConfig{{
+						Name: plugins.LeastRequestPluginName,
+						Args: runtime.RawExtension{Raw: []byte(fmt.Sprintf(`{"maxWaitingRequests": %d}`, tc.value))},
+					}},
+				},
+			}
+			m := NewPluginChainManager(datastore.New())
+			err := m.InitGlobalPluginChain(routerConfig)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "must not be negative")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
