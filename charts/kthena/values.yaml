@@ -186,6 +186,20 @@ networking:
     # -- Drain timeout for kthena-router graceful shutdown.
     # -- This should be less than terminationGracePeriodSeconds.
     drainTimeout: 5m
+    # batch configures the OpenAI-compatible batch API; only the files endpoints exist so far.
+    batch:
+      # -- Enable the batch API. It needs the Redis from the `redis-config` ConfigMap.
+      enabled: false
+      storage:
+        # -- Existing PersistentVolumeClaim shared by every router replica. Required when batch is enabled; ReadWriteMany when `replicas` is more than one.
+        claimName: ""
+        # -- Path where the claim is mounted in the router container.
+        mountPath: /var/lib/kthena/batch
+        # -- fsGroup that lets the router user write to the volume; `0` leaves it unset.
+        fsGroup: 65532
+      limits:
+        # -- Largest file one upload may have, in bytes.
+        maxFileBytes: 209715200
     # -- Tolerations for Kthena Router pods.
     tolerations: []
 

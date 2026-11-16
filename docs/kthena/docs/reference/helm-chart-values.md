@@ -21,6 +21,11 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.accessLog.enabled | bool | `true` | Enable router access logging. |
 | networking.kthenaRouter.accessLog.format | string | `"text"` | Access-log format. Supported values are `text` and `json`. |
 | networking.kthenaRouter.accessLog.output | string | `"stdout"` | Access-log destination: `stdout`, `stderr`, or a file path. |
+| networking.kthenaRouter.batch.enabled | bool | `false` | Enable the batch API. It needs the Redis from the `redis-config` ConfigMap. |
+| networking.kthenaRouter.batch.limits.maxFileBytes | int | `209715200` | Largest file one upload may have, in bytes. |
+| networking.kthenaRouter.batch.storage.claimName | string | `""` | Existing PersistentVolumeClaim shared by every router replica. Required when batch is enabled; ReadWriteMany when `replicas` is more than one. |
+| networking.kthenaRouter.batch.storage.fsGroup | int | `65532` | fsGroup that lets the router user write to the volume; `0` leaves it unset. |
+| networking.kthenaRouter.batch.storage.mountPath | string | `"/var/lib/kthena/batch"` | Path where the claim is mounted in the router container. |
 | networking.kthenaRouter.debugPort | int | `15000` | Debug server port for Kthena Router (localhost only). |
 | networking.kthenaRouter.drainTimeout | string | `"5m"` | This should be less than terminationGracePeriodSeconds. |
 | networking.kthenaRouter.enabled | bool | `true` | Enable Kthena Router. |
