@@ -216,9 +216,16 @@ func (s *State) UnexpectedRestart(pod *corev1.Pod) bool {
 	if pod.Status.Phase != corev1.PodRunning && pod.Status.Phase != corev1.PodPending {
 		return false
 	}
-	for _, status := range pod.Status.InitContainerStatuses {
-		if status.RestartCount > 0 {
-			return true
+	// Only once the Pod is Running have the init containers finished. Before
+	// that a restarted one is kubelet retrying it under the Pod's restartPolicy,
+	// which is how a transient failure is meant to be handled. Reporting it as a
+	// crash deletes a Pod kubelet is already fixing and throws away the work it
+	// has done, which in kthena's own examples is a model weight download.
+	if pod.Status.Phase == corev1.PodRunning {
+		for _, status := range pod.Status.InitContainerStatuses {
+			if status.RestartCount > 0 {
+				return true
+			}
 		}
 	}
 	for _, status := range pod.Status.ContainerStatuses {
