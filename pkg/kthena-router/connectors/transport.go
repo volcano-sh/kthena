@@ -394,8 +394,9 @@ func handleStreamingResponse(c *gin.Context, resp *http.Response) (int, error) {
 			parsed := handlers.ParseStreamRespForUsage(string(line))
 			if parsed.Usage.CompletionTokens > 0 {
 				klog.V(4).Infof("Parsed usage: %+v", parsed.Usage)
-				// Accumulate output tokens
-				totalOutputTokens += parsed.Usage.CompletionTokens
+				// Usage is cumulative and may be attached to every chunk, so
+				// keep the latest copy instead of summing them.
+				totalOutputTokens = parsed.Usage.CompletionTokens
 				// Check if token usage should be filtered
 				if v, ok := c.Get(common.TokenUsageKey); ok && v.(bool) {
 					return true

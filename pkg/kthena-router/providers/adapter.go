@@ -54,9 +54,11 @@ type TokenUsage struct {
 }
 
 // StreamUsageParseResult describes token usage found in a provider stream
-// event. SuppressLine is true when the event exists only to satisfy usage
-// reporting that the router itself injected into the request, so the line
-// must not be forwarded to the client.
+// event. When HasUsage is true, Usage is a cumulative snapshot of the request
+// so far, not an increment: a later snapshot supersedes an earlier one.
+// SuppressLine is true when the event exists only to satisfy usage reporting
+// that the router itself injected into the request, so the line must not be
+// forwarded to the client.
 type StreamUsageParseResult struct {
 	Usage        TokenUsage
 	HasUsage     bool
