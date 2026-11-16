@@ -298,12 +298,14 @@ func (m *RendererManager) launch(r *renderer) {
 func (m *RendererManager) waitReady(r *renderer) {
 	deadline := time.Now().Add(m.config.RendererStartupTimeout)
 	url := r.endpoint() + "/health"
+	ticker := time.NewTicker(healthPollInterval)
+	defer ticker.Stop()
 	for time.Now().Before(deadline) {
 		select {
 		case <-r.done:
 			m.setFailed(r, "renderer exited during startup")
 			return
-		case <-time.After(healthPollInterval):
+		case <-ticker.C:
 		}
 		resp, err := m.client.Get(url)
 		if err != nil {
