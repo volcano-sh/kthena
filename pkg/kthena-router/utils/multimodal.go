@@ -30,8 +30,8 @@ type mediaPart struct {
 }
 
 // mediaParts maps content part types to the media they carry. It covers the
-// OpenAI Chat Completions and Responses APIs, the vLLM extensions (audio_url,
-// video_url) and the Anthropic Messages API (image).
+// OpenAI Chat Completions and Responses APIs, the audio_url and video_url
+// extensions shared by vLLM and SGLang, and the Anthropic Messages API (image).
 var mediaParts = map[string]mediaPart{
 	"image_url":   {modality: common.ModalityImage, fields: []string{"image_url"}},
 	"input_image": {modality: common.ModalityImage, fields: []string{"image_url", "file_id"}},

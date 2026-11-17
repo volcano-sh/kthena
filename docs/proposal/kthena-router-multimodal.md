@@ -68,14 +68,16 @@ were text-only:
    same question about different images, and builds affinity on that false
    match. It cannot build affinity for requests that share an image.
 3. The `kvcache-aware` plugin tokenizes the text of a multimodal request and
-   looks up block hashes that cannot match the engine's, because vLLM mixes the
-   hash of each media item into the hashes of the blocks that hold its tokens.
+   looks up block hashes that cannot match the engine's, because the engine mixes
+   the hash of each media item into the cache keys of its tokens: vLLM into the
+   hashes of the blocks that hold them, SGLang into the pad token IDs that replace
+   them before the radix cache lookup.
 
 #### Goals
 
 - Recognize the media content parts of the OpenAI Chat Completions and Responses
-  APIs, the vLLM extensions (`audio_url`, `video_url`) and the Anthropic Messages
-  API.
+  APIs, the `audio_url` and `video_url` extensions shared by vLLM and SGLang, and
+  the Anthropic Messages API.
 - Give every media item a modality and a content identity that is stable across
   requests and router replicas, without fetching or decoding the media.
 - Expose the media items to scheduling plugins through the existing
@@ -177,8 +179,8 @@ type carries media is turned into a `MultiModalItem` through a single table:
 | `input_image` | OpenAI Responses                  | image    | `image_url`, `file_id`    |
 | `image`       | Anthropic Messages                | image    | `source` (`.data`/`.url`) |
 | `input_audio` | OpenAI Chat Completions           | audio    | `input_audio` (`.data`)   |
-| `audio_url`   | vLLM extension                    | audio    | `audio_url` (`.url`)      |
-| `video_url`   | vLLM extension                    | video    | `video_url` (`.url`)      |
+| `audio_url`   | vLLM and SGLang extension         | audio    | `audio_url` (`.url`)      |
+| `video_url`   | vLLM and SGLang extension         | video    | `video_url` (`.url`)      |
 
 A source field is either the source string itself or an object holding it in
 `url`, `data` or `file_id`. The item hash is `xxhash.Sum64String(source)`. Parts
@@ -229,10 +231,18 @@ The design leaves room for the advanced features in the non-goals:
   count — from a fixed per-model value, from the image size read out of inline
   data, or from the vLLM `/v1/chat/completions/render` endpoint — and add it to
   the input token count. `MultiModalItem` can grow fields such as width and
-  height when that component needs them.
+  height when that component needs them. This only changes the input token
+  count; prefix-cache keys stay as they are, because `prefix-cache` hashes the
+  rendered prompt in fixed-size byte blocks and a placeholder holds only the
+  modality and hash of its item.
 - **Encoder-cache affinity.** A score plugin with a `PostSchedule` hook can keep
   a per-pod LRU of item hashes and score pods by the share of the request's
-  media they recently served, independent of the text prefix.
+  media they recently served, independent of the text prefix. It pays off mainly
+  together with encode disaggregation, where encode pods keep a large encoder
+  cache. In aggregated mode, media in a shared prefix is already reused through
+  the KV cache that `prefix-cache` routes to, and the engine's encoder cache
+  holds only about one scheduling step of embeddings, so the extra gain is
+  limited to the same media following a different prefix.
 - **Exact multimodal KV matching.** With a tokenizer that returns multimodal
   placeholder positions and hashes (for example the vLLM render endpoint, or
   client-provided `multi_modal_uuids`), `kvcache-aware` can compute engine-equal

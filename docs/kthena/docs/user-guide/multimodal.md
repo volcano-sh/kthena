@@ -12,8 +12,8 @@ The router recognizes the following content parts. Other parts are forwarded as 
 | ----------------- | ------------------------------------------------ | -------- |
 | `image_url`       | OpenAI Chat Completions (`/v1/chat/completions`) | image    |
 | `input_audio`     | OpenAI Chat Completions                          | audio    |
-| `audio_url`       | vLLM extension of Chat Completions               | audio    |
-| `video_url`       | vLLM extension of Chat Completions               | video    |
+| `audio_url`       | vLLM and SGLang extension of Chat Completions    | audio    |
+| `video_url`       | vLLM and SGLang extension of Chat Completions    | video    |
 | `input_image`     | OpenAI Responses (`/v1/responses`)               | image    |
 | `image`           | Anthropic Messages (`/v1/messages`)              | image    |
 
@@ -170,7 +170,7 @@ Because the hash is taken from what the client sent, the same image sent once as
 
 ### KV Cache Aware
 
-vLLM includes the hash of each media item in the hashes of the KV blocks that hold its tokens. The router cannot compute these hashes from text, so the [`kvcache-aware`](./kvcache-aware) plugin does not score requests that contain media. They are scheduled by the other score plugins, which is why `kvcache-aware` must always be enabled together with another score plugin such as `least-request`.
+vLLM includes the hash of each media item in the hashes of the KV blocks that hold its tokens, and SGLang replaces the tokens of each media item with pad token IDs derived from its hash. The router cannot compute these cache keys from text, so the [`kvcache-aware`](./kvcache-aware) plugin does not score requests that contain media. They are scheduled by the other score plugins, which is why `kvcache-aware` must always be enabled together with another score plugin such as `least-request`.
 
 ### Other Plugins
 
