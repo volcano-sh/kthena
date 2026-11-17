@@ -153,6 +153,9 @@ func parseMessage(role string, content any) (common.Message, bool) {
 
 	parts := make([]string, 0, len(contentList))
 	var media []common.MultiModalItem
+	// textLen is the length of the text parts joined so far, which is where a
+	// media part read now sits in Content.
+	textLen := 0
 	for _, item := range contentList {
 		contentMap, ok := item.(map[string]interface{})
 		if !ok {
@@ -163,6 +166,7 @@ func parseMessage(role string, content any) (common.Message, bool) {
 			case "text", "input_text", "output_text":
 			default:
 				if mediaItem, ok := parseMediaPart(contentType, contentMap); ok {
+					mediaItem.Offset = textLen
 					media = append(media, mediaItem)
 				}
 				continue
@@ -172,6 +176,10 @@ func parseMessage(role string, content any) (common.Message, bool) {
 		if !ok {
 			continue
 		}
+		if len(parts) > 0 {
+			textLen++ // the "\n" joining this part to the previous one
+		}
+		textLen += len(text)
 		parts = append(parts, text)
 	}
 	if len(parts) == 0 && len(media) == 0 {
@@ -187,8 +195,9 @@ func GetPromptString(chatMessage *common.ChatMessage) string {
 }
 
 // GetPromptStringWithMedia renders a prompt like GetPromptString, and renders
-// each media item as a placeholder holding its hash at the start of its
-// message, so prompts that differ only in their media do not render the same.
+// each media item as a placeholder holding its hash at the item's position in
+// its message, so prompts that differ only in their media, or in the order of
+// their media and text, do not render the same.
 func GetPromptStringWithMedia(chatMessage *common.ChatMessage) string {
 	return renderPrompt(chatMessage, true)
 }
@@ -207,13 +216,27 @@ func renderPrompt(chatMessage *common.ChatMessage, withMedia bool) string {
 		}
 		fmt.Fprintf(&result, "<|im_start|>%s\n", msg.Role)
 		if withMedia {
-			for _, item := range msg.MultiModal {
-				fmt.Fprintf(&result, "<|%s:%016x|>", item.Modality, item.Hash)
-			}
+			writeContentWithMedia(&result, msg)
+		} else {
+			result.WriteString(msg.Content)
 		}
-		fmt.Fprintf(&result, "%s<|im_end|>\n", msg.Content)
+		result.WriteString("<|im_end|>\n")
 	}
 	return result.String()
+}
+
+// writeContentWithMedia writes the content of msg with a placeholder holding
+// the hash of each media item inserted at the item's offset. Offsets out of
+// order or beyond the content are clamped, so every item is still written.
+func writeContentWithMedia(w *strings.Builder, msg common.Message) {
+	pos := 0
+	for _, item := range msg.MultiModal {
+		offset := min(max(item.Offset, pos), len(msg.Content))
+		w.WriteString(msg.Content[pos:offset])
+		fmt.Fprintf(w, "<|%s:%016x|>", item.Modality, item.Hash)
+		pos = offset
+	}
+	w.WriteString(msg.Content[pos:])
 }
 
 func LoadEnv(key, defaultValue string) string {

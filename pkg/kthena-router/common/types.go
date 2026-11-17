@@ -41,6 +41,9 @@ type MultiModalItem struct {
 	// Hash identifies the item by what the client sent: the URL for media
 	// passed by reference, or the encoded payload for inline media.
 	Hash uint64
+	// Offset is the byte offset in Message.Content at which the item appears,
+	// so the item keeps its position relative to the text of its message.
+	Offset int
 }
 
 // Message represents a single message in a chat conversation

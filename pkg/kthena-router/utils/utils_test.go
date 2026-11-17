@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"testing"
@@ -27,8 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func image(source string) common.MultiModalItem {
-	return common.MultiModalItem{Modality: common.ModalityImage, Hash: xxhash.Sum64String(source)}
+func image(source string, offset int) common.MultiModalItem {
+	return common.MultiModalItem{Modality: common.ModalityImage, Hash: xxhash.Sum64String(source), Offset: offset}
 }
 
 func TestGetNamespaceName(t *testing.T) {
@@ -143,7 +144,7 @@ func TestParsePrompt(t *testing.T) {
 			want: &common.ChatMessage{Messages: []common.Message{{
 				Role:       "user",
 				Content:    "describe",
-				MultiModal: []common.MultiModalItem{image("https://example.com/cat.png")},
+				MultiModal: []common.MultiModalItem{image("https://example.com/cat.png", 8)},
 			}}},
 		},
 		{
@@ -159,7 +160,7 @@ func TestParsePrompt(t *testing.T) {
 			},
 			want: &common.ChatMessage{Messages: []common.Message{{
 				Role:       "user",
-				MultiModal: []common.MultiModalItem{image("https://example.com/cat.png")},
+				MultiModal: []common.MultiModalItem{image("https://example.com/cat.png", 0)},
 			}}},
 		},
 		{
@@ -194,11 +195,11 @@ func TestParsePrompt(t *testing.T) {
 				Role:    "user",
 				Content: "compare",
 				MultiModal: []common.MultiModalItem{
-					image("data:image/png;base64,iVBORw0KGgo="),
-					image("https://example.com/dog.png"),
-					{Modality: common.ModalityAudio, Hash: xxhash.Sum64String("UklGRg==")},
-					{Modality: common.ModalityAudio, Hash: xxhash.Sum64String("https://example.com/a.mp3")},
-					{Modality: common.ModalityVideo, Hash: xxhash.Sum64String("https://example.com/v.mp4")},
+					image("data:image/png;base64,iVBORw0KGgo=", 0),
+					image("https://example.com/dog.png", 7),
+					{Modality: common.ModalityAudio, Hash: xxhash.Sum64String("UklGRg=="), Offset: 7},
+					{Modality: common.ModalityAudio, Hash: xxhash.Sum64String("https://example.com/a.mp3"), Offset: 7},
+					{Modality: common.ModalityVideo, Hash: xxhash.Sum64String("https://example.com/v.mp4"), Offset: 7},
 				},
 			}}},
 		},
@@ -217,7 +218,7 @@ func TestParsePrompt(t *testing.T) {
 			want: &common.ChatMessage{Messages: []common.Message{{
 				Role:       "user",
 				Content:    "describe",
-				MultiModal: []common.MultiModalItem{image("iVBORw0KGgo="), image("https://example.com/cat.png")},
+				MultiModal: []common.MultiModalItem{image("iVBORw0KGgo=", 0), image("https://example.com/cat.png", 0)},
 			}}},
 		},
 		{
@@ -337,7 +338,7 @@ func TestParsePrompt(t *testing.T) {
 			},
 			want: &common.ChatMessage{Messages: []common.Message{{
 				Role:       "user",
-				MultiModal: []common.MultiModalItem{image("https://example.com/image.png"), image("file-1")},
+				MultiModal: []common.MultiModalItem{image("https://example.com/image.png", 0), image("file-1", 0)},
 			}}},
 			wantErr: false,
 		},
@@ -471,6 +472,19 @@ func TestGetPromptStringWithMedia(t *testing.T) {
 			want: "<|im_start|>user\n<|audio:00000000000000ff|><|im_end|>\n" +
 				"<|im_start|>user\n<|image:0000000000000001|><|video:0000000000000abc|>describe<|im_end|>\n",
 		},
+		{
+			name: "media rendered at their offsets in the text",
+			chatMessage: common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", Content: "first\nsecond", MultiModal: []common.MultiModalItem{
+						{Modality: common.ModalityImage, Hash: 0x1, Offset: 0},
+						{Modality: common.ModalityImage, Hash: 0x2, Offset: 5},
+						{Modality: common.ModalityAudio, Hash: 0x3, Offset: 12},
+					}},
+				},
+			},
+			want: "<|im_start|>user\n<|image:0000000000000001|>first<|image:0000000000000002|>\nsecond<|audio:0000000000000003|><|im_end|>\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -479,6 +493,31 @@ func TestGetPromptStringWithMedia(t *testing.T) {
 				t.Errorf("GetPromptStringWithMedia() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGetPromptStringWithMediaKeepsPartOrder(t *testing.T) {
+	text := map[string]interface{}{"type": "text", "text": "describe"}
+	img := map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "https://example.com/cat.png"}}
+	render := func(parts ...interface{}) string {
+		t.Helper()
+		prompt, err := ParsePrompt(map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"role": "user", "content": parts}},
+		})
+		if err != nil {
+			t.Fatalf("ParsePrompt() error = %v", err)
+		}
+		return GetPromptStringWithMedia(prompt)
+	}
+
+	placeholder := fmt.Sprintf("<|image:%016x|>", xxhash.Sum64String("https://example.com/cat.png"))
+	textFirst := render(text, img)
+	imageFirst := render(img, text)
+	if want := "<|im_start|>user\ndescribe" + placeholder + "<|im_end|>\n"; textFirst != want {
+		t.Errorf("text then image rendered %q, want %q", textFirst, want)
+	}
+	if want := "<|im_start|>user\n" + placeholder + "describe<|im_end|>\n"; imageFirst != want {
+		t.Errorf("image then text rendered %q, want %q", imageFirst, want)
 	}
 }
 

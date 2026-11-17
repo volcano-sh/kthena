@@ -154,7 +154,7 @@ The router never downloads or decodes media. For each media part it records the 
 
 ### Prefix Cache
 
-The [`prefix-cache`](./prefix-cache) plugin, enabled by default in the Helm chart, renders each media item as a placeholder that holds its hash, at the start of its message:
+The [`prefix-cache`](./prefix-cache) plugin, enabled by default in the Helm chart, renders each media item as a placeholder that holds its hash, at the position of the media part in its message:
 
 ```text
 <|im_start|>user

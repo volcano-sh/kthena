@@ -46,8 +46,7 @@ carries media as content parts next to the text:
 }
 ```
 
-Media differs from text in ways that matter to a router (see
-[Serving Multimodal at Scale in llm-d](https://llm-d.ai/blog/serving-multimodal-at-scale-in-llm-d)):
+Media differs from text in ways that matter to a router:
 
 - **Identity is content-addressed, not prefix-addressed.** An image either
   matches or not as a whole, keyed by a hash of its content. The engine caches
@@ -150,6 +149,8 @@ type MultiModalItem struct {
 	// Hash identifies the item by what the client sent: the URL for media
 	// passed by reference, or the encoded payload for inline media.
 	Hash uint64
+	// Offset is the byte offset in Message.Content at which the item appears.
+	Offset int
 }
 
 type Message struct {
@@ -161,8 +162,9 @@ type Message struct {
 func (m *ChatMessage) HasMultiModal() bool
 ```
 
-Items are kept per message and in request order, so later plugins can relate a
-media item to its position in the conversation.
+Items are kept per message and in request order, and each item records its
+offset in the joined text of its message, so later plugins can relate a media
+item to its position in the conversation.
 
 #### Parsing
 
@@ -187,8 +189,8 @@ entry.
 #### Prompt rendering
 
 A new `utils.GetPromptStringWithMedia` renders the prompt like
-`utils.GetPromptString`, plus a placeholder for each media item at the start of
-its message:
+`utils.GetPromptString`, plus a placeholder for each media item at its offset in
+the text of its message:
 
 ```text
 <|im_start|>user
