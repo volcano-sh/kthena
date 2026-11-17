@@ -55,7 +55,7 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// The NIXL connector will fail due to network issues (prefill request)
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", 0, nil)
+		_, err := connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
 		if err == nil {
 			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
 		}
@@ -151,7 +151,7 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", 0, nil)
+		_, err := connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
 		if err == nil {
 			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
 		}
@@ -245,7 +245,7 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", 0, nil)
+		_, err := connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
 		if err == nil {
 			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
 		}
@@ -289,7 +289,7 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", 0, nil)
+		_, err := connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
 		if err == nil {
 			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
 		}
@@ -346,7 +346,7 @@ func TestNIXLConnectorProxy(t *testing.T) {
 		}
 
 		// The NIXL connector will fail due to network issues
-		_, err := connector.Proxy(c, reqBody, "localhost:8000", "localhost:8001", 0, nil)
+		_, err := connector.Proxy(c, reqBody, "127.0.0.1:1", "127.0.0.1:2", 0, nil)
 		if err == nil {
 			t.Error("Expected NIXL connector Proxy to return error due to network/connection issues")
 		}
