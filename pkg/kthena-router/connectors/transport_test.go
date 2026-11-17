@@ -775,16 +775,29 @@ func TestHandleStreamingResponse(t *testing.T) {
 		name         string
 		responseBody string
 		tokenUsage   bool
+		wantTokens   int
 	}{
 		{
 			name:         "streaming response with usage",
 			responseBody: "data: {\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n",
 			tokenUsage:   false,
+			wantTokens:   20,
 		},
 		{
 			name:         "streaming response with token usage filtering",
 			responseBody: "data: {\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n",
 			tokenUsage:   true,
+			wantTokens:   20,
+		},
+		{
+			// Each chunk carries the cumulative total so far, so the last
+			// copy is the request's output, not their sum.
+			name: "streaming response with cumulative usage on every chunk",
+			responseBody: "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1,\"total_tokens\":11}}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n" +
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n" +
+				"data: [DONE]\n\n",
+			wantTokens: 2,
 		},
 		{
 			name:         "streaming response without usage",
@@ -813,10 +826,11 @@ func TestHandleStreamingResponse(t *testing.T) {
 			}
 			resp.Header.Set("Content-Type", "text/event-stream")
 
-			_, err := handleStreamingResponse(c, resp)
+			tokens, err := handleStreamingResponse(c, resp)
 
 			// Should not return error
 			assert.NoError(t, err)
+			assert.Equal(t, tt.wantTokens, tokens)
 		})
 	}
 }

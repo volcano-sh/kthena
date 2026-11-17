@@ -236,6 +236,22 @@ func TestExternalProviderObservabilityStreamingUsageProtocols(t *testing.T) {
 			wantOutputTokens: 5,
 		},
 		{
+			// vLLM with --enable-force-include-usage, or a client sending
+			// continuous_usage_stats, attaches running totals to every chunk.
+			name:         "openai chat completions with cumulative usage on every chunk",
+			providerType: aiv1alpha1.OpenAI,
+			path:         "/v1/chat/completions",
+			requestBody:  `{"messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true,"continuous_usage_stats":true}}`,
+			responseBody: "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":0,\"total_tokens\":12}}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":1,\"total_tokens\":13}}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":2,\"total_tokens\":14}}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"content\":\"c\"}}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\n" +
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\n" +
+				"data: [DONE]\n\n",
+			responseMarker:   "data: [DONE]",
+			wantOutputTokens: 3,
+		},
+		{
 			name:         "anthropic messages",
 			providerType: aiv1alpha1.Anthropic,
 			path:         "/v1/messages",

@@ -31,9 +31,12 @@ import (
 // to c's streaming response, using parser to extract usage as each line is read
 // and, if forwarded, written. A line is dropped instead of forwarded when
 // parser reports SuppressLine (used for a usage-only event the router itself
-// requested on the client's behalf). onUsage, if non-nil, is invoked
-// synchronously with usage found on a per-line parse and again with the final
-// usage once the stream completes.
+// requested on the client's behalf). onUsage, if non-nil, is invoked at most
+// once, synchronously, after the stream ends: with the final usage
+// parser.FinalStreamUsage reports or, failing that, with the last usage a
+// per-line parse found. Per-line usage is treated as a cumulative snapshot,
+// since OpenAI-compatible backends may attach running totals to every chunk,
+// so earlier copies are superseded rather than reported.
 //
 // It returns the completion-token count from the final usage parser.FinalStreamUsage
 // reports, and any streaming error. A client disconnect before parser reports the
@@ -43,15 +46,15 @@ import (
 func ForwardStream(c *gin.Context, body io.Reader, parser ResponseUsageParser, onUsage func(TokenUsage)) (int, error) {
 	reader := bufio.NewReader(body)
 	var streamErr error
+	var latestUsage TokenUsage
+	hasLatestUsage := false
 	clientDisconnected := c.Stream(func(w io.Writer) bool {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
 			parseResult := parser.ParseStreamLine(string(line))
 			if parseResult.HasUsage {
 				klog.V(4).Infof("Parsed usage: %+v", parseResult.Usage)
-				if onUsage != nil {
-					onUsage(parseResult.Usage)
-				}
+				latestUsage, hasLatestUsage = parseResult.Usage, true
 				if parseResult.SuppressLine {
 					return true
 				}
@@ -85,9 +88,17 @@ func ForwardStream(c *gin.Context, body io.Reader, parser ResponseUsageParser, o
 	}
 
 	totalTokens := 0
-	if usage, ok := parser.FinalStreamUsage(); ok {
-		klog.V(4).Infof("Parsed usage: %+v", usage)
+	usage, ok := parser.FinalStreamUsage()
+	if ok {
 		totalTokens = usage.CompletionTokens
+	} else if hasLatestUsage {
+		// The parser reports usage per line (OpenAI chat/completions) rather
+		// than at a terminal event, or the stream was cut off: account for the
+		// last usage read so it is neither lost nor counted once per chunk.
+		usage, ok = latestUsage, true
+	}
+	if ok {
+		klog.V(4).Infof("Final usage: %+v", usage)
 		if onUsage != nil {
 			onUsage(usage)
 		}
