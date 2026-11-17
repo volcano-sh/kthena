@@ -74,12 +74,12 @@ func ValidateLeastLatencyArgs(pluginArg runtime.RawExtension) error {
 	return nil
 }
 
-func NewLeastLatency(_ BuildContext, pluginArg runtime.RawExtension) *LeastLatency {
+func NewLeastLatency(buildCtx BuildContext) *LeastLatency {
 	leastLatencyArgs := LeastLatencyArgs{
 		TTFTTPOTWeightFactor: defaultTTFTTPOTWeightFactor,
 	}
-	if len(pluginArg.Raw) > 0 {
-		if err := yaml.Unmarshal(pluginArg.Raw, &leastLatencyArgs); err != nil {
+	if len(buildCtx.Args.Raw) > 0 {
+		if err := yaml.Unmarshal(buildCtx.Args.Raw, &leastLatencyArgs); err != nil {
 			klog.Errorf("Unmarshal LeastLatencyArgs error, setting default value: %v", err)
 		}
 	}

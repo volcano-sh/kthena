@@ -303,7 +303,7 @@ func TestChainNeedsOnFlightSync(t *testing.T) {
 		t.Helper()
 		meta, ok := plugins.GetPlugin(name)
 		require.True(t, ok)
-		p, err := meta.NewScore(plugins.BuildContext{}, store, runtime.RawExtension{})
+		p, err := meta.NewScore(plugins.BuildContext{Store: store})
 		require.NoError(t, err)
 		return framework.WeightedScorePlugin{Plugin: p}
 	}
@@ -311,7 +311,7 @@ func TestChainNeedsOnFlightSync(t *testing.T) {
 		t.Helper()
 		meta, ok := plugins.GetPlugin(name)
 		require.True(t, ok)
-		f, err := meta.NewFilter(plugins.BuildContext{}, runtime.RawExtension{})
+		f, err := meta.NewFilter(plugins.BuildContext{})
 		require.NoError(t, err)
 		return f
 	}

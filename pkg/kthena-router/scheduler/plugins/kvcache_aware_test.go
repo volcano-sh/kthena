@@ -2722,9 +2722,9 @@ func TestKVCacheAware_Close(t *testing.T) {
 		if !ok {
 			t.Fatalf("plugin %s not registered", KVCacheAwarePluginName)
 		}
-		plugin, err := meta.NewScore(BuildContext{}, store, runtime.RawExtension{
+		plugin, err := meta.NewScore(BuildContext{Store: store, Args: runtime.RawExtension{
 			Raw: []byte(`{"indexMode": "memory"}`),
-		})
+		}})
 		if err != nil {
 			t.Fatalf("failed to create kvcache-aware plugin: %v", err)
 		}

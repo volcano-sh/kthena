@@ -118,7 +118,7 @@ type PrefixCacheArgs struct {
 
 // Default token block size of vLLM is 16, and a good guess of average characters per token is 4.
 // So we use 64 as the default block size.
-func NewPrefixCache(_ BuildContext, store datastore.Store, pluginArg runtime.RawExtension) *PrefixCache {
+func NewPrefixCache(buildCtx BuildContext) *PrefixCache {
 	prefixCacheArgs := PrefixCacheArgs{
 		BlockSizeToHash:  defaultPrefixCacheBlockSizeToHash,
 		MaxBlocksToMatch: defaultPrefixCacheMaxBlocksToMatch,
@@ -126,8 +126,8 @@ func NewPrefixCache(_ BuildContext, store datastore.Store, pluginArg runtime.Raw
 		TopKMatches:      defaultPrefixCacheTopKMatches,
 	}
 
-	if len(pluginArg.Raw) > 0 {
-		if err := yaml.Unmarshal(pluginArg.Raw, &prefixCacheArgs); err != nil {
+	if len(buildCtx.Args.Raw) > 0 {
+		if err := yaml.Unmarshal(buildCtx.Args.Raw, &prefixCacheArgs); err != nil {
 			klog.Errorf("Failed to unmarshal PrefixCacheArgs, using default values: %v", err)
 			prefixCacheArgs = PrefixCacheArgs{
 				BlockSizeToHash:  defaultPrefixCacheBlockSizeToHash,
@@ -156,7 +156,7 @@ func NewPrefixCache(_ BuildContext, store datastore.Store, pluginArg runtime.Raw
 		blockSizeToHash:  prefixCacheArgs.BlockSizeToHash,
 		maxBlocksToMatch: prefixCacheArgs.MaxBlocksToMatch,
 	}
-	p.store = cache.NewModelPrefixStore(store, prefixCacheArgs.MaxHashCacheSize, prefixCacheArgs.TopKMatches)
+	p.store = cache.NewModelPrefixStore(buildCtx.Store, prefixCacheArgs.MaxHashCacheSize, prefixCacheArgs.TopKMatches)
 	p.unregisterEntriesMetric = metrics.DefaultMetrics.RegisterPrefixCacheEntriesProvider(p.store.EntryCount)
 	return p
 }

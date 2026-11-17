@@ -164,12 +164,12 @@ func (b KVCacheAwareBlock) String(prefix string) string {
 	return fmt.Sprintf("%s%s@%d", prefix, b.ModelName, b.ChunkHash)
 }
 
-func NewKVCacheAware(bc BuildContext, store datastore.Store, pluginArg runtime.RawExtension) (*KVCacheAware, error) {
-	klog.Infof("KVCacheAware: initializing plugin, raw args length=%d", len(pluginArg.Raw))
+func NewKVCacheAware(buildCtx BuildContext) (*KVCacheAware, error) {
+	klog.Infof("KVCacheAware: initializing plugin, raw args length=%d", len(buildCtx.Args.Raw))
 
 	var args KVCacheAwareArgs
-	if len(pluginArg.Raw) > 0 {
-		if err := yaml.Unmarshal(pluginArg.Raw, &args); err != nil {
+	if len(buildCtx.Args.Raw) > 0 {
+		if err := yaml.Unmarshal(buildCtx.Args.Raw, &args); err != nil {
 			klog.Warningf("Failed to unmarshal KVCacheAwareArgs: %v", err)
 		}
 	}
@@ -207,14 +207,14 @@ func NewKVCacheAware(bc BuildContext, store datastore.Store, pluginArg runtime.R
 		maxBlocksToMatch: maxBlocksToMatch,
 		keyPrefix:        kvCacheKeyPrefix,
 		indexMode:        indexMode,
-		BuildContext:     bc,
+		BuildContext:     buildCtx,
 		processor:        &TokenBlockProcessor{blockSize: blockSizeToHash},
 		tokenizerManager: manager,
 	}
 
 	if indexMode == kvCacheIndexModeMemory {
 		plugin.memoryIndex = NewKVBlockMemoryIndex(args.MaxBlocksPerPod)
-		if err := plugin.startMemoryMode(store, args); err != nil {
+		if err := plugin.startMemoryMode(buildCtx.Store, args); err != nil {
 			return nil, err
 		}
 		return plugin, nil

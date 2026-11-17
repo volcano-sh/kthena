@@ -63,16 +63,13 @@ type PluginChain struct {
 // Acquire marks a request as using the chain; pair it with Release.
 func (c *PluginChain) Acquire() { c.inflight.Add(1) }
 
-func (c *PluginChain) isGlobal() bool {
-	return c.builtFrom == nil
-}
-
 // ownerName identifies the chain in logs; "global" when built from no profile.
 func (c *PluginChain) ownerName() string {
-	if c.isGlobal() {
-		return "global"
+	var key types.NamespacedName
+	if c.builtFrom != nil {
+		key = types.NamespacedName{Namespace: c.builtFrom.Namespace, Name: c.builtFrom.Name}
 	}
-	return c.builtFrom.Namespace + "/" + c.builtFrom.Name
+	return plugins.OwnerName(key)
 }
 
 // Release marks a request done; the last release on a retired chain
@@ -80,7 +77,7 @@ func (c *PluginChain) ownerName() string {
 func (c *PluginChain) Release() {
 	// The global chain is not released here; its release timing is not
 	// settled yet.
-	if c.isGlobal() {
+	if c.builtFrom == nil {
 		return
 	}
 	if c.inflight.Add(-1) < 0 {
@@ -415,7 +412,10 @@ func (m *PluginChainManager) reconcileProfile(key types.NamespacedName, profileC
 func (m *PluginChainManager) buildChain(profile *aiv1alpha1.SchedulerProfile) (chain *PluginChain, buildErr error) {
 	var filters []framework.FilterPlugin
 	var scores []framework.WeightedScorePlugin
-	bc := plugins.BuildContext{Profile: types.NamespacedName{Namespace: profile.Namespace, Name: profile.Name}}
+	base := plugins.BuildContext{
+		Profile: types.NamespacedName{Namespace: profile.Namespace, Name: profile.Name},
+		Store:   m.store,
+	}
 	//If chain construction fails, close the already constructed plugin instance.
 	defer func() {
 		if chain == nil {
@@ -449,7 +449,9 @@ func (m *PluginChainManager) buildChain(profile *aiv1alpha1.SchedulerProfile) (c
 			return nil, fmt.Errorf("plugins.filter.enabled[%d]: duplicate plugin %q", i, name)
 		}
 		seenFilters.Insert(name)
-		f, err := meta.NewFilter(bc, argsByPlugin[name])
+		pluginCtx := base
+		pluginCtx.Args = argsByPlugin[name]
+		f, err := meta.NewFilter(pluginCtx)
 		if err != nil {
 			return nil, fmt.Errorf("plugins.filter.enabled[%d] (%s): %w", i, name, err)
 		}
@@ -473,7 +475,9 @@ func (m *PluginChainManager) buildChain(profile *aiv1alpha1.SchedulerProfile) (c
 		if pw.Weight <= 0 {
 			return nil, fmt.Errorf("plugins.score.enabled[%d] (%s): weight must be greater than 0, got %d", i, pw.Name, pw.Weight)
 		}
-		sc, err := meta.NewScore(bc, m.store, argsByPlugin[pw.Name])
+		pluginCtx := base
+		pluginCtx.Args = argsByPlugin[pw.Name]
+		sc, err := meta.NewScore(pluginCtx)
 		if err != nil {
 			return nil, fmt.Errorf("plugins.score.enabled[%d] (%s): %w", i, pw.Name, err)
 		}
@@ -593,7 +597,7 @@ func (m *PluginChainManager) InitGlobalPluginChain(routerConfig *conf.RouterConf
 		}
 	}
 
-	bc := plugins.BuildContext{}
+	base := plugins.BuildContext{Store: m.store}
 	var filters []framework.FilterPlugin
 	var scores []framework.WeightedScorePlugin
 
@@ -603,7 +607,9 @@ func (m *PluginChainManager) InitGlobalPluginChain(routerConfig *conf.RouterConf
 			klog.Errorf("Failed to get plugin %s.", pluginName)
 			continue
 		}
-		f, err := meta.NewFilter(bc, pluginsArgMap[pluginName])
+		pluginCtx := base
+		pluginCtx.Args = pluginsArgMap[pluginName]
+		f, err := meta.NewFilter(pluginCtx)
 		if err != nil {
 			return fmt.Errorf("failed to build filter plugin %s: %w", pluginName, err)
 		}
@@ -618,7 +624,9 @@ func (m *PluginChainManager) InitGlobalPluginChain(routerConfig *conf.RouterConf
 			klog.Errorf("Failed to get plugin %s.", pluginName)
 			continue
 		}
-		sc, err := meta.NewScore(bc, m.store, pluginsArgMap[pluginName])
+		pluginCtx := base
+		pluginCtx.Args = pluginsArgMap[pluginName]
+		sc, err := meta.NewScore(pluginCtx)
 		if err != nil {
 			return fmt.Errorf("failed to build score plugin %s: %w", pluginName, err)
 		}
