@@ -776,6 +776,9 @@ func TestHandleStreamingResponse(t *testing.T) {
 		responseBody string
 		tokenUsage   bool
 		wantTokens   int
+		// wantBody is what the client receives; empty means the response
+		// body is forwarded unchanged.
+		wantBody string
 	}{
 		{
 			name:         "streaming response with usage",
@@ -788,6 +791,7 @@ func TestHandleStreamingResponse(t *testing.T) {
 			responseBody: "data: {\"id\":\"test\",\"object\":\"text_completion\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n",
 			tokenUsage:   true,
 			wantTokens:   20,
+			wantBody:     "\ndata: [DONE]\n\n",
 		},
 		{
 			// Each chunk carries the cumulative total so far, so the last
@@ -798,6 +802,48 @@ func TestHandleStreamingResponse(t *testing.T) {
 				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n" +
 				"data: [DONE]\n\n",
 			wantTokens: 2,
+		},
+		{
+			// vLLM --enable-force-include-usage attaches cumulative usage to
+			// every content chunk. With router-injected usage only the
+			// usage-only chunk is withheld; the content still reaches the client.
+			name: "router-injected usage with usage on every content chunk",
+			responseBody: "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":0,\"total_tokens\":10}}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1,\"total_tokens\":11}}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n" +
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n" +
+				"data: [DONE]\n\n",
+			tokenUsage: true,
+			wantTokens: 2,
+			wantBody: "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":0,\"total_tokens\":10}}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1,\"total_tokens\":11}}\n\n" +
+				"data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n" +
+				"\ndata: [DONE]\n\n",
+		},
+		{
+			// total_tokens is optional; a usage-only chunk without it is
+			// still withheld when the router injected include_usage.
+			name: "router-injected usage-only chunk without total_tokens",
+			responseBody: "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n" +
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1}}\n\n" +
+				"data: [DONE]\n\n",
+			tokenUsage: true,
+			wantTokens: 1,
+			wantBody: "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n" +
+				"\ndata: [DONE]\n\n",
+		},
+		{
+			// A usage-only chunk with no completion tokens (the model produced
+			// no output) still carries usage and is withheld when the router
+			// injected include_usage.
+			name: "router-injected usage-only chunk with zero completion tokens",
+			responseBody: "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":0,\"total_tokens\":10}}\n\n" +
+				"data: [DONE]\n\n",
+			tokenUsage: true,
+			wantTokens: 0,
+			wantBody: "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
+				"\ndata: [DONE]\n\n",
 		},
 		{
 			name:         "streaming response without usage",
@@ -831,6 +877,11 @@ func TestHandleStreamingResponse(t *testing.T) {
 			// Should not return error
 			assert.NoError(t, err)
 			assert.Equal(t, tt.wantTokens, tokens)
+			wantBody := tt.wantBody
+			if wantBody == "" {
+				wantBody = tt.responseBody
+			}
+			assert.Equal(t, wantBody, w.Body.String())
 		})
 	}
 }

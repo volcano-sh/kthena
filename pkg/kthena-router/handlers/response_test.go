@@ -17,6 +17,7 @@ limitations under the License.
 package handlers
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -70,59 +71,65 @@ func TestParseStreamRespForUsage(t *testing.T) {
 	tests := []struct {
 		name         string
 		responseText string
-		want         OpenAIResponse
+		want         OpenAIStreamResponse
 	}{
 		{
 			name:         "valid stream with usage",
 			responseText: `data: {"id":"test-id","object":"text_completion","created":1739400043,"model":"tweet-summary-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}`,
-			want: OpenAIResponse{
-				ID:      "test-id",
-				Object:  "text_completion",
-				Created: 1739400043,
-				Model:   "tweet-summary-0",
-				Usage: Usage{
-					PromptTokens:     7,
-					CompletionTokens: 10,
-					TotalTokens:      17,
+			want: OpenAIStreamResponse{
+				OpenAIResponse: OpenAIResponse{
+					ID:      "test-id",
+					Object:  "text_completion",
+					Created: 1739400043,
+					Model:   "tweet-summary-0",
+					Usage: Usage{
+						PromptTokens:     7,
+						CompletionTokens: 10,
+						TotalTokens:      17,
+					},
 				},
+				Choices: []json.RawMessage{},
 			},
 		},
 		{
 			name:         "stream [DONE]",
 			responseText: `data: [DONE]`,
-			want:         OpenAIResponse{},
+			want:         OpenAIStreamResponse{},
 		},
 		{
 			// SSE strips at most one space after the colon and does not require
 			// it, so a backend writing the field tightly still carries usage.
 			name:         "valid stream with usage and no space after data:",
 			responseText: `data:{"id":"test-id","object":"text_completion","created":1739400043,"model":"tweet-summary-0","choices":[],"usage":{"prompt_tokens":7,"total_tokens":17,"completion_tokens":10}}`,
-			want: OpenAIResponse{
-				ID:      "test-id",
-				Object:  "text_completion",
-				Created: 1739400043,
-				Model:   "tweet-summary-0",
-				Usage: Usage{
-					PromptTokens:     7,
-					CompletionTokens: 10,
-					TotalTokens:      17,
+			want: OpenAIStreamResponse{
+				OpenAIResponse: OpenAIResponse{
+					ID:      "test-id",
+					Object:  "text_completion",
+					Created: 1739400043,
+					Model:   "tweet-summary-0",
+					Usage: Usage{
+						PromptTokens:     7,
+						CompletionTokens: 10,
+						TotalTokens:      17,
+					},
 				},
+				Choices: []json.RawMessage{},
 			},
 		},
 		{
 			name:         "stream [DONE] with no space after data:",
 			responseText: `data:[DONE]`,
-			want:         OpenAIResponse{},
+			want:         OpenAIStreamResponse{},
 		},
 		{
 			name:         "no data: prefix",
 			responseText: `{"id":"test-id"}`,
-			want:         OpenAIResponse{},
+			want:         OpenAIStreamResponse{},
 		},
 		{
 			name:         "invalid json",
 			responseText: `data: {"id":"test-id",`,
-			want:         OpenAIResponse{},
+			want:         OpenAIStreamResponse{},
 		},
 	}
 
