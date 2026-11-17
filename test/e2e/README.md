@@ -23,6 +23,11 @@ When multiple Score plugins are enabled, the Router adds each plugin score multi
 | Test | Signal | Main assertion |
 |------|--------|----------------|
 | KV-cache aware | Redis block ownership | A cache-hit prompt prefers the owning replica, while misses do not pin to one replica |
+| KV-cache aware (memory mode) | Router in-memory index streamed from runtime sidecars, no Redis | A cache-hit prompt prefers the owning replica, while misses do not pin to one replica |
+| KV-cache aware (memory mode, pod lifecycle) | Sidecar stream of a replaced pod | A deleted owner is no longer selected, and its replacement can own blocks after the router reconnects |
+| KV-cache aware (memory mode, router restart) | Initial snapshot on the sidecar stream | After a router rollout, cache-hit routing resumes without warming the prompt again |
+| KV-cache aware (memory mode, NotReady) | Sidecar stream of a pod that turns NotReady | A NotReady pod is not selected, and once Ready again the router reconnects and cache-hit routing resumes without warming again |
+| KV-cache aware (memory mode, multiple routers) | One in-memory index per router replica | Every router replica routes a cache-hit prompt to the owning replica |
 | Prefix cache | Router prefix history | Repeated prompts prefer the replica with the matching prefix |
 | Least request | Waiting requests | Traffic avoids saturated replicas |
 | GPU usage | Backend KV-cache utilization | Traffic prefers the replica with lower cache utilization |
