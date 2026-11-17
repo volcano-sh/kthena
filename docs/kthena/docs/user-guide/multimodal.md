@@ -2,7 +2,7 @@
 
 The Kthena Router serves multimodal models, such as vision-language models, through the same OpenAI-compatible endpoints as text models. Clients send images, audio or video as content parts of a chat request, and the router forwards them to the model server unchanged. No router configuration is needed.
 
-The router recognizes the media in a request so that scheduling can take it into account: the [`prefix-cache`](./prefix-cache) plugin only matches requests that share the same media, and the [`kvcache-aware`](./kvcache-aware) plugin leaves multimodal requests to the other score plugins.
+The router recognizes the media in a request so that scheduling can take it into account: the [`prefix-cache`](./prefix-cache) plugin only matches requests that share the same media, and the [`kvcache-aware`](./kvcache-aware) plugin matches the KV blocks that hold media exactly, as the engine keys them.
 
 ## Supported Inputs
 
@@ -150,7 +150,7 @@ Streaming (`"stream": true`), several images per request, and multi-turn convers
 
 ## How Scheduling Treats Media
 
-The router never downloads or decodes media. For each media part it records the modality and a hash of what the client sent: the URL for media passed by reference, or the base64 data for inline media. The hash identifies the media item across requests and router replicas.
+The router itself never downloads or decodes media. For each media part it records the modality and a hash of what the client sent: the URL for media passed by reference, or the base64 data for inline media. The hash identifies the media item across requests and router replicas.
 
 ### Prefix Cache
 
@@ -165,12 +165,23 @@ As a result:
 
 - Requests with the same media and the same conversation before it are routed to the pod that recently served them, where vLLM can reuse the KV cache and the encoder output of the media.
 - Requests that ask the same question about different media no longer match each other.
+- A media item ends the 64-byte block it falls in, so requests that share the conversation up to and including some media match that far, whatever text follows the media.
 
 Because the hash is taken from what the client sent, the same image sent once as a URL and once as base64 counts as two different items, and a URL whose content changes counts as the same item. To get the most out of the cache, send repeated media in the same form.
 
 ### KV Cache Aware
 
-vLLM includes the hash of each media item in the hashes of the KV blocks that hold its tokens, and SGLang replaces the tokens of each media item with pad token IDs derived from its hash. The router cannot compute these cache keys from text, so the [`kvcache-aware`](./kvcache-aware) plugin does not score requests that contain media. They are scheduled by the other score plugins, which is why `kvcache-aware` must always be enabled together with another score plugin such as `least-request`.
+vLLM expands each media item into placeholder tokens, and keys every KV block that overlaps an item by the item as well: its identifier, a hash of the processed media, and its position in the block. The router cannot compute these keys from the text, so for a request with media the [`kvcache-aware`](./kvcache-aware) plugin asks vLLM to render the prompt through the `/v1/chat/completions/render` endpoint, which returns the token IDs together with the identifier and the placeholder positions of every media item. The runtime sidecar reads the same media keys from the KV events of the engine, so the block hashes of the router and of the index match, media included.
+
+The render request goes to the [Tokenizer Service](./tokenizer-service) when it is enabled, and otherwise (or on fallback) to a vLLM pod of the model. Requirements:
+
+- On a vLLM model pod, the endpoint is only available when the server is started with `--enable-scale-out`; without it the render request fails with `403`. The tokenizer service always provides it.
+- vLLM v0.32 or later is recommended: the router asks the endpoint not to return the processed media, which older versions ignore, making the response larger.
+- The pod that renders the prompt fetches media passed by URL, so it needs access to those URLs, like the model server.
+
+Rendering a prompt with media takes longer than tokenizing text, because the media is fetched and preprocessed. If this latency matters more than the KV cache hits, keep `kvcache-aware` disabled and rely on `prefix-cache` for multimodal affinity.
+
+SGLang replaces the tokens of each media item with pad token IDs derived from its hash, which the router cannot compute. If a model has only SGLang pods and no tokenizer service, or the prompt cannot be rendered (for example a Responses `input_image` given by `file_id`), `kvcache-aware` does not score the request and the other score plugins decide, which is why `kvcache-aware` must always be enabled together with another score plugin such as `least-request`.
 
 ### Other Plugins
 
@@ -178,11 +189,13 @@ Load-based plugins (`least-request`, `least-latency`, `gpu-usage`), [session sti
 
 ## Verify Routing
 
-When the router runs with `--v=4`, the scheduler logs every score plugin's result for each request. If `kvcache-aware` is enabled, a multimodal request also logs:
+When the router runs with `--v=4`, the scheduler logs every score plugin's result for each request. If `kvcache-aware` is enabled, a multimodal request also logs the number of rendered tokens and media items, for example:
 
 ```text
-KVCacheAware.Score: early return — multimodal request is not scored (model="Qwen/Qwen2.5-VL-3B-Instruct")
+KVCacheAware.Score: tokenization took 85ms, tokens=1214, media=1, err=<nil>
 ```
+
+A render failure, such as `403` from a vLLM pod started without `--enable-scale-out`, shows up as `err=...` here and in `kthena_router_kvcache_aware_errors_total{stage="tokenize"}`.
 
 To check `prefix-cache` affinity, send the same image request several times and compare the selected pod in the router access log; then send the same question with a different image. You can also watch `kthena_router_prefix_cache_match_ratio` on the router metrics endpoint, as described in [Verifying the Plugin is Active](./prefix-cache#verifying-the-plugin-is-active).
 

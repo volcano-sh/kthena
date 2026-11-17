@@ -77,6 +77,30 @@ func TestServerProxiesTokenize(t *testing.T) {
 	assert.Equal(t, []int{1, 2, 3}, parsed.Tokens)
 }
 
+func TestServerProxiesChatRender(t *testing.T) {
+	const rendered = `{"token_ids": [1, 9, 9, 2], "features": {"mm_hashes": {"image": ["h"]}, "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}}}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/chat/completions/render", r.URL.Path)
+		body, _ := io.ReadAll(r.Body)
+		assert.Contains(t, string(body), `"mm_payload": "none"`)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(rendered))
+	}))
+	defer backend.Close()
+
+	frontend := httptest.NewServer(newTestServer(t, backend).Handler())
+	defer frontend.Close()
+
+	resp, err := http.Post(frontend.URL+"/v1/chat/completions/render", "application/json",
+		strings.NewReader(`{"model": "served", "messages": [], "mm_payload": "none"}`))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.JSONEq(t, rendered, string(body))
+}
+
 func TestServerRejectsBadRequests(t *testing.T) {
 	backend := httptest.NewServer(http.NotFoundHandler())
 	defer backend.Close()

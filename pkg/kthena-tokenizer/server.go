@@ -41,8 +41,9 @@ type readyChecker interface {
 }
 
 // Server is the HTTP frontend of the tokenizer service. It exposes the
-// vLLM-compatible /tokenize and /detokenize endpoints and proxies each request
-// to the renderer subprocess serving the requested model. Requests for models
+// vLLM-compatible /tokenize, /detokenize and /v1/chat/completions/render
+// endpoints and proxies each request to the renderer subprocess serving the
+// requested model. Requests for models
 // without a ready renderer get 503 so that the router falls back to
 // engine-side tokenization.
 type Server struct {
@@ -66,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tokenize", s.proxy("/tokenize"))
 	mux.HandleFunc("/detokenize", s.proxy("/detokenize"))
+	mux.HandleFunc(chatRenderPath, s.proxy(chatRenderPath))
 	mux.HandleFunc("/models", s.models)
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/readyz", s.readyz)
@@ -91,8 +93,13 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-// proxy forwards a tokenize/detokenize request to the renderer that serves
-// the model named in the request body.
+// chatRenderPath renders a chat request into the token IDs and multimodal
+// placeholders the engine would compute for it, which the router needs to
+// match the KV cache of multimodal prompts.
+const chatRenderPath = "/v1/chat/completions/render"
+
+// proxy forwards a request to the renderer that serves the model named in the
+// request body.
 func (s *Server) proxy(path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

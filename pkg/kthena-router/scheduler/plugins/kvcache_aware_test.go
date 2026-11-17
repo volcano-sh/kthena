@@ -31,6 +31,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/metrics"
@@ -2379,34 +2381,132 @@ func TestKVCacheAware_ScoreMetrics_TokenizeError(t *testing.T) {
 	}
 }
 
-func TestKVCacheAware_ScoreSkipsMultiModal(t *testing.T) {
+// TestComputeStandardizedHashMultiModal pins the hashes of blocks holding
+// media. The runtime sidecar asserts the same values for the blocks the engine
+// reports, so the router and the sidecar agree on them.
+func TestComputeStandardizedHashMultiModal(t *testing.T) {
+	assert.Equal(t, uint64(619686922261892976), computeStandardizedHash([]uint32{1, 2, 9, 9}, multiModalBlockKey{identifier: "content:abc", offset: 2}))
+	assert.Equal(t, uint64(8783969653476926990), computeStandardizedHash([]uint32{9, 9, 3, 4}, multiModalBlockKey{identifier: "content:abc", offset: -2}))
+	assert.Equal(t, uint64(4363586767729316969), computeStandardizedHash([]uint32{9, 9, 8, 8},
+		multiModalBlockKey{identifier: "content:abc", offset: -2},
+		multiModalBlockKey{identifier: "uuid:x", offset: 2}))
+}
+
+func TestTokenBlockProcessor_MultiModalTokensToBlockHashes(t *testing.T) {
+	processor := &TokenBlockProcessor{blockSize: 4}
+	// An image spans tokens [2, 6) and an audio clip [8, 10).
+	tokens := []uint32{1, 2, 9, 9, 9, 9, 3, 4, 7, 7, 5}
+	media := []tokenization.MultiModalPlaceholder{
+		{Identifier: "image", Offset: 2, Length: 4},
+		{Identifier: "audio", Offset: 8, Length: 2},
+	}
+	want := []uint64{
+		computeStandardizedHash(tokens[0:4], multiModalBlockKey{identifier: "image", offset: 2}),
+		computeStandardizedHash(tokens[4:8], multiModalBlockKey{identifier: "image", offset: -2}),
+		computeStandardizedHash(tokens[8:11], multiModalBlockKey{identifier: "audio", offset: 0}),
+	}
+	assert.Equal(t, want, processor.MultiModalTokensToBlockHashes(tokens, media, 100))
+	assert.Equal(t, want[:2], processor.MultiModalTokensToBlockHashes(tokens, media, 2))
+	assert.Equal(t, processor.TokensToBlockHashes(tokens, 100), processor.MultiModalTokensToBlockHashes(tokens, nil, 100))
+}
+
+func TestKVCacheAware_ScoreMultiModal(t *testing.T) {
+	// The fake engine renders every prompt into an image of 4 placeholder
+	// tokens after 2 text tokens, identified by the image URL.
+	var renderBody map[string]interface{}
+	var renderStatus int
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions/render" || renderStatus != http.StatusOK {
+			http.Error(w, "render disabled", http.StatusForbidden)
+			return
+		}
+		renderBody = nil
+		_ = json.NewDecoder(r.Body).Decode(&renderBody)
+		messages, _ := renderBody["messages"].([]interface{})
+		content, _ := messages[0].(map[string]interface{})["content"].([]interface{})
+		url := content[0].(map[string]interface{})["image_url"].(map[string]interface{})["url"]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"token_ids":[1,2,9,9,9,9,3,4],"features":{"mm_hashes":{"image":["content:%s"]},`+
+			`"mm_placeholders":{"image":[{"offset":2,"length":4}]}}}`, url)
+	}))
+	defer engine.Close()
+
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer redisClient.Close()
+
+	const model = "kvcache-multimodal"
+	newPod := func(name, engineType string) *datastore.PodInfo {
+		return datastore.NewPodInfo(&v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+			Status:     v1.PodStatus{PodIP: "127.0.0.1"},
+		}, engineType)
+	}
+	vllmPod := newPod("vllm-pod", tokenization.EngineVLLM)
+	// The blocks the runtime reports for the cat image, hashed independently
+	// of MultiModalTokensToBlockHashes.
+	for _, hash := range []uint64{
+		computeStandardizedHash([]uint32{1, 2, 9, 9}, multiModalBlockKey{identifier: "content:cat", offset: 2}),
+		computeStandardizedHash([]uint32{9, 9, 3, 4}, multiModalBlockKey{identifier: "content:cat", offset: -2}),
+	} {
+		key := KVCacheAwareBlock{ModelName: model, ChunkHash: hash}.String(kvCacheKeyPrefix)
+		require.NoError(t, redisClient.HSet(context.Background(), key, "vllm-pod.ns", time.Now().Unix()).Err())
+	}
+
 	plugin := &KVCacheAware{
 		name:             KVCacheAwarePluginName,
 		maxBlocksToMatch: 128,
 		keyPrefix:        kvCacheKeyPrefix,
-		processor:        &TokenBlockProcessor{blockSize: 128},
-		// tokenizerManager nil -> any tokenization attempt is recorded as an error
+		redisClient:      redisClient,
+		processor:        &TokenBlockProcessor{blockSize: 4},
+		tokenizerManager: tokenization.NewTokenizerManager(tokenization.TokenizerManagerConfig{
+			EndpointPorts: map[string]int{tokenization.EngineVLLM: engine.Listener.Addr().(*net.TCPAddr).Port},
+		}),
 	}
-
-	const model = "kvmetrics-multimodal"
 	recorder := metrics.NewRequestMetricsRecorder(metrics.DefaultMetrics, model, "/v1/chat/completions")
-	ctx := &framework.Context{
-		UpstreamModel: model,
-		Prompt: &common.ChatMessage{Messages: []common.Message{{
-			Role:       "user",
-			Content:    "What is in this image?",
-			MultiModal: []common.MultiModalItem{{Modality: common.ModalityImage, Hash: 1}},
-		}}},
-		MetricsRecorder: recorder,
+	score := func(image string, pods ...*datastore.PodInfo) map[*datastore.PodInfo]int {
+		return plugin.Score(&framework.Context{
+			UpstreamModel: model,
+			Prompt: &common.ChatMessage{Messages: []common.Message{{
+				Role:       "user",
+				Content:    "What is in this image?",
+				MultiModal: []common.MultiModalItem{{Modality: common.ModalityImage, Hash: 1}},
+				ContentParts: []map[string]interface{}{
+					{"type": "image_url", "image_url": map[string]interface{}{"url": image}},
+					{"type": "text", "text": "What is in this image?"},
+				},
+			}}},
+			MetricsRecorder: recorder,
+		}, pods)
 	}
 
-	before := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize)
-	if scores := plugin.Score(ctx, createTestPods("pod1")); scores != nil {
-		t.Errorf("Score() = %v, want nil for a multimodal request", scores)
-	}
-	if got := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize) - before; got != 0 {
-		t.Errorf("kvcache tokenize errors delta = %v, want 0 (no tokenization)", got)
-	}
+	t.Run("same media matches", func(t *testing.T) {
+		renderStatus = http.StatusOK
+		assert.Equal(t, map[*datastore.PodInfo]int{vllmPod: 100}, score("cat", vllmPod))
+		assert.Equal(t, "none", renderBody["mm_payload"])
+		assert.Equal(t, model, renderBody["model"])
+	})
+
+	t.Run("same tokens with other media do not match", func(t *testing.T) {
+		renderStatus = http.StatusOK
+		assert.Empty(t, score("dog", vllmPod))
+	})
+
+	t.Run("no vLLM pod to render on is a tokenize error", func(t *testing.T) {
+		renderStatus = http.StatusOK
+		before := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize)
+		assert.Nil(t, score("cat", newPod("sglang-pod", tokenization.EngineSGLang)))
+		assert.Equal(t, 1.0, counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize)-before)
+	})
+
+	t.Run("render failure is a tokenize error", func(t *testing.T) {
+		renderStatus = http.StatusForbidden
+		before := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize)
+		assert.Nil(t, score("cat", vllmPod))
+		assert.Equal(t, 1.0, counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize)-before)
+	})
 }
 
 func TestKVCacheAware_CalculatePodScoresAndMatch_LongestMatch(t *testing.T) {

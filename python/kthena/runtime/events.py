@@ -46,6 +46,9 @@ class VLLMBlockStoredEvent:
     token_ids: Optional[List[int]] = None
     block_size: Optional[int] = None
     lora_id: Optional[int] = None
+    # One entry per block: the extra keys the engine hashes the block with,
+    # such as the media items it holds, or None.
+    extra_keys: Optional[List[Any]] = None
 
 
 @dataclass

@@ -153,6 +153,8 @@ func parseMessage(role string, content any) (common.Message, bool) {
 
 	parts := make([]string, 0, len(contentList))
 	var media []common.MultiModalItem
+	var chatParts []map[string]interface{}
+	renderable := true
 	// textLen is the length of the text parts joined so far, which is where a
 	// media part read now sits in Content.
 	textLen := 0
@@ -168,6 +170,11 @@ func parseMessage(role string, content any) (common.Message, bool) {
 				if mediaItem, ok := parseMediaPart(contentType, contentMap); ok {
 					mediaItem.Offset = textLen
 					media = append(media, mediaItem)
+					if chatPart, ok := chatMediaPart(contentType, contentMap); ok {
+						chatParts = append(chatParts, chatPart)
+					} else {
+						renderable = false
+					}
 				}
 				continue
 			}
@@ -181,28 +188,25 @@ func parseMessage(role string, content any) (common.Message, bool) {
 		}
 		textLen += len(text)
 		parts = append(parts, text)
+		chatParts = append(chatParts, map[string]interface{}{"type": "text", "text": text})
 	}
 	if len(parts) == 0 && len(media) == 0 {
 		return common.Message{}, false
 	}
-	return common.Message{Role: role, Content: strings.Join(parts, "\n"), MultiModal: media}, true
+	if !renderable {
+		chatParts = nil
+	}
+	return common.Message{
+		Role:         role,
+		Content:      strings.Join(parts, "\n"),
+		MultiModal:   media,
+		ContentParts: chatParts,
+	}, true
 }
 
 // GetPromptString renders the text of a prompt. Media is not rendered, and
 // messages that only hold media are skipped.
 func GetPromptString(chatMessage *common.ChatMessage) string {
-	return renderPrompt(chatMessage, false)
-}
-
-// GetPromptStringWithMedia renders a prompt like GetPromptString, and renders
-// each media item as a placeholder holding its hash at the item's position in
-// its message, so prompts that differ only in their media, or in the order of
-// their media and text, do not render the same.
-func GetPromptStringWithMedia(chatMessage *common.ChatMessage) string {
-	return renderPrompt(chatMessage, true)
-}
-
-func renderPrompt(chatMessage *common.ChatMessage, withMedia bool) string {
 	// If Text field is present, return text directly (for prompt format)
 	if chatMessage.Text != "" {
 		return chatMessage.Text
@@ -211,32 +215,62 @@ func renderPrompt(chatMessage *common.ChatMessage, withMedia bool) string {
 	// For chat messages, convert to ChatML format
 	var result strings.Builder
 	for _, msg := range chatMessage.Messages {
-		if !withMedia && msg.Content == "" && len(msg.MultiModal) > 0 {
+		if msg.Content == "" && len(msg.MultiModal) > 0 {
 			continue
 		}
 		fmt.Fprintf(&result, "<|im_start|>%s\n", msg.Role)
-		if withMedia {
-			writeContentWithMedia(&result, msg)
-		} else {
-			result.WriteString(msg.Content)
-		}
+		result.WriteString(msg.Content)
 		result.WriteString("<|im_end|>\n")
 	}
 	return result.String()
 }
 
-// writeContentWithMedia writes the content of msg with a placeholder holding
-// the hash of each media item inserted at the item's offset. Offsets out of
-// order or beyond the content are clamped, so every item is still written.
-func writeContentWithMedia(w *strings.Builder, msg common.Message) {
-	pos := 0
-	for _, item := range msg.MultiModal {
-		offset := min(max(item.Offset, pos), len(msg.Content))
-		w.WriteString(msg.Content[pos:offset])
-		fmt.Fprintf(w, "<|%s:%016x|>", item.Modality, item.Hash)
-		pos = offset
+// PromptSegment is a part of a rendered prompt: either a run of text, or a
+// single media item rendered as a placeholder holding its modality and hash.
+type PromptSegment struct {
+	Text  string
+	Media bool
+}
+
+// GetPromptSegments renders a prompt like GetPromptString, but keeps messages
+// that only hold media and splits the result at every media item, which gets
+// a segment of its own at its position in its message. Prompts that differ
+// only in their media, or in the order of their media and text, therefore
+// render differently. A text-only prompt renders as one segment holding
+// exactly what GetPromptString returns.
+func GetPromptSegments(chatMessage *common.ChatMessage) []PromptSegment {
+	if chatMessage.Text != "" {
+		return []PromptSegment{{Text: chatMessage.Text}}
 	}
-	w.WriteString(msg.Content[pos:])
+
+	var segments []PromptSegment
+	var text strings.Builder
+	flush := func() {
+		if text.Len() > 0 {
+			segments = append(segments, PromptSegment{Text: text.String()})
+			text.Reset()
+		}
+	}
+	for _, msg := range chatMessage.Messages {
+		fmt.Fprintf(&text, "<|im_start|>%s\n", msg.Role)
+		// Offsets out of order or beyond the content are clamped, so every
+		// item is still rendered.
+		pos := 0
+		for _, item := range msg.MultiModal {
+			offset := min(max(item.Offset, pos), len(msg.Content))
+			text.WriteString(msg.Content[pos:offset])
+			flush()
+			segments = append(segments, PromptSegment{
+				Text:  fmt.Sprintf("<|%s:%016x|>", item.Modality, item.Hash),
+				Media: true,
+			})
+			pos = offset
+		}
+		text.WriteString(msg.Content[pos:])
+		text.WriteString("<|im_end|>\n")
+	}
+	flush()
+	return segments
 }
 
 func LoadEnv(key, defaultValue string) string {

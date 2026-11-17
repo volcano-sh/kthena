@@ -56,6 +56,40 @@ func parseMediaPart(partType string, part map[string]interface{}) (common.MultiM
 	return common.MultiModalItem{}, false
 }
 
+// chatMediaPart returns a media content part in the Chat Completions format,
+// which is what the engine renders multimodal prompts from. Chat Completions
+// parts are returned as they are, so fields such as a client-provided media
+// uuid are kept. The OpenAI Responses input_image part and the Anthropic image
+// part are converted to image_url. It returns false for media that has no
+// Chat Completions form, such as an uploaded file referenced by file_id.
+func chatMediaPart(partType string, part map[string]interface{}) (map[string]interface{}, bool) {
+	var url string
+	switch partType {
+	case "image_url", "input_audio", "audio_url", "video_url":
+		return part, true
+	case "input_image":
+		url, _ = part["image_url"].(string)
+	case "image":
+		source, _ := part["source"].(map[string]interface{})
+		switch source["type"] {
+		case "base64":
+			mediaType, _ := source["media_type"].(string)
+			if data, _ := source["data"].(string); mediaType != "" && data != "" {
+				url = "data:" + mediaType + ";base64," + data
+			}
+		case "url":
+			url, _ = source["url"].(string)
+		}
+	}
+	if url == "" {
+		return nil, false
+	}
+	return map[string]interface{}{
+		"type":      "image_url",
+		"image_url": map[string]interface{}{"url": url},
+	}, true
+}
+
 // mediaSource returns the URL or the inline payload held by a media field. The
 // field is either the source string itself or an object holding it, such as
 // {"url": "..."}, {"data": "...", "format": "wav"} or the Anthropic

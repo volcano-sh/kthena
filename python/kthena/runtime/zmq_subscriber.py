@@ -73,6 +73,7 @@ class MapBlockStored(msgspec.Struct, omit_defaults=True, gc=False, tag="BlockSto
     block_size: int = 0
     lora_id: Optional[int] = None
     medium: Optional[str] = None
+    extra_keys: Optional[list[Any]] = None
 
 
 class MapBlockRemoved(msgspec.Struct, omit_defaults=True, gc=False, tag="BlockRemoved"):
@@ -279,7 +280,8 @@ class VLLMZMQSubscriber:
                         if event.parent_block_hash is not None else None),
                     token_ids=event.token_ids,
                     block_size=event.block_size,
-                    lora_id=event.lora_id
+                    lora_id=event.lora_id,
+                    extra_keys=getattr(event, "extra_keys", None),
                 )
                 event_type = EventType.VLLM_BLOCK_STORED
 

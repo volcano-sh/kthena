@@ -54,6 +54,13 @@ type Message struct {
 	// MultiModal lists the non-text items of the message in request order.
 	// It is not serialized, so tokenizer requests built from Message stay text-only.
 	MultiModal []MultiModalItem `json:"-"`
+	// ContentParts holds the content parts of a message given as a list, in
+	// request order and in the Chat Completions format, so that the engine can
+	// render a multimodal prompt exactly as it renders the request. It is nil
+	// for string content, and for content holding media that has no Chat
+	// Completions form, such as a file referenced by its ID. It is not
+	// serialized.
+	ContentParts []map[string]interface{} `json:"-"`
 }
 
 // ChatMessage represents either a direct text prompt or structured chat message
