@@ -31,6 +31,11 @@ class MetricAdapter(Collector):
 
     def _parse_and_process_metrics(self, origin_metric_text: str, standard: MetricStandard) -> List[Metric]:
         metrics = []
+        # An engine can expose one measurement under two names: some vLLM
+        # versions have both the old and the new inter-token latency histogram.
+        # Each standard name is emitted once, from the first source family
+        # seen, because two families of one name are not valid exposition.
+        standardized_names = set()
 
         if not origin_metric_text.strip():
             logger.warning("Empty metric text provided")
@@ -41,8 +46,12 @@ class MetricAdapter(Collector):
                 metrics.append(origin_metric)
 
                 processed_metric = standard.process(origin_metric)
-                if processed_metric is not None:
-                    metrics.append(processed_metric)
+                if processed_metric is None:
+                    continue
+                if processed_metric.name in standardized_names:
+                    continue
+                standardized_names.add(processed_metric.name)
+                metrics.append(processed_metric)
 
         except ValueError as e:
             logger.error("Invalid metric text format: %s", e)
