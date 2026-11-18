@@ -381,3 +381,51 @@ func (c *ModelServingController) retireCoordinatedSurge(ctx context.Context, ms 
 func (c *ModelServingController) refreshCoordinatedAvailability(ms *api.ModelServing) error {
 	return c.refreshCoordinatedAvailabilityInRound(withCoordinatedRound(context.Background(), ms), ms)
 }
+
+// protectedRoleNames returns the names of the roles whose ordinal is below the
+// rollout partition. A role rolling update must never replace these instances,
+// so they are excluded from the eligible candidates.
+func protectedRoleNames(roleList []datastore.Role, partition int) sets.Set[string] {
+	protected := sets.New[string]()
+	for _, role := range roleList {
+		if partitionProtected(role.Name, partition) {
+			protected.Insert(role.Name)
+		}
+	}
+	return protected
+}
+
+// withoutProtectedRoles drops the outdated roles that are partition protected.
+// The result preserves the order of the input slice; the input is not mutated.
+func withoutProtectedRoles(outdatedRoles []datastore.Role, protected sets.Set[string]) []datastore.Role {
+	if len(protected) == 0 || len(outdatedRoles) == 0 {
+		return outdatedRoles
+	}
+	filtered := make([]datastore.Role, 0, len(outdatedRoles))
+	for _, role := range outdatedRoles {
+		if protected.Has(role.Name) {
+			continue
+		}
+		filtered = append(filtered, role)
+	}
+	return filtered
+}
+
+// rolesWithoutSpec returns the roles whose Role template was removed from the new
+// revision. They are all outdated and are deleted directly; roles already
+// terminating are skipped.
+func rolesWithoutSpec(roleSpecByName map[string]api.Role, allRoles map[string]map[string]*datastore.Role) []roleToDelete {
+	var out []roleToDelete
+	for roleName, roles := range allRoles {
+		if _, ok := roleSpecByName[roleName]; ok {
+			continue
+		}
+		for roleID, role := range roles {
+			if role.Status == datastore.RoleDeleting {
+				continue
+			}
+			out = append(out, roleToDelete{roleName: roleName, roleID: roleID})
+		}
+	}
+	return out
+}
