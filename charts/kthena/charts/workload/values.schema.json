@@ -1,0 +1,151 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["controllerManager"],
+  "properties": {
+    "enabled": {
+      "type": "boolean"
+    },
+    "controllerManager": {
+      "type": "object",
+      "required": ["image", "webhook", "evictionWebhook", "downloaderImage", "runtimeImage", "downloader"],
+      "properties": {
+        "replicas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag", "args"],
+          "properties": {
+            "repository": {
+              "type": "string"
+            },
+            "tag": {
+              "$ref": "#/definitions/tag"
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "webhook": {
+          "type": "object",
+          "required": ["enabled", "tls"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "tls": {
+              "type": "object",
+              "required": ["certSecretName", "serviceName"],
+              "properties": {
+                "certSecretName": {
+                  "type": "string"
+                },
+                "serviceName": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "evictionWebhook": {
+          "type": "object",
+          "required": ["enabled", "trackerTTLSeconds"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "failurePolicy": {
+              "type": "string",
+              "enum": ["Fail", "Ignore"]
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30
+            },
+            "trackerTTLSeconds": {
+              "type": "integer"
+            }
+          }
+        },
+        "resource": {
+          "type": "object"
+        },
+        "controllers": {
+          "type": ["string", "array"],
+          "items": {
+            "type": "string"
+          }
+        },
+        "kubeAPIQPS": {
+          "$ref": "#/definitions/decimal"
+        },
+        "kubeAPIBurst": {
+          "type": "integer"
+        },
+        "debugPort": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "autoscalingSyncPeriodSeconds": {
+          "type": "integer"
+        },
+        "downloaderImage": {
+          "$ref": "#/definitions/image"
+        },
+        "runtimeImage": {
+          "$ref": "#/definitions/image"
+        },
+        "downloader": {
+          "type": "object",
+          "required": ["accessKey", "secretKey"],
+          "properties": {
+            "accessKey": {
+              "type": "string"
+            },
+            "secretKey": {
+              "type": "string"
+            }
+          }
+        },
+        "tolerations": {
+          "type": "array"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "decimal": {
+      "type": ["number", "string"],
+      "pattern": "^[0-9]+(\\.[0-9]+)?$",
+      "description": "A string is allowed because --set passes decimals such as 1.5 as strings."
+    },
+    "tag": {
+      "type": ["string", "integer"],
+      "description": "An integer is allowed because --set passes an all-digit tag as a number."
+    },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "tag": {
+          "$ref": "#/definitions/tag"
+        }
+      }
+    }
+  }
+}
