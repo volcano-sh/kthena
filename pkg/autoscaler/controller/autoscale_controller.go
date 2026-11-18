@@ -62,6 +62,9 @@ type AutoscaleController struct {
 	optimizerMap                map[string]*autoscaler.Optimizer
 	disaggregatedScalerMap      map[string]*autoscaler.DisaggregatedAutoscaler
 	syncPeriodSeconds           int
+	// policyTimeout bounds the work done for a single AutoscalingPolicy in one
+	// reconcile pass. Zero means util.AutoscaleCtxTimeoutSeconds.
+	policyTimeout time.Duration
 }
 
 func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface, syncPeriodSeconds int) *AutoscaleController {
@@ -126,8 +129,6 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 // move the current state of the cluster closer to the desired state.
 func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 	klog.V(4).Info("start to reconcile")
-	ctx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
-	defer cancel()
 	policies, err := ac.autoscalingPoliciesLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list autoscaling policies, err: %v", err)
@@ -169,12 +170,25 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 	}
 
 	for _, policy := range policies {
-		err := ac.schedule(ctx, policy)
+		err := ac.scheduleWithTimeout(ctx, policy)
 		if err != nil {
 			klog.Errorf("failed to process autoscale for policy %s: %v", klog.KObj(policy), err)
 			continue
 		}
 	}
+}
+
+// scheduleWithTimeout runs schedule for one policy under its own deadline, so a
+// policy with slow or unreachable pods cannot use up the time of the policies
+// processed after it in the same pass.
+func (ac *AutoscaleController) scheduleWithTimeout(ctx context.Context, autoscalePolicy *workload.AutoscalingPolicy) error {
+	timeout := ac.policyTimeout
+	if timeout <= 0 {
+		timeout = util.AutoscaleCtxTimeoutSeconds * time.Second
+	}
+	policyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return ac.schedule(policyCtx, autoscalePolicy)
 }
 
 func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target *workload.Target, defaultNamespace string, replicas int32) error {
