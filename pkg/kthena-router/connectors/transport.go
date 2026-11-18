@@ -397,7 +397,14 @@ func handleStreamingResponse(c *gin.Context, resp *http.Response) (int, error) {
 				// Usage is cumulative and may be attached to every chunk, so
 				// keep the latest copy instead of summing them.
 				totalOutputTokens = parsed.Usage.CompletionTokens
-				// Check if token usage should be filtered
+			}
+			// When the router injected include_usage, withhold only the
+			// usage-only chunk. Content chunks may carry usage too (e.g. vLLM
+			// --enable-force-include-usage) and must still reach the client.
+			// A backend may omit total_tokens, so any non-zero count marks
+			// the chunk as carrying usage, as on the non-PD path.
+			hasUsage := parsed.Usage.TotalTokens > 0 || parsed.Usage.PromptTokens > 0 || parsed.Usage.CompletionTokens > 0
+			if hasUsage && len(parsed.Choices) == 0 {
 				if v, ok := c.Get(common.TokenUsageKey); ok && v.(bool) {
 					return true
 				}

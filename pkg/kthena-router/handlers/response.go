@@ -39,6 +39,14 @@ type OpenAIResponse struct {
 	Usage   Usage  `json:"usage"`
 }
 
+// OpenAIStreamResponse is one chunk of an OpenAI-compatible stream. Choices is
+// kept raw: callers only need to tell content chunks, which may also carry
+// usage, from the usage-only chunk, whose choices array is empty.
+type OpenAIStreamResponse struct {
+	OpenAIResponse
+	Choices []json.RawMessage `json:"choices"`
+}
+
 // Function to parse the OpenAI response body
 func ParseOpenAIResponseBody(resp []byte) (*OpenAIResponse, error) {
 	// Unmarshal the JSON body into the struct
@@ -71,8 +79,8 @@ const (
 // indicates end of streaming.
 func ParseStreamRespForUsage(
 	responseText string,
-) OpenAIResponse {
-	var response OpenAIResponse
+) OpenAIStreamResponse {
+	var response OpenAIStreamResponse
 	line := strings.TrimRight(responseText, "\r\n")
 	if !strings.HasPrefix(line, streamingRespPrefix) {
 		return response
