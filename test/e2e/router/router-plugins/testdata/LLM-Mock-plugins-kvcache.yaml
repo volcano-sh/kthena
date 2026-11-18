@@ -1,8 +1,10 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: router-plugin-kvcache-mock
 spec:
+  podManagementPolicy: Parallel
+  serviceName: router-plugin-kvcache-mock
   replicas: 3
   selector:
     matchLabels:
@@ -21,6 +23,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: VLLM_SERVER_DEV_MODE
+              value: "1"
           args:
             - --model=kthena-plugin-mock
             - --served-model-name=router-plugin-model
@@ -36,6 +40,7 @@ spec:
             - --inter-token-latency=5ms
             - --zmq-endpoint=tcp://*:5557
             - --use-vllm-map-event-format=true
+            - --enable-sleep-mode=true
           ports:
             - containerPort: 8000
           readinessProbe:
