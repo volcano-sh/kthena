@@ -67,6 +67,7 @@ const sidebars: SidebarsConfig = {
           type: 'category',
           label: 'Workload',
           items: [
+            'user-guide/inplace-update',
             'user-guide/binpack-scale-down',
             'user-guide/gang-scheduling',
             'user-guide/network-topology',
