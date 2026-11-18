@@ -108,6 +108,7 @@ func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string
 	}
 	createdRefs := make([]createdResourceRef, 0, len(redisObjects))
 	var redisDeploymentName string
+	var redisDeploymentCreated bool
 
 	for _, obj := range redisObjects {
 		if obj.GetKind() == "Deployment" && redisDeploymentName == "" {
@@ -141,6 +142,9 @@ func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string
 			namespace: namespaceToUse,
 			name:      obj.GetName(),
 		})
+		if obj.GetKind() == "Deployment" {
+			redisDeploymentCreated = true
+		}
 	}
 
 	require.NotEmpty(t, redisDeploymentName, "Redis Deployment not found in manifest")
@@ -169,6 +173,14 @@ func ensureRedis(t *testing.T, kubeClient kubernetes.Interface, namespace string
 			} else {
 				_ = resourceClient.Delete(cleanupCtx, ref.name, metav1.DeleteOptions{})
 			}
+		}
+		if redisDeploymentCreated {
+			require.Eventually(t, func() bool {
+				pods, err := kubeClient.CoreV1().Pods(namespace).List(cleanupCtx, metav1.ListOptions{
+					LabelSelector: "app.kubernetes.io/component=redis-server",
+				})
+				return err == nil && len(pods.Items) == 0
+			}, 2*time.Minute, time.Second, "Redis pods should be deleted")
 		}
 	}
 }

@@ -38,6 +38,7 @@ func TestSchedulerPluginKVCacheAware(t *testing.T) {
 
 	pods := setupKVCacheFixture(t, testCtx.KubeClient, testNamespace, kthenaNamespace)
 	redisClient := setupKVCacheRedisClient(t, kthenaNamespace)
+	defer logKVCacheDiagnostics(t, testCtx.KubeClient, redisClient, testNamespace, kthenaNamespace, plugincontext.ModelName)
 	_ = utils.CreateModelServerFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelServer-plugins-kvcache.yaml")
 
 	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerKVCacheAware, kvCacheFixtureName, plugincontext.ModelName)
@@ -90,6 +91,7 @@ func TestSchedulerPluginKVCacheAwarePrefixAndLifecycle(t *testing.T) {
 
 	pods := setupKVCacheFixture(t, testCtx.KubeClient, testNamespace, kthenaNamespace)
 	redisClient := setupKVCacheRedisClient(t, kthenaNamespace)
+	defer logKVCacheDiagnostics(t, testCtx.KubeClient, redisClient, testNamespace, kthenaNamespace, plugincontext.ModelName)
 	_ = utils.CreateModelServerFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelServer-plugins-kvcache.yaml")
 
 	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerKVCacheAware, kvCacheFixtureName, plugincontext.ModelName)
@@ -205,6 +207,7 @@ func TestSchedulerPluginMixedWeights(t *testing.T) {
 
 	pods := setupKVCacheFixture(t, testCtx.KubeClient, testNamespace, kthenaNamespace)
 	redisClient := setupKVCacheRedisClient(t, kthenaNamespace)
+	defer logKVCacheDiagnostics(t, testCtx.KubeClient, redisClient, testNamespace, kthenaNamespace, plugincontext.ModelName)
 	_ = utils.CreateModelServerFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelServer-plugins-kvcache.yaml")
 	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins-kvcache.yaml")
 	prompt := "kthena kvcache routing test"
