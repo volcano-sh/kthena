@@ -252,21 +252,23 @@ func logKVCacheDiagnostics(t *testing.T, kube kubernetes.Interface, client *redi
 		return
 	}
 
-	redisCtx, redisCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer redisCancel()
-	mappingKeys, mappingErr := scanKVCacheKeys(redisCtx, client, kvCacheMappingPrefix+":*")
-	ownershipKeys, ownershipErr := scanKVCacheKeys(redisCtx, client, fmt.Sprintf("%s:%s@*", kvCacheOwnershipPrefix, model))
-	sort.Strings(mappingKeys)
-	sort.Strings(ownershipKeys)
-	t.Logf("KV-cache Redis mappings: keys=%v error=%v", mappingKeys, mappingErr)
-	for _, key := range mappingKeys {
-		value, err := client.Get(redisCtx, key).Result()
-		t.Logf("KV-cache Redis mapping: key=%s value=%s error=%v", key, value, err)
-	}
-	t.Logf("KV-cache Redis ownership: keys=%v error=%v", ownershipKeys, ownershipErr)
-	for _, key := range ownershipKeys {
-		owners, err := client.HGetAll(redisCtx, key).Result()
-		t.Logf("KV-cache Redis ownership: key=%s owners=%v error=%v", key, owners, err)
+	if client != nil {
+		redisCtx, redisCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer redisCancel()
+		mappingKeys, mappingErr := scanKVCacheKeys(redisCtx, client, kvCacheMappingPrefix+":*")
+		ownershipKeys, ownershipErr := scanKVCacheKeys(redisCtx, client, fmt.Sprintf("%s:%s@*", kvCacheOwnershipPrefix, model))
+		sort.Strings(mappingKeys)
+		sort.Strings(ownershipKeys)
+		t.Logf("KV-cache Redis mappings: keys=%v error=%v", mappingKeys, mappingErr)
+		for _, key := range mappingKeys {
+			value, err := client.Get(redisCtx, key).Result()
+			t.Logf("KV-cache Redis mapping: key=%s value=%s error=%v", key, value, err)
+		}
+		t.Logf("KV-cache Redis ownership: keys=%v error=%v", ownershipKeys, ownershipErr)
+		for _, key := range ownershipKeys {
+			owners, err := client.HGetAll(redisCtx, key).Result()
+			t.Logf("KV-cache Redis ownership: key=%s owners=%v error=%v", key, owners, err)
+		}
 	}
 
 	ctx, kubeCancel := context.WithTimeout(context.Background(), 10*time.Second)
