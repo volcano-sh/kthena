@@ -2621,94 +2621,130 @@ func benchPodScoreInput(blocks, pods int, matchFrac float64) ([]uint64, map[uint
 	return hashes, blockToPods
 }
 
-// TestKVCacheAware_QueryRedisForBlocks_PipelineErrors covers three pipeline error cases:
-// - partial failure: one WRONGTYPE key among valid HGETALL keys — valid results kept
-// - complete outage: Redis closed entirely — error returned, no scores silently dropped
-// - empty hit: valid HGETALL key with no entries — returns empty result, no error
+// TestKVCacheAware_QueryRedisForBlocks_PipelineErrors is a table-driven test covering three
+// pipeline error scenarios for queryRedisForBlocks:
+//
+//   - partial_wrongtype: one key holds a plain string (WRONGTYPE); HGETALL on that key
+//     returns a per-command error. The valid block's owners must be kept and the WRONGTYPE
+//     block must be omitted. The function must return nil error (server-side per-key error).
+//
+//   - complete_outage: Redis is closed before the query. All pipeline commands fail with a
+//     connection/EOF error (not a redis.Error). The function must return a non-nil error so
+//     Score can call RecordKVCacheError(StageRedis) and log the outage.
+//
+//   - empty_hit: the queried key does not exist. HGETALL returns an empty map without an
+//     error. The function must return an empty result with nil error (genuine cache miss).
 func TestKVCacheAware_QueryRedisForBlocks_PipelineErrors(t *testing.T) {
-	t.Run("partial_wrongtype_keeps_valid_blocks", func(t *testing.T) {
-		mr, err := miniredis.Run()
-		if err != nil {
-			t.Fatalf("miniredis.Run: %v", err)
-		}
-		defer mr.Close()
+	type setupFunc func(t *testing.T, mr *miniredis.Miniredis, client *redis.Client, ctx context.Context) []uint64
 
-		client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-		defer client.Close()
+	tests := []struct {
+		name       string
+		clientOpts func(addr string) *redis.Options // nil → default (just addr)
+		closeFirst bool                              // close miniredis before the query
+		setup      setupFunc                         // nil → no data seeded
+		wantErr    bool
+		check      func(t *testing.T, result map[uint64][]string)
+	}{
+		{
+			name: "partial_wrongtype_keeps_valid_blocks",
+			setup: func(t *testing.T, _ *miniredis.Miniredis, client *redis.Client, ctx context.Context) []uint64 {
+				t.Helper()
+				goodHash := uint64(1001)
+				badHash := uint64(1002)
+				goodKey := KVCacheAwareBlock{ModelName: "m", ChunkHash: goodHash}.String(kvCacheKeyPrefix)
+				badKey := KVCacheAwareBlock{ModelName: "m", ChunkHash: badHash}.String(kvCacheKeyPrefix)
+				now := fmt.Sprintf("%d", time.Now().Unix())
+				if err := client.HSet(ctx, goodKey, "pod-ok.default", now).Err(); err != nil {
+					t.Fatalf("HSet goodKey: %v", err)
+				}
+				// Plain string under badKey forces HGETALL to return WRONGTYPE.
+				if err := client.Set(ctx, badKey, "not-a-hash", 0).Err(); err != nil {
+					t.Fatalf("Set badKey: %v", err)
+				}
+				return []uint64{goodHash, badHash}
+			},
+			wantErr: false,
+			check: func(t *testing.T, result map[uint64][]string) {
+				t.Helper()
+				if len(result[1001]) == 0 {
+					t.Errorf("expected pod-ok.default in goodHash(1001) result, got empty")
+				}
+				if len(result[1002]) != 0 {
+					t.Errorf("expected no results for WRONGTYPE key (1002), got %v", result[1002])
+				}
+			},
+		},
+		{
+			name:       "complete_outage_returns_error",
+			closeFirst: true,
+			clientOpts: func(addr string) *redis.Options {
+				return &redis.Options{
+					Addr:        addr,
+					DialTimeout: 50 * time.Millisecond,
+					ReadTimeout: 50 * time.Millisecond,
+				}
+			},
+			setup: func(_ *testing.T, _ *miniredis.Miniredis, _ *redis.Client, _ context.Context) []uint64 {
+				return []uint64{9999}
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty_hit_returns_empty_no_error",
+			setup: func(_ *testing.T, _ *miniredis.Miniredis, _ *redis.Client, _ context.Context) []uint64 {
+				// No data seeded — HGETALL on a missing key returns an empty map, not redis.Nil.
+				return []uint64{8888}
+			},
+			wantErr: false,
+			check: func(t *testing.T, result map[uint64][]string) {
+				t.Helper()
+				if len(result) != 0 {
+					t.Errorf("expected empty result for missing key, got %v", result)
+				}
+			},
+		},
+	}
 
-		plugin := &KVCacheAware{keyPrefix: kvCacheKeyPrefix, redisClient: client}
-		ctx := context.Background()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mr, err := miniredis.Run()
+			if err != nil {
+				t.Fatalf("miniredis.Run: %v", err)
+			}
+			addr := mr.Addr() // capture before any Close()
+			if tt.closeFirst {
+				mr.Close()
+			} else {
+				defer mr.Close()
+			}
 
-		goodHash := uint64(1001)
-		badHash := uint64(1002)
-		goodKey := KVCacheAwareBlock{ModelName: "m", ChunkHash: goodHash}.String(kvCacheKeyPrefix)
-		badKey := KVCacheAwareBlock{ModelName: "m", ChunkHash: badHash}.String(kvCacheKeyPrefix)
+			opts := &redis.Options{Addr: addr}
+			if tt.clientOpts != nil {
+				opts = tt.clientOpts(addr)
+			}
+			client := redis.NewClient(opts)
+			defer client.Close()
 
-		now := fmt.Sprintf("%d", time.Now().Unix())
-		if err := client.HSet(ctx, goodKey, "pod-ok.default", now).Err(); err != nil {
-			t.Fatalf("HSet goodKey: %v", err)
-		}
-		// Write a plain string under badKey so HGETALL returns WRONGTYPE.
-		if err := client.Set(ctx, badKey, "not-a-hash", 0).Err(); err != nil {
-			t.Fatalf("Set badKey: %v", err)
-		}
+			ctx := context.Background()
+			var hashes []uint64
+			if tt.setup != nil {
+				hashes = tt.setup(t, mr, client, ctx)
+			}
 
-		result, err := plugin.queryRedisForBlocks([]uint64{goodHash, badHash}, "m", nil)
-		if err != nil {
-			t.Errorf("expected nil error for partial WRONGTYPE, got %v", err)
-		}
-		if len(result[goodHash]) == 0 {
-			t.Errorf("expected pod-ok.default in goodHash result, got empty")
-		}
-		if len(result[badHash]) != 0 {
-			t.Errorf("expected no results for WRONGTYPE key, got %v", result[badHash])
-		}
-	})
+			plugin := &KVCacheAware{keyPrefix: kvCacheKeyPrefix, redisClient: client}
+			result, err := plugin.queryRedisForBlocks(hashes, "m", nil)
 
-	t.Run("complete_outage_returns_error", func(t *testing.T) {
-		mr, err := miniredis.Run()
-		if err != nil {
-			t.Fatalf("miniredis.Run: %v", err)
-		}
-		addr := mr.Addr() // save before Close() zeroes the internal field
-		mr.Close()
-
-		client := redis.NewClient(&redis.Options{
-			Addr:        addr,
-			DialTimeout: 50 * time.Millisecond,
-			ReadTimeout: 50 * time.Millisecond,
+			if tt.wantErr && err == nil {
+				t.Errorf("expected non-nil error, got nil (result=%v)", result)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("expected nil error, got %v", err)
+			}
+			if tt.check != nil {
+				tt.check(t, result)
+			}
 		})
-		defer client.Close()
-
-		plugin := &KVCacheAware{keyPrefix: kvCacheKeyPrefix, redisClient: client}
-
-		result, err := plugin.queryRedisForBlocks([]uint64{9999}, "m", nil)
-		if err == nil {
-			t.Errorf("expected non-nil error for complete Redis outage, got nil (result=%v)", result)
-		}
-	})
-
-	t.Run("empty_lookup_returns_empty_no_error", func(t *testing.T) {
-		mr, err := miniredis.Run()
-		if err != nil {
-			t.Fatalf("miniredis.Run: %v", err)
-		}
-		defer mr.Close()
-
-		client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-		defer client.Close()
-
-		plugin := &KVCacheAware{keyPrefix: kvCacheKeyPrefix, redisClient: client}
-
-		// Key does not exist: HGETALL returns empty map, not an error.
-		result, err := plugin.queryRedisForBlocks([]uint64{8888}, "m", nil)
-		if err != nil {
-			t.Errorf("expected nil error for missing key, got %v", err)
-		}
-		if len(result) != 0 {
-			t.Errorf("expected empty result for missing key, got %v", result)
-		}
-	})
+	}
 }
 
 func BenchmarkCalculatePodScores(b *testing.B) {
