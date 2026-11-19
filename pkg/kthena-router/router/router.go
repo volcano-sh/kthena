@@ -26,6 +26,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"strconv"
 	"strings"
@@ -300,7 +301,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			return
 		}
 
-		// step 2: Detection of rate limit
+		// step 2: Prepare request metadata
 		modelName := modelRequest["model"].(string)
 
 		// Set model name in access log
@@ -356,34 +357,6 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// Record input tokens immediately
 		metricsRecorder.RecordInputTokens(inputTokens)
 
-		// Apply rate limiting using the unified rate limiter
-		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
-			var errorMsg string
-			var errorType string
-			var tokenType string
-			switch err.(type) {
-			case *ratelimit.InputRateLimitExceededError:
-				errorMsg = "input token rate limit exceeded"
-				errorType = "input_rate_limit"
-				tokenType = metrics.LimitTypeInputTokens
-			case *ratelimit.OutputRateLimitExceededError:
-				errorMsg = "output token rate limit exceeded"
-				errorType = "output_rate_limit"
-				tokenType = metrics.LimitTypeOutputTokens
-			default:
-				errorMsg = "token usage exceeds rate limit"
-				errorType = "rate_limit"
-				tokenType = metrics.LimitTypeRequests
-			}
-			accesslog.SetError(c, errorType, errorMsg)
-
-			// Record rate limit exceeded
-			metricsRecorder.RecordRateLimitExceeded(tokenType)
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
-			c.Set("finishReason", "rate_limit")
-			return
-		}
-
 		requestID := uuid.New().String()
 		if c.Request.Header.Get("x-request-id") == "" {
 			c.Request.Header.Set("x-request-id", requestID)
@@ -391,6 +364,11 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 		// Store metrics recorder in context for use in other functions
 		c.Set("metricsRecorder", metricsRecorder)
+
+		if err := r.loadRateLimiter.CheckRateLimit(modelName, promptStr); err != nil {
+			r.abortRateLimited(c, err)
+			return
+		}
 
 		// step 3.1: direct load balancing when neither fairness scheduling nor
 		// session boost is enabled. doLoadbalance validates the route itself
@@ -432,6 +410,23 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 
 func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error {
 	modelName := modelRequest["model"].(string)
+
+	var prompt *common.ChatMessage
+	if cached, exists := c.Get(PromptKey); exists {
+		var ok bool
+		if prompt, ok = cached.(*common.ChatMessage); !ok {
+			accesslog.SetError(c, "prompt_parsing", "internal error: invalid prompt type")
+			c.AbortWithStatusJSON(http.StatusInternalServerError, "internal error")
+			return fmt.Errorf("invalid prompt type")
+		}
+	} else {
+		accesslog.SetError(c, "prompt_parsing", "prompt not found")
+		c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
+		return fmt.Errorf("prompt not found")
+	}
+
+	var quota *inputQuotaCharge
+	defer func() { quota.settle() }()
 
 	// Check if this is an InferencePool request from HTTPRoute
 	var pods []*datastore.PodInfo
@@ -476,6 +471,9 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 				c.Set("finishReason", "provider_discovery")
 				c.AbortWithStatusJSON(http.StatusNotFound, fmt.Sprintf("can't find external model provider: %v", modelTarget.Name))
 				return nil
+			}
+			if quota, err = r.applyRateLimit(c, modelName, prompt); err != nil {
+				return err
 			}
 
 			modelRouteName := ""
@@ -601,20 +599,6 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	}
 
 	// Common scheduling logic for both ModelServer and InferencePool
-	var prompt *common.ChatMessage
-	if cached, exists := c.Get(PromptKey); exists {
-		var ok bool
-		if prompt, ok = cached.(*common.ChatMessage); !ok {
-			accesslog.SetError(c, "prompt_parsing", "internal error: invalid prompt type")
-			c.AbortWithStatusJSON(http.StatusInternalServerError, "internal error")
-			return fmt.Errorf("invalid prompt type")
-		}
-	} else {
-		accesslog.SetError(c, "prompt_parsing", "prompt not found")
-		c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
-		return fmt.Errorf("prompt not found")
-	}
-
 	// Get metrics recorder from gin context
 	var metricsRecorder *metrics.RequestMetricsRecorder
 	if recorder, exists := c.Get("metricsRecorder"); exists {
@@ -671,6 +655,10 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
 		return fmt.Errorf("can't schedule to target pod: %v", err)
 	}
+	// Charge token quota only after a target pod has been selected.
+	if quota, err = r.applyRateLimit(c, modelName, prompt); err != nil {
+		return err
+	}
 	r.finalizeSessionSticky(c, ctx, stickySpec, sessionKey, stickyStoreKey, stickyBinding, stickyBindingFound, modelServerName.Name)
 
 	// Set complete request routing information in access log
@@ -724,6 +712,77 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		return err
 	}
 	return nil
+}
+
+type inputQuotaCharge struct {
+	charge    *ratelimit.InputCharge
+	delivered atomic.Bool
+}
+
+// settle refunds the input quota if no backend received the request.
+func (q *inputQuotaCharge) settle() {
+	if q == nil || q.delivered.Load() {
+		return
+	}
+	q.charge.Refund()
+}
+
+// applyRateLimit charges the request against the model's token rate limits.
+// When the request is rejected it writes a 429 response and returns an error.
+// The returned charge must be settled once the request is done; it is nil when no input quota was taken.
+func (r *Router) applyRateLimit(c *gin.Context, modelName string, prompt *common.ChatMessage) (*inputQuotaCharge, error) {
+	charge, err := r.loadRateLimiter.ChargeRateLimit(modelName, utils.GetPromptString(prompt))
+	if err != nil {
+		r.abortRateLimited(c, err)
+		return nil, err
+	}
+	if charge == nil {
+		return nil, nil
+	}
+
+	quota := &inputQuotaCharge{charge: charge}
+	trace := &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				quota.delivered.Store(true)
+			}
+		},
+		GotFirstResponseByte: func() {
+			quota.delivered.Store(true)
+		},
+	}
+	c.Request = c.Request.WithContext(httptrace.WithClientTrace(c.Request.Context(), trace))
+	return quota, nil
+}
+
+// abortRateLimited writes the 429 response and records the rate limit rejection.
+func (r *Router) abortRateLimited(c *gin.Context, err error) {
+	var errorMsg string
+	var errorType string
+	var tokenType string
+	switch err.(type) {
+	case *ratelimit.InputRateLimitExceededError:
+		errorMsg = "input token rate limit exceeded"
+		errorType = "input_rate_limit"
+		tokenType = metrics.LimitTypeInputTokens
+	case *ratelimit.OutputRateLimitExceededError:
+		errorMsg = "output token rate limit exceeded"
+		errorType = "output_rate_limit"
+		tokenType = metrics.LimitTypeOutputTokens
+	default:
+		errorMsg = "token usage exceeds rate limit"
+		errorType = "rate_limit"
+		tokenType = metrics.LimitTypeRequests
+	}
+	accesslog.SetError(c, errorType, errorMsg)
+
+	if recorder, exists := c.Get("metricsRecorder"); exists {
+		if rec, ok := recorder.(*metrics.RequestMetricsRecorder); ok {
+			rec.RecordRateLimitExceeded(tokenType)
+		}
+	}
+	c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
+	c.Set("finishReason", "rate_limit")
 }
 
 // upstreamTimeoutFor returns the timeout configured on the ModelServer, or zero

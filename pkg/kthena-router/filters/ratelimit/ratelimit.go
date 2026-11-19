@@ -19,6 +19,7 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -53,6 +54,8 @@ func (e *OutputRateLimitExceededError) Error() string {
 type Limiter interface {
 	// AllowN reports whether n tokens may be consumed and consumes them if so
 	AllowN(now time.Time, n int) bool
+	// ReturnN gives n previously consumed tokens back, without exceeding the bucket capacity
+	ReturnN(now time.Time, n int)
 	// Tokens returns the number of tokens currently available
 	Tokens() float64
 }
@@ -71,21 +74,75 @@ type TokenRateLimiter struct {
 	tokenizer tokenizer.Tokenizer
 }
 
-// LocalLimiter wraps golang.org/x/time/rate.Limiter to implement our Limiter interface
 type LocalLimiter struct {
-	*rate.Limiter
+	mu     sync.Mutex
+	limit  rate.Limit
+	burst  float64
+	tokens float64
+	last   time.Time
 }
 
-// NewLocalLimiter creates a new LocalLimiter
+// NewLocalLimiter creates a new LocalLimiter with a full bucket
 func NewLocalLimiter(limit rate.Limit, burst int) *LocalLimiter {
 	return &LocalLimiter{
-		Limiter: rate.NewLimiter(limit, burst),
+		limit:  limit,
+		burst:  float64(burst),
+		tokens: float64(burst),
+		last:   time.Now(),
 	}
+}
+
+// advance refills the bucket for the time elapsed since the last update.
+func (l *LocalLimiter) advance(now time.Time) {
+	if !now.After(l.last) {
+		return
+	}
+	l.tokens = math.Min(l.burst, l.tokens+now.Sub(l.last).Seconds()*float64(l.limit))
+	l.last = now
+}
+
+// AllowN reports whether n tokens may be consumed at now and consumes them if so
+func (l *LocalLimiter) AllowN(now time.Time, n int) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.advance(now)
+	if float64(n) > l.tokens {
+		return false
+	}
+	l.tokens -= float64(n)
+	return true
+}
+
+// ReturnN gives n tokens back, without exceeding the burst
+func (l *LocalLimiter) ReturnN(now time.Time, n int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.advance(now)
+	l.tokens = math.Min(l.burst, l.tokens+float64(n))
 }
 
 // Tokens returns the number of tokens currently available
 func (l *LocalLimiter) Tokens() float64 {
-	return l.Limiter.Tokens()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.advance(time.Now())
+	return l.tokens
+}
+
+type InputCharge struct {
+	limiter Limiter
+	tokens  int
+}
+
+// Refund returns the charged tokens to the limiter they were taken from.
+func (c *InputCharge) Refund() {
+	if c == nil || c.limiter == nil || c.tokens <= 0 {
+		return
+	}
+	c.limiter.ReturnN(time.Now(), c.tokens)
 }
 
 // NewTokenRateLimiter creates a new TokenRateLimiter instance
@@ -99,30 +156,57 @@ func NewTokenRateLimiter() *TokenRateLimiter {
 
 // RateLimit checks if the request is within rate limits for both input and output tokens
 func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
-	// Estimate input tokens
+	_, err := r.rateLimit(model, prompt, true)
+	return err
+}
+
+// ChargeRateLimit is RateLimit that also returns the input quota it took, so the caller can refund it.
+func (r *TokenRateLimiter) ChargeRateLimit(model, prompt string) (*InputCharge, error) {
+	return r.rateLimit(model, prompt, true)
+}
+
+// CheckRateLimit reports whether the request is within rate limits without consuming any quota.
+func (r *TokenRateLimiter) CheckRateLimit(model, prompt string) error {
+	_, err := r.rateLimit(model, prompt, false)
+	return err
+}
+
+func (r *TokenRateLimiter) rateLimit(model, prompt string, consume bool) (*InputCharge, error) {
+	r.mutex.RLock()
+	inputLimiter, hasInputLimit := r.inputLimiter[model]
+	outputLimiter, hasOutputLimit := r.outputLimiter[model]
+	r.mutex.RUnlock()
+
+	if !hasInputLimit && !hasOutputLimit {
+		return nil, nil
+	}
+
+	// Check output token rate limit - we conservatively check if there's at least 1 token available
+	// This prevents starting requests that likely won't be able to complete
+	if hasOutputLimit && outputLimiter.Tokens() < 1.0 {
+		return nil, &OutputRateLimitExceededError{}
+	}
+
+	if !hasInputLimit {
+		return nil, nil
+	}
+
 	tokens, err := r.tokenizer.CalculateTokenNum(prompt)
 	if err != nil {
 		klog.Errorf("failed to calculate token number: %v", err)
 		tokens = len(prompt) / 4 // fallback estimation
 	}
 
-	r.mutex.RLock()
-	inputLimiter, hasInputLimit := r.inputLimiter[model]
-	outputLimiter, hasOutputLimit := r.outputLimiter[model]
-	r.mutex.RUnlock()
-
-	// Check input token rate limit
-	if hasInputLimit && !inputLimiter.AllowN(time.Now(), tokens) {
-		return &InputRateLimitExceededError{}
+	if !consume {
+		if inputLimiter.Tokens() < float64(tokens) {
+			return nil, &InputRateLimitExceededError{}
+		}
+		return nil, nil
 	}
-
-	// Check output token rate limit - we conservatively check if there's at least 1 token available
-	// This prevents starting requests that likely won't be able to complete
-	if hasOutputLimit && outputLimiter.Tokens() < 1.0 {
-		return &OutputRateLimitExceededError{}
+	if !inputLimiter.AllowN(time.Now(), tokens) {
+		return nil, &InputRateLimitExceededError{}
 	}
-
-	return nil
+	return &InputCharge{limiter: inputLimiter, tokens: tokens}, nil
 }
 
 // RecordOutputTokens records the actual output tokens consumed after response generation
