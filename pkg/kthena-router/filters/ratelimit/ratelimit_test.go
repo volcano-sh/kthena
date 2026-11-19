@@ -276,3 +276,130 @@ func TestTokenRateLimiter_InputAndOutputErrors(t *testing.T) {
 		t.Fatalf("expected OutputRateLimitExceededError, got %T: %v", err, err)
 	}
 }
+
+func TestTokenRateLimiter_OutputRejectDoesNotConsumeInput(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model"
+	prompt := "hello world" // 3 tokens with SimpleEstimateTokenizer
+	inputTokens := uint32(9)
+	outputTokens := uint32(5)
+	unit := networkingv1alpha1.Second
+
+	if err := rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit:  &inputTokens,
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                unit,
+	}); err != nil {
+		t.Fatalf("AddOrUpdateLimiter: %v", err)
+	}
+
+	rl.RecordOutputTokens(model, 5)
+
+	err := rl.RateLimit(model, prompt)
+	if err == nil {
+		t.Fatal("expected output rate limit error")
+	}
+	if _, ok := err.(*OutputRateLimitExceededError); !ok {
+		t.Fatalf("expected OutputRateLimitExceededError, got %T: %v", err, err)
+	}
+
+	// Wait for the output bucket to refill. Input must still allow exactly three
+	// successful requests (9 tokens), proving the rejected call did not consume input.
+	time.Sleep(1100 * time.Millisecond)
+
+	for i := 0; i < 3; i++ {
+		if err := rl.RateLimit(model, prompt); err != nil {
+			t.Fatalf("request %d should be allowed after output refill: %v", i, err)
+		}
+	}
+	err = rl.RateLimit(model, prompt)
+	if err == nil {
+		t.Fatal("expected input rate limit after exactly three allowed requests")
+	}
+	if _, ok := err.(*InputRateLimitExceededError); !ok {
+		t.Fatalf("expected InputRateLimitExceededError, got %T: %v", err, err)
+	}
+}
+
+func TestTokenRateLimiter_PartialUpdateClearsSideLimiter(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model"
+	prompt := "hello world" // 3 tokens
+	inputTokens := uint32(3)
+	outputTokens := uint32(100)
+	unit := networkingv1alpha1.Second
+
+	if err := rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit:  &inputTokens,
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                unit,
+	}); err != nil {
+		t.Fatalf("AddOrUpdateLimiter: %v", err)
+	}
+
+	if err := rl.RateLimit(model, prompt); err != nil {
+		t.Fatalf("first request should be allowed: %v", err)
+	}
+	if err := rl.RateLimit(model, prompt); err == nil {
+		t.Fatal("expected input rate limit after exhausting input budget")
+	}
+
+	// Clear inputTokensPerUnit; CRD semantics say that side has no limit.
+	if err := rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                unit,
+	}); err != nil {
+		t.Fatalf("AddOrUpdateLimiter clear input: %v", err)
+	}
+
+	if err := rl.RateLimit(model, prompt); err != nil {
+		t.Fatalf("expected request allowed after clearing inputTokensPerUnit: %v", err)
+	}
+
+	// Clear outputTokensPerUnit while keeping a tight input limit.
+	tightInput := uint32(3)
+	if err := rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit: &tightInput,
+		Unit:               unit,
+	}); err != nil {
+		t.Fatalf("AddOrUpdateLimiter clear output: %v", err)
+	}
+
+	rl.RecordOutputTokens(model, 1000) // would block if a stale output limiter remained
+	if err := rl.RateLimit(model, prompt); err != nil {
+		t.Fatalf("expected request allowed after clearing outputTokensPerUnit: %v", err)
+	}
+}
+
+func TestTokenRateLimiter_OutputLimitAfterRecordedCompletions(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model"
+	outputTokens := uint32(5)
+	unit := networkingv1alpha1.Minute
+
+	if err := rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                unit,
+	}); err != nil {
+		t.Fatalf("AddOrUpdateLimiter: %v", err)
+	}
+
+	var limitedAt int
+	for i := 0; i < 20; i++ {
+		err := rl.RateLimit(model, "hello world")
+		if err != nil {
+			if _, ok := err.(*OutputRateLimitExceededError); !ok {
+				t.Fatalf("request %d: expected OutputRateLimitExceededError, got %T: %v", i, err, err)
+			}
+			limitedAt = i
+			break
+		}
+		rl.RecordOutputTokens(model, 1)
+	}
+	if limitedAt == 0 {
+		t.Fatal("expected output rate limit after recording completion tokens")
+	}
+	if limitedAt > 6 {
+		t.Fatalf("expected output limit around burst 5, got first rejection at request %d", limitedAt)
+	}
+}
