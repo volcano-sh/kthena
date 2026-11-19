@@ -121,7 +121,7 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	decodeBody["bootstrap_host"] = prefillHost
 	decodeRequest, err := buildRequest(c.Request, decodeBody)
 	if err != nil {
-		return http.StatusInternalServerError, err
+		return 0, &NonRetryableError{Err: fmt.Errorf("failed to build decode request: %w", err)}
 	}
 
 	// Build the prefill request: strip streaming, cap max_tokens, add bootstrap_room.
@@ -132,7 +132,7 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 	prefillBody["bootstrap_room"] = bootstrapRoom
 	prefillRequest, err := buildRequest(req, prefillBody)
 	if err != nil {
-		return http.StatusInternalServerError, err
+		return 0, &NonRetryableError{Err: fmt.Errorf("failed to build prefill request: %w", err)}
 	}
 
 	// --- Launch prefill and decode concurrently ---
@@ -210,7 +210,7 @@ func (s *SGLangConnector) Proxy(c *gin.Context, reqBody map[string]interface{}, 
 
 	if prefillResult.err != nil {
 		klog.Errorf("sglang prefill error (bootstrap_room=%d): %v", bootstrapRoom, prefillResult.err)
-		return http.StatusInternalServerError, prefillResult.err
+		return 0, prefillResult.err
 	}
 
 	return result, decodeErr
