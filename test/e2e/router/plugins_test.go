@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/plugins"
 	plugincontext "github.com/volcano-sh/kthena/test/e2e/router/router-plugins/context"
@@ -33,11 +34,15 @@ import (
 // TestSchedulerPluginKVCacheAware verifies cache hits prefer the owning replica and misses do not pin to one replica.
 func TestSchedulerPluginKVCacheAware(t *testing.T) {
 	ctx := context.Background()
+	var redisClient *redis.Client
+	defer func() {
+		logKVCacheDiagnostics(t, testCtx.KubeClient, redisClient, testNamespace, kthenaNamespace, plugincontext.ModelName)
+	}()
 	redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
 	t.Cleanup(redisCleanup)
 
 	pods := setupKVCacheFixture(t, testCtx.KubeClient, testNamespace, kthenaNamespace)
-	redisClient := setupKVCacheRedisClient(t, kthenaNamespace)
+	redisClient = setupKVCacheRedisClient(t, kthenaNamespace)
 	_ = utils.CreateModelServerFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelServer-plugins-kvcache.yaml")
 
 	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerKVCacheAware, kvCacheFixtureName, plugincontext.ModelName)
@@ -85,11 +90,15 @@ func TestSchedulerPluginKVCacheAware(t *testing.T) {
 // TestSchedulerPluginKVCacheAwarePrefixAndLifecycle verifies longest-prefix scoring, removal events, and stale ownership handling.
 func TestSchedulerPluginKVCacheAwarePrefixAndLifecycle(t *testing.T) {
 	ctx := context.Background()
+	var redisClient *redis.Client
+	defer func() {
+		logKVCacheDiagnostics(t, testCtx.KubeClient, redisClient, testNamespace, kthenaNamespace, plugincontext.ModelName)
+	}()
 	redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
 	t.Cleanup(redisCleanup)
 
 	pods := setupKVCacheFixture(t, testCtx.KubeClient, testNamespace, kthenaNamespace)
-	redisClient := setupKVCacheRedisClient(t, kthenaNamespace)
+	redisClient = setupKVCacheRedisClient(t, kthenaNamespace)
 	_ = utils.CreateModelServerFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelServer-plugins-kvcache.yaml")
 
 	chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerKVCacheAware, kvCacheFixtureName, plugincontext.ModelName)
@@ -200,11 +209,18 @@ func TestSchedulerPluginKVCacheAwarePrefixAndLifecycle(t *testing.T) {
 // TestSchedulerPluginMixedWeights verifies plugin weights decide the winner when score plugins disagree.
 func TestSchedulerPluginMixedWeights(t *testing.T) {
 	ctx := context.Background()
+	var redisClient *redis.Client
+	setupFinished := false
+	defer func() {
+		if !setupFinished {
+			logKVCacheDiagnostics(t, testCtx.KubeClient, redisClient, testNamespace, kthenaNamespace, plugincontext.ModelName)
+		}
+	}()
 	redisCleanup := ensureRedis(t, testCtx.KubeClient, kthenaNamespace)
 	t.Cleanup(redisCleanup)
 
 	pods := setupKVCacheFixture(t, testCtx.KubeClient, testNamespace, kthenaNamespace)
-	redisClient := setupKVCacheRedisClient(t, kthenaNamespace)
+	redisClient = setupKVCacheRedisClient(t, kthenaNamespace)
 	_ = utils.CreateModelServerFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelServer-plugins-kvcache.yaml")
 	route := utils.CreateModelRouteFromFile(t, ctx, testCtx.KthenaClient, plugincontext.TestDataDir, testNamespace, "ModelRoute-plugins-kvcache.yaml")
 	prompt := "kthena kvcache routing test"
@@ -219,8 +235,10 @@ func TestSchedulerPluginMixedWeights(t *testing.T) {
 	stopOtherLoad := utils.StartSustainedLongRequestsToPod(t, otherHotPod, route.Spec.ModelName, "unrelated gpu load prompt", gpuCacheUsageLoadConcurrency, gpuCacheUsageLoadMaxTokens)
 	t.Cleanup(stopOtherLoad)
 	messages := []utils.ChatMessage{utils.NewChatMessage("user", prompt)}
+	setupFinished = true
 
 	t.Run("kvcache weight wins", func(t *testing.T) {
+		defer logKVCacheDiagnostics(t, testCtx.KubeClient, redisClient, testNamespace, kthenaNamespace, plugincontext.ModelName)
 		schedulerConfig := schedulerKVCacheAndGPUUsage(mixedPluginDominantWeight, 1)
 		chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerConfig, kvCacheFixtureName, plugincontext.ModelName)
 		t.Cleanup(restoreCfg)
@@ -233,6 +251,7 @@ func TestSchedulerPluginMixedWeights(t *testing.T) {
 	})
 
 	t.Run("gpu usage weight wins", func(t *testing.T) {
+		defer logKVCacheDiagnostics(t, testCtx.KubeClient, redisClient, testNamespace, kthenaNamespace, plugincontext.ModelName)
 		schedulerConfig := schedulerKVCacheAndGPUUsage(1, mixedPluginDominantWeight)
 		chatURL, metricsURL, restoreCfg := utils.ApplySchedulerConfig(t, testCtx.KubeClient, testCtx.KthenaClient, kthenaNamespace, testNamespace, schedulerConfig, kvCacheFixtureName, plugincontext.ModelName)
 		t.Cleanup(restoreCfg)

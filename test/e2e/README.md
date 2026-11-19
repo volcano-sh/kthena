@@ -31,6 +31,12 @@ When multiple Score plugins are enabled, the Router adds each plugin score multi
 | Random | Random score | Traffic is distributed across ready replicas |
 | Mixed weights | KV-cache ownership and GPU usage | Changing the relative plugin weights changes the selected replica |
 
+#### KV-cache-aware fixture
+
+The focused suite uses `test/e2e/router/router-plugins/testdata/LLM-Mock-plugins-kvcache.yaml`, which runs three `llm-d-inference-sim` replicas with a Kthena Runtime sidecar in each Pod. Direct requests to a simulator produce real KV-cache events over ZMQ. The Runtime converts those events into the engine-hash mappings and `matrix:kv:block` ownership entries used by the Router.
+
+The tests calculate prompt block hashes independently and wait for the exact Redis mapping before checking routing. Cache eviction produces `BlockRemoved`; the simulator lifecycle endpoint produces `AllBlocksCleared`. Selection is verified from Router access logs, and plugin execution is verified from Router metrics.
+
 ## Prerequisites
 
 - [Kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) must be installed
@@ -56,6 +62,8 @@ The GitHub Actions E2E workflow runs the same category targets in parallel by us
 | `E2E (router)` | `make test-e2e-router` | `kthena-router` |
 | `E2E (gateway-api)` | `make test-e2e-gateway-api` | `kthena-gateway-api` |
 | `E2E (gateway-inference-extension)` | `make test-e2e-gateway-inference-extension` | `kthena-gateway-inference-extension` |
+
+The KV-cache-aware tests remain part of the Router package, so the existing `E2E (router)` job runs them without another matrix entry. The focused target is for local development.
 
 The workflow only runs for pull requests that touch runtime, chart, test, or E2E workflow paths. Documentation-only changes outside those paths should not trigger this workflow.
 
@@ -96,7 +104,7 @@ make test-e2e
 make test-e2e-cleanup
 ```
 
-### Run Specific Category
+### Run a Category or Focused Suite
 
 ```bash
 # Controller manager tests
@@ -104,6 +112,9 @@ make test-e2e-controller-manager
 
 # Router tests (no Gateway API, includes scheduler plugins)
 make test-e2e-router
+
+# KV-cache-aware router tests only
+make test-e2e-router-kvcache-aware
 
 # Gateway API tests
 make test-e2e-gateway-api
@@ -114,6 +125,20 @@ make test-e2e-gateway-inference-extension
 # Cleanup after any test
 make test-e2e-cleanup
 ```
+
+### Extend the KV-cache-aware Suite
+
+The scenarios are in `test/e2e/router/plugins_test.go`, with fixture, Redis, tokenization, and lifecycle helpers in `test/e2e/router/plugins_helpers.go`.
+
+When adding a scenario:
+
+1. Reuse `setupKVCacheFixture` and `setupKVCacheRedisClient`.
+2. Create cache state with `utils.DirectChatToPod` or `postKVCacheLifecycle`. Do not write ownership directly to Redis.
+3. Use the bounded `waitForKVCache...` helpers to assert the expected mapping or removal.
+4. Route the request through the Router and assert the selected Pod or plugin metric.
+5. Keep cleanup registered with `t.Cleanup` and confirm a second clean run passes.
+
+On failure, the tests print Redis mappings and ownership, relevant Pod and container state, recent container logs, and namespace events before cleanup. CI also uploads the existing `kind export logs` artifact for node and cluster state. For a local failure, run `kind export logs --name kthena-e2e ./kthena-e2e-logs` before cleanup.
 
 ### Reproduce a CI Category Locally
 

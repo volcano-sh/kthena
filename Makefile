@@ -115,6 +115,12 @@ test-e2e-router: ## Run router e2e tests.
 	@go test -v ./test/e2e/external-provider-mock
 	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=18m ./test/e2e/router
 
+.PHONY: test-e2e-router-kvcache-aware
+test-e2e-router-kvcache-aware: ## Run KV-cache-aware router e2e tests.
+	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
+	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} TEST_CATEGORY=router ./test/e2e/setup.sh
+	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -v -count=1 -timeout=18m -run '^TestSchedulerPlugin(KVCacheAware|MixedWeights)' ./test/e2e/router
+
 .PHONY: test-e2e-gateway-api
 test-e2e-gateway-api: ## Run gateway-api e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }

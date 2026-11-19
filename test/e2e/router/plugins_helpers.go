@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -243,6 +244,74 @@ func scanKVCacheKeys(ctx context.Context, client *redis.Client, pattern string) 
 		keys = append(keys, iter.Val())
 	}
 	return keys, iter.Err()
+}
+
+func logKVCacheDiagnostics(t *testing.T, kube kubernetes.Interface, client *redis.Client, testNamespace, kthenaNamespace, model string) {
+	t.Helper()
+	if !t.Failed() {
+		return
+	}
+
+	if client != nil {
+		redisCtx, redisCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer redisCancel()
+		mappingKeys, mappingErr := scanKVCacheKeys(redisCtx, client, kvCacheMappingPrefix+":*")
+		ownershipKeys, ownershipErr := scanKVCacheKeys(redisCtx, client, fmt.Sprintf("%s:%s@*", kvCacheOwnershipPrefix, model))
+		sort.Strings(mappingKeys)
+		sort.Strings(ownershipKeys)
+		t.Logf("KV-cache Redis mappings: keys=%v error=%v", mappingKeys, mappingErr)
+		for _, key := range mappingKeys {
+			value, err := client.Get(redisCtx, key).Result()
+			t.Logf("KV-cache Redis mapping: key=%s value=%s error=%v", key, value, err)
+		}
+		t.Logf("KV-cache Redis ownership: keys=%v error=%v", ownershipKeys, ownershipErr)
+		for _, key := range ownershipKeys {
+			owners, err := client.HGetAll(redisCtx, key).Result()
+			t.Logf("KV-cache Redis ownership: key=%s owners=%v error=%v", key, owners, err)
+		}
+	}
+
+	ctx, kubeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer kubeCancel()
+	podQueries := []struct {
+		namespace string
+		selector  string
+	}{
+		{testNamespace, "app=" + kvCacheFixtureAppLabel},
+		{kthenaNamespace, "app.kubernetes.io/component=kthena-router"},
+		{kthenaNamespace, "app.kubernetes.io/component=redis-server"},
+	}
+	tailLines := int64(200)
+	for _, query := range podQueries {
+		pods, err := kube.CoreV1().Pods(query.namespace).List(ctx, metav1.ListOptions{LabelSelector: query.selector})
+		if err != nil {
+			t.Logf("KV-cache diagnostic pods: namespace=%s selector=%s error=%v", query.namespace, query.selector, err)
+			continue
+		}
+		for _, pod := range pods.Items {
+			t.Logf("KV-cache diagnostic pod: %s/%s phase=%s ready=%t", pod.Namespace, pod.Name, pod.Status.Phase, utils.IsPodReady(pod))
+			for _, status := range pod.Status.ContainerStatuses {
+				t.Logf("KV-cache diagnostic container: %s/%s/%s ready=%t restarts=%d state=%+v",
+					pod.Namespace, pod.Name, status.Name, status.Ready, status.RestartCount, status.State)
+				logs, err := kube.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+					Container: status.Name,
+					TailLines: &tailLines,
+				}).DoRaw(ctx)
+				t.Logf("KV-cache diagnostic logs: %s/%s/%s error=%v\n%s", pod.Namespace, pod.Name, status.Name, err, logs)
+			}
+		}
+	}
+	for _, namespace := range []string{testNamespace, kthenaNamespace} {
+		events, err := kube.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			t.Logf("KV-cache diagnostic events: namespace=%s error=%v", namespace, err)
+			continue
+		}
+		for _, event := range events.Items {
+			t.Logf("KV-cache diagnostic event: namespace=%s object=%s/%s reason=%s message=%s",
+				namespace, event.InvolvedObject.Kind, event.InvolvedObject.Name, event.Reason, event.Message)
+		}
+	}
 }
 
 func waitForAllKVCacheOwnershipRemoved(t *testing.T, client *redis.Client, pod corev1.Pod, model string) {
