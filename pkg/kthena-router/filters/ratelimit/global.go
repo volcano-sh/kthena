@@ -178,7 +178,6 @@ func (g *GlobalRateLimiter) AllowN(now time.Time, n int) bool {
 
 // ConsumeN implements Limiter interface.
 // It deducts n tokens unconditionally, so the bucket may go negative and block later requests until refilled.
-// n is capped at the bucket capacity to match LocalLimiter.
 func (g *GlobalRateLimiter) ConsumeN(now time.Time, n int) {
 	key := fmt.Sprintf("%s:%s:%s", g.keyPrefix, g.modelName, g.tokenType)
 
@@ -209,7 +208,7 @@ func (g *GlobalRateLimiter) ConsumeN(now time.Time, n int) {
 		return 1
 	`
 
-	result := g.client.Eval(ctx, luaScript, []string{key}, min(n, g.burst), g.burst, g.getRefillRate(), g.getExpireSeconds())
+	result := g.client.Eval(ctx, luaScript, []string{key}, n, g.burst, g.getRefillRate(), g.getExpireSeconds())
 	if result.Err() != nil {
 		klog.Errorf("failed to execute token consume lua script: %v", result.Err())
 	}

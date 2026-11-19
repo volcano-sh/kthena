@@ -90,8 +90,19 @@ func NewLocalLimiter(limit rate.Limit, burst int) *LocalLimiter {
 }
 
 // ConsumeN implements Limiter interface.
+// ReserveN rejects n > burst without deducting anything, so n is charged in
+// burst-sized chunks. Each chunk succeeds because the reservation may wait
+// indefinitely, so the bucket ends up exactly n tokens lower, possibly negative.
 func (l *LocalLimiter) ConsumeN(now time.Time, n int) {
-	l.Limiter.ReserveN(now, min(n, l.Limiter.Burst()))
+	burst := l.Limiter.Burst()
+	if burst <= 0 {
+		return
+	}
+	for n > 0 {
+		k := min(n, burst)
+		l.Limiter.ReserveN(now, k)
+		n -= k
+	}
 }
 
 // Tokens returns the number of tokens currently available
