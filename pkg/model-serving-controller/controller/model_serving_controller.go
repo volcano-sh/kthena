@@ -2002,22 +2002,8 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdateInRound(ctx co
 		if partitionErr != nil {
 			return nil, false, fmt.Errorf("failed to parse partition for role %s: %v", roleSpec.Name, partitionErr)
 		}
-		protected := sets.New[string]()
-		for _, role := range roleList {
-			if partitionProtected(role.Name, partition) {
-				protected.Insert(role.Name)
-			}
-		}
-		if len(protected) > 0 && len(outdatedRoles) > 0 {
-			filtered := outdatedRoles[:0]
-			for _, r := range outdatedRoles {
-				if protected.Has(r.Name) {
-					continue
-				}
-				filtered = append(filtered, r)
-			}
-			outdatedRoles = filtered
-		}
+		protected := protectedRoleNames(roleList, partition)
+		outdatedRoles = withoutProtectedRoles(outdatedRoles, protected)
 
 		// Keep the existing ServingGroup revision semantics: protected outdated
 		// replicas still mean this ServingGroup has not fully reached the revision,
@@ -2075,18 +2061,11 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdateInRound(ctx co
 		rolesToDelete = append(rolesToDelete, localCandidates...)
 	}
 
-	// handle the case when there are roles whose roleSpec has been deleted in the new revision. Those roles should be deleted directly since they are all outdated.
-	for roleName, roles := range allRoles {
-		if _, ok := roleSpecByName[roleName]; ok {
-			continue
-		}
-		for roleID, role := range roles {
-			if role.Status == datastore.RoleDeleting {
-				continue
-			}
-			hasOutdatedRoles = true
-			rolesToDelete = append(rolesToDelete, roleToDelete{roleName: roleName, roleID: roleID})
-		}
+	// Roles whose Role template has been deleted in the new revision are all
+	// outdated and are deleted directly.
+	if removed := rolesWithoutSpec(roleSpecByName, allRoles); len(removed) > 0 {
+		hasOutdatedRoles = true
+		rolesToDelete = append(rolesToDelete, removed...)
 	}
 
 	return rolesToDelete, hasOutdatedRoles, nil

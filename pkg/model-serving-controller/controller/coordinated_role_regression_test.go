@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	kt "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
@@ -287,4 +288,128 @@ func TestCoordinatedAvailabilityUsesLivePodDespiteStaleDatastoreAndInformer(t *t
 	ready, err := c.checkRoleReady(ms, "live-0", role.Name, id)
 	require.NoError(t, err)
 	require.False(t, ready)
+}
+
+func roleStatus(name string, status datastore.RoleStatus) datastore.Role {
+	return datastore.Role{Name: name, Status: status}
+}
+
+func roleNames(roles []datastore.Role) []string {
+	out := make([]string, len(roles))
+	for i, r := range roles {
+		out[i] = r.Name
+	}
+	return out
+}
+
+func TestProtectedRoleNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		roleList  []datastore.Role
+		partition int
+		want      []string
+	}{
+		{
+			name:      "partition zero protects nothing",
+			roleList:  []datastore.Role{roleStatus("r-0", ""), roleStatus("r-1", "")},
+			partition: 0,
+			want:      nil,
+		},
+		{
+			name:      "partition protects ordinals below the bound",
+			roleList:  []datastore.Role{roleStatus("r-0", ""), roleStatus("r-1", ""), roleStatus("r-2", "")},
+			partition: 2,
+			want:      []string{"r-0", "r-1"},
+		},
+		{
+			name:      "partition above every ordinal protects all",
+			roleList:  []datastore.Role{roleStatus("r-0", ""), roleStatus("r-1", "")},
+			partition: 5,
+			want:      []string{"r-0", "r-1"},
+		},
+		{
+			name:      "empty list",
+			roleList:  nil,
+			partition: 3,
+			want:      nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := protectedRoleNames(tt.roleList, tt.partition)
+			if want := sets.New(tt.want...); !got.Equal(want) {
+				t.Fatalf("protectedRoleNames() = %v, want %v", sets.List(got), sets.List(want))
+			}
+		})
+	}
+}
+
+func TestWithoutProtectedRoles(t *testing.T) {
+	roles := []datastore.Role{roleStatus("r-0", ""), roleStatus("r-1", ""), roleStatus("r-2", "")}
+	tests := []struct {
+		name      string
+		outdated  []datastore.Role
+		protected sets.Set[string]
+		want      []string
+	}{
+		{
+			name:      "no protected roles returns input untouched",
+			outdated:  roles,
+			protected: sets.New[string](),
+			want:      []string{"r-0", "r-1", "r-2"},
+		},
+		{
+			name:      "protected roles are dropped",
+			outdated:  roles,
+			protected: sets.New[string]("r-0", "r-2"),
+			want:      []string{"r-1"},
+		},
+		{
+			name:      "all protected yields empty",
+			outdated:  roles,
+			protected: sets.New[string]("r-0", "r-1", "r-2"),
+			want:      nil,
+		},
+		{
+			name:      "empty outdated",
+			outdated:  nil,
+			protected: sets.New[string]("r-0"),
+			want:      nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withoutProtectedRoles(tt.outdated, tt.protected)
+			if len(got) != len(tt.want) {
+				t.Fatalf("withoutProtectedRoles() = %v, want %v", roleNames(got), tt.want)
+			}
+			for i, r := range got {
+				if r.Name != tt.want[i] {
+					t.Fatalf("withoutProtectedRoles() = %v, want %v", roleNames(got), tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestRolesWithoutSpec(t *testing.T) {
+	roleSpecByName := map[string]api.Role{
+		"keep": {Name: "keep"},
+	}
+	allRoles := map[string]map[string]*datastore.Role{
+		"keep": {
+			"keep-0": {Name: "keep-0"},
+		},
+		"removed": {
+			"removed-0": {Name: "removed-0"},
+			"removed-1": {Name: "removed-1", Status: datastore.RoleDeleting},
+		},
+	}
+	got := rolesWithoutSpec(roleSpecByName, allRoles)
+	if len(got) != 1 {
+		t.Fatalf("rolesWithoutSpec() = %v, want exactly one removed role", got)
+	}
+	if got[0].roleName != "removed" || got[0].roleID != "removed-0" {
+		t.Fatalf("rolesWithoutSpec() = %+v, want removed/removed-0", got[0])
+	}
 }
