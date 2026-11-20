@@ -4,7 +4,7 @@ metadata:
   name: trtllm-tinyllama-pd
   namespace: default
 spec:
-  # Pair with examples/model-serving/gpu-pd-tensorrtllm.yaml (NIXL transceiver).
+  # Pair with examples/tensorrtllm/gpu-pd-tensorrtllm.yaml (NIXL transceiver).
   # inferenceEngine TensorRTLLM auto-selects the native PD connector.
   workloadSelector:
     matchLabels:

@@ -51,10 +51,10 @@ Stale entries are garbage-collected in the router after 24 hours, and ownership 
 ## Prerequisites
 
 - **Redis** (Redis backend only): A Redis instance accessible by both the router and the runtime sidecars. Deploy Redis using the provided [redis-standalone.yaml](../assets/examples/redis/redis-standalone.yaml) example. Memory mode does not need Redis.
-- **Kthena Runtime sidecar**: Must be deployed alongside each engine pod. For vLLM/SGLang the sidecar listens to the ZMQ `kv-events` stream; for TensorRT-LLM (`--engine tensorrtllm`) it polls `POST /kv_cache_events` and reuses the same vLLM-compatible Redis / memory index path. See [`examples/model-serving/gpu-kvcache-aware-tensorrtllm.yaml`](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/gpu-kvcache-aware-tensorrtllm.yaml).
+- **Kthena Runtime sidecar**: Must be deployed alongside each engine pod. For vLLM/SGLang the sidecar listens to the ZMQ `kv-events` stream; for TensorRT-LLM (`--engine tensorrtllm`) it polls `POST /kv_cache_events` and reuses the same vLLM-compatible Redis / memory index path. See [`examples/tensorrtllm/gpu-kvcache-aware-tensorrtllm.yaml`](https://github.com/volcano-sh/kthena/blob/main/examples/tensorrtllm/gpu-kvcache-aware-tensorrtllm.yaml).
 - **Engine KV events**: vLLM v1 with `VLLM_USE_V1=1` and ZMQ kv-events; or TensorRT-LLM with `kv_cache_config.enable_block_reuse=true` and `event_buffer_max_size>0`.
 - **Multi-pod inference deployment**: The plugin is meaningful only when multiple pods serve the same model.
-- **Tokenizer**: TensorRT-LLM **1.0.0** has no `/tokenize` or `/v1/*/render`, so [`tokenizerService`](./tokenizer-service.md) is required (set a `models` map for the served name). Use `blockSizeToHash: 32` for TinyLlama. Example for [`gpu-kvcache-aware-tensorrtllm.yaml`](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/gpu-kvcache-aware-tensorrtllm.yaml):
+- **Tokenizer**: TensorRT-LLM **1.0.0** has no `/tokenize` or `/v1/*/render`, so [`tokenizerService`](./tokenizer-service.md) is required (set a `models` map for the served name). Use `blockSizeToHash: 32` for TinyLlama. Example for [`gpu-kvcache-aware-tensorrtllm.yaml`](https://github.com/volcano-sh/kthena/blob/main/examples/tensorrtllm/gpu-kvcache-aware-tensorrtllm.yaml):
 
   ```bash
   helm upgrade --install kthena charts/kthena -n kthena-system \
