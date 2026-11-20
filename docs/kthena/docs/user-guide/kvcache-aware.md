@@ -54,7 +54,14 @@ Stale entries are garbage-collected in the router after 24 hours, and ownership 
 - **Kthena Runtime sidecar**: Must be deployed alongside each engine pod. For vLLM/SGLang the sidecar listens to the ZMQ `kv-events` stream; for TensorRT-LLM (`--engine tensorrtllm`) it polls `POST /kv_cache_events` and reuses the same vLLM-compatible Redis / memory index path. See [`examples/model-serving/gpu-kvcache-aware-tensorrtllm.yaml`](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/gpu-kvcache-aware-tensorrtllm.yaml).
 - **Engine KV events**: vLLM v1 with `VLLM_USE_V1=1` and ZMQ kv-events; or TensorRT-LLM with `kv_cache_config.enable_block_reuse=true` and `event_buffer_max_size>0`.
 - **Multi-pod inference deployment**: The plugin is meaningful only when multiple pods serve the same model.
-- **Tokenizer**: TensorRT-LLM **1.0.0** (the example image) has no `/v1/*/render` routes, so enable [`tokenizerService`](./tokenizer-service.md) or every tokenize call 404s. Engine-side `/render` needs a newer TensorRT-LLM build with `TRTLLM_ENABLE_RENDER_ENDPOINTS=1`. Set `blockSizeToHash` to the engine tokens-per-block (commonly **32** for TinyLlama). Router snippet for [`gpu-kvcache-aware-tensorrtllm.yaml`](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/gpu-kvcache-aware-tensorrtllm.yaml):
+- **Tokenizer**: TensorRT-LLM **1.0.0** has no `/tokenize` or `/v1/*/render`, so [`tokenizerService`](./tokenizer-service.md) is required (set a `models` map for the served name). Use `blockSizeToHash: 32` for TinyLlama. Example for [`gpu-kvcache-aware-tensorrtllm.yaml`](https://github.com/volcano-sh/kthena/blob/main/examples/model-serving/gpu-kvcache-aware-tensorrtllm.yaml):
+
+  ```bash
+  helm upgrade --install kthena charts/kthena -n kthena-system \
+    --set networking.kthenaRouter.tokenizerService.enabled=true \
+    --set networking.kthenaRouter.tokenizerService.mode=sidecar \
+    --set networking.kthenaRouter.tokenizerService.models.TinyLlama-1.1B-Chat-v1.0=TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  ```
 
   ```yaml
   pluginConfig:
@@ -63,7 +70,8 @@ Stale entries are garbage-collected in the router after 24 hours, and ownership 
         blockSizeToHash: 32
         tokenizerService:
           enabled: true
-          endpoint: http://tokenizer-service.kthena-system.svc.cluster.local:8080
+          endpoint: http://127.0.0.1:8100   # sidecar; standalone: http://kthena-tokenizer.<ns>.svc:8100
+          fallbackToEngine: false            # engine has no /tokenize on 1.0.0
   ```
 
 ## Architecture
