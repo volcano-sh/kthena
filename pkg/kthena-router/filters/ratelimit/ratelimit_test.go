@@ -276,3 +276,204 @@ func TestTokenRateLimiter_InputAndOutputErrors(t *testing.T) {
 		t.Fatalf("expected OutputRateLimitExceededError, got %T: %v", err, err)
 	}
 }
+
+func TestTokenRateLimiter_AddOrUpdateLimiterPreservesStateForUnchangedConfig(t *testing.T) {
+	const (
+		model  = "test-model"
+		prompt = "hello world" // 3 tokens
+	)
+	newConfig := func(input, output uint32) *networkingv1alpha1.RateLimit {
+		// A minute-based unit keeps refill negligible during the test.
+		config := &networkingv1alpha1.RateLimit{Unit: networkingv1alpha1.Minute}
+		if input > 0 {
+			config.InputTokensPerUnit = &input
+		}
+		if output > 0 {
+			config.OutputTokensPerUnit = &output
+		}
+		return config
+	}
+
+	tests := []struct {
+		name string
+		// reconcile runs after the input quota has been exhausted with the initial config.
+		reconcile   func(t *testing.T, rl *TokenRateLimiter, initial *networkingv1alpha1.RateLimit)
+		wantAllowed bool
+	}{
+		{
+			name: "same config object keeps exhausted quota",
+			reconcile: func(t *testing.T, rl *TokenRateLimiter, initial *networkingv1alpha1.RateLimit) {
+				if err := rl.AddOrUpdateLimiter(model, initial); err != nil {
+					t.Fatalf("AddOrUpdateLimiter() error = %v", err)
+				}
+			},
+			wantAllowed: false,
+		},
+		{
+			name: "equal config from a new object keeps exhausted quota",
+			reconcile: func(t *testing.T, rl *TokenRateLimiter, initial *networkingv1alpha1.RateLimit) {
+				if err := rl.AddOrUpdateLimiter(model, initial.DeepCopy()); err != nil {
+					t.Fatalf("AddOrUpdateLimiter() error = %v", err)
+				}
+			},
+			wantAllowed: false,
+		},
+		{
+			name: "changed limit rebuilds limiter",
+			reconcile: func(t *testing.T, rl *TokenRateLimiter, _ *networkingv1alpha1.RateLimit) {
+				if err := rl.AddOrUpdateLimiter(model, newConfig(30, 0)); err != nil {
+					t.Fatalf("AddOrUpdateLimiter() error = %v", err)
+				}
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "mutating the applied config object is detected as a change",
+			reconcile: func(t *testing.T, rl *TokenRateLimiter, initial *networkingv1alpha1.RateLimit) {
+				*initial.InputTokensPerUnit = 30
+				if err := rl.AddOrUpdateLimiter(model, initial); err != nil {
+					t.Fatalf("AddOrUpdateLimiter() error = %v", err)
+				}
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "deleted limiter is recreated with a full bucket",
+			reconcile: func(t *testing.T, rl *TokenRateLimiter, initial *networkingv1alpha1.RateLimit) {
+				rl.DeleteLimiter(model)
+				if err := rl.AddOrUpdateLimiter(model, initial); err != nil {
+					t.Fatalf("AddOrUpdateLimiter() error = %v", err)
+				}
+			},
+			wantAllowed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rl := NewTokenRateLimiter()
+			initial := newConfig(3, 0)
+			if err := rl.AddOrUpdateLimiter(model, initial); err != nil {
+				t.Fatalf("AddOrUpdateLimiter() error = %v", err)
+			}
+			if err := rl.RateLimit(model, prompt); err != nil {
+				t.Fatalf("first request should be allowed: %v", err)
+			}
+			if _, ok := rl.RateLimit(model, prompt).(*InputRateLimitExceededError); !ok {
+				t.Fatalf("expected input quota to be exhausted")
+			}
+
+			tt.reconcile(t, rl, initial)
+
+			err := rl.RateLimit(model, prompt)
+			if tt.wantAllowed && err != nil {
+				t.Fatalf("expected request to be allowed after reconcile, got %v", err)
+			}
+			if !tt.wantAllowed {
+				if _, ok := err.(*InputRateLimitExceededError); !ok {
+					t.Fatalf("expected InputRateLimitExceededError after reconcile, got %T: %v", err, err)
+				}
+			}
+		})
+	}
+}
+
+func TestTokenRateLimiter_AddOrUpdateLimiterRemovesDroppedTokenType(t *testing.T) {
+	model := "test-model"
+	inputTokens := uint32(10)
+	outputTokens := uint32(5)
+	rl := NewTokenRateLimiter()
+
+	if err := rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit:  &inputTokens,
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                networkingv1alpha1.Minute,
+	}); err != nil {
+		t.Fatalf("AddOrUpdateLimiter() error = %v", err)
+	}
+	rl.RecordOutputTokens(model, 5)
+	if _, ok := rl.RateLimit(model, "hi").(*OutputRateLimitExceededError); !ok {
+		t.Fatalf("expected output quota to be exhausted")
+	}
+
+	// Dropping outputTokensPerUnit must remove the output limiter instead of keeping the stale one.
+	if err := rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		InputTokensPerUnit: &inputTokens,
+		Unit:               networkingv1alpha1.Minute,
+	}); err != nil {
+		t.Fatalf("AddOrUpdateLimiter() error = %v", err)
+	}
+	if err := rl.RateLimit(model, "hi"); err != nil {
+		t.Fatalf("expected request to be allowed once the output limit is removed, got %v", err)
+	}
+}
+
+func TestTokenRateLimiter_RecordOutputTokensExhaustsQuota(t *testing.T) {
+	const model = "test-model"
+	outputTokens := uint32(100)
+
+	tests := []struct {
+		name        string
+		global      bool
+		perResponse int
+		// wantAllowed is the number of responses recorded before requests are rejected.
+		wantAllowed int
+	}{
+		{
+			// 14 responses leave 2 tokens, which AllowN could never charge 7 against.
+			name:        "local limiter charges a response larger than the remaining quota",
+			perResponse: 7,
+			wantAllowed: 15,
+		},
+		{
+			name:        "local limiter charges a response larger than the whole quota",
+			perResponse: 150,
+			wantAllowed: 1,
+		},
+		{
+			name:        "global limiter charges a response larger than the remaining quota",
+			global:      true,
+			perResponse: 7,
+			wantAllowed: 15,
+		},
+		{
+			name:        "global limiter charges a response larger than the whole quota",
+			global:      true,
+			perResponse: 150,
+			wantAllowed: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A minute-based unit keeps refill negligible during the test.
+			config := &networkingv1alpha1.RateLimit{
+				OutputTokensPerUnit: &outputTokens,
+				Unit:                networkingv1alpha1.Minute,
+			}
+			if tt.global {
+				mr, redisConfig := setupMiniRedis(t)
+				t.Cleanup(mr.Close)
+				config.Global = &networkingv1alpha1.GlobalRateLimit{Redis: redisConfig}
+			}
+			rl := NewTokenRateLimiter()
+			if err := rl.AddOrUpdateLimiter(model, config); err != nil {
+				t.Fatalf("AddOrUpdateLimiter() error = %v", err)
+			}
+
+			allowed := 0
+			for ; allowed < 20; allowed++ {
+				if err := rl.RateLimit(model, "hi"); err != nil {
+					if _, ok := err.(*OutputRateLimitExceededError); !ok {
+						t.Fatalf("expected OutputRateLimitExceededError, got %T: %v", err, err)
+					}
+					break
+				}
+				rl.RecordOutputTokens(model, tt.perResponse)
+			}
+			if allowed != tt.wantAllowed {
+				t.Fatalf("expected %d requests before output rate limiting, got %d", tt.wantAllowed, allowed)
+			}
+		})
+	}
+}

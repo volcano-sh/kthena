@@ -661,3 +661,44 @@ func TestGlobalRateLimiter_Tokens_AllModelsIsolated(t *testing.T) {
 		assert.True(t, mr.Exists(key), "Redis key should exist for %s", m.name)
 	}
 }
+
+func TestTokenRateLimiter_RecordOutputTokensLocalAndGlobalBalancesMatch(t *testing.T) {
+	const model = "test-model"
+	outputTokens := uint32(100)
+
+	tests := []struct {
+		name        string
+		consumed    int
+		wantBalance float64
+	}{
+		{name: "below burst", consumed: 30, wantBalance: 70},
+		{name: "equal to burst", consumed: 100, wantBalance: 0},
+		{name: "above burst", consumed: 250, wantBalance: -150},
+		{name: "multiple of burst", consumed: 300, wantBalance: -200},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A minute-based unit keeps refill negligible during the test.
+			localConfig := &networkingv1alpha1.RateLimit{
+				OutputTokensPerUnit: &outputTokens,
+				Unit:                networkingv1alpha1.Minute,
+			}
+			mr, redisConfig := setupMiniRedis(t)
+			t.Cleanup(mr.Close)
+			globalConfig := localConfig.DeepCopy()
+			globalConfig.Global = &networkingv1alpha1.GlobalRateLimit{Redis: redisConfig}
+
+			local := NewTokenRateLimiter()
+			require.NoError(t, local.AddOrUpdateLimiter(model, localConfig))
+			global := NewTokenRateLimiter()
+			require.NoError(t, global.AddOrUpdateLimiter(model, globalConfig))
+
+			local.RecordOutputTokens(model, tt.consumed)
+			global.RecordOutputTokens(model, tt.consumed)
+
+			assert.InDelta(t, tt.wantBalance, local.outputLimiter[model].Tokens(), 1, "local balance")
+			assert.InDelta(t, tt.wantBalance, global.outputLimiter[model].Tokens(), 1, "global balance")
+		})
+	}
+}
