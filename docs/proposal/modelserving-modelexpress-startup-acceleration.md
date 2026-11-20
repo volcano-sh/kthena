@@ -234,7 +234,7 @@ The automatically enabled MX plugin is not written into `spec.plugins` or the Co
 
 Admission is computed per **pool** = (role name, role template hash). Only replicas in the same pool count as sources for each other. For partition-protected ordinals, the role template comes from the ControllerRevision.
 
-The pool key is the same input the managed plugin turns into `MX_MODEL_REVISION`, so the controller's notion of a compatible source mirrors the identity ModelExpress itself matches on. Nothing is persisted on Pods: $R$ and $I$ are read from the datastore (`RoleTemplateHash` and `Status`), which `syncAll` rebuilds from the Pods' labels after a restart.
+The pool key is the same input the managed plugin turns into `MX_MODEL_REVISION` (prefixed with the ModelServing's namespace and name, since pools never span ModelServings), so the controller's notion of a compatible source mirrors the identity ModelExpress itself matches on. Nothing is persisted on Pods: $R$ and $I$ are read from the datastore (`RoleTemplateHash` and `Status`), which `syncAll` rebuilds from the Pods' labels after a restart.
 
 The template hash does not cover the controller's ModelExpress server address, `modelExpress.engineContainers`, or whether a role was in scope when its Pods were created. After enabling the strategy on an existing fleet or changing those settings, Running replicas of the current template still count as sources even though they may not publish to the expected server. New replicas are then created together and ModelExpress falls back to storage for them, which is the behavior without the feature. Roll the Pods to benefit; changing `initialSeedReplicas` or `readyURL` needs no roll.
 
@@ -356,7 +356,7 @@ For the central-server deployment covered by this proposal, inject the following
 
 | Variable | Value | Why |
 |---|---|---|
-| `MX_MODEL_REVISION` | `<role template hash>-<WORKER_INDEX>` (`modelserving.volcano.sh/role-template-hash` plus the Pod's position in its replica: `0` for the entry, `1..N` for workers) when not already set in the container | Scopes the MX source identity to one weight shard of one role template revision: a worker only reads from the same position of another replica, never from an entry or another rank, unless the user supplies an explicit checkpoint revision. |
+| `MX_MODEL_REVISION` | `<namespace>/<ModelServing name>/<role template hash>-<WORKER_INDEX>` (the owning ModelServing, `modelserving.volcano.sh/role-template-hash`, and the Pod's position in its replica: `0` for the entry, `1..N` for workers) when not already set in the container | Scopes the MX source identity to one weight shard of one role template revision of one ModelServing. The role template hash alone is equal for identical templates in other namespaces or ModelServings, whose volumes may hold different weights behind the same model path, so the ModelServing is part of the identity; this is also the scope of the admission pools. A worker only reads from the same position of another replica, never from an entry or another rank: MX separates positions by rank only when the engine initializes `torch.distributed` across Pods, and falls back to the local device index otherwise. Users can supply an explicit checkpoint revision instead. |
 | `MX_SERVER_ADDRESS` | Controller's `--modelexpress-server-address`; inject only when the variable is absent and the address is nonempty | The client's gRPC endpoint; do not assume `localhost:8001` points to an external MX server. |
 | `MX_P2P_METADATA` | `'1'` | Enables P2P weight metadata registration and discovery. |
 | `MX_METADATA_PORT` | `'5555'` | Fixed base TCP port for NIXL metadata exchange (never `0` in Kubernetes). |
@@ -371,12 +371,14 @@ For the central-server deployment covered by this proposal, inject the following
 | `NIXL_LOG_LEVEL` | `INFO` | Default log verbosity for NIXL transfer operations. |
 | `UCX_LOG_LEVEL` | `WARN` | Suppresses noisy UCX info logs unless overridden. |
 | `MX_WORKER_HOST` | Downward API `status.podIP` | The address that readers use to reach this source. Auto-detection can pick an unroutable interface on multi-NIC GPU nodes. |
+| `POD_NAME`, `POD_UID`, `POD_NAMESPACE` | Downward API `metadata.name`, `metadata.uid`, `metadata.namespace` | The MX client sends them when it publishes a source. The Kubernetes metadata backend turns them into an `ownerReference`, so a source record is garbage-collected with its Pod instead of lingering until the heartbeat reaper marks it stale. The Redis backend ignores them. |
+| `MX_RDMA_NIC_PIN` | `auto`; not injected when the container sets `UCX_NET_DEVICES` | Probes the PCI topology and gives each GPU rank its own RDMA NIC. Without it every rank picks a NIC independently and they can converge on one rail. The probe overwrites `UCX_NET_DEVICES`, so an explicit device selection in the template disables it; hosts without verbs devices skip the pin. |
 
 Example of the environment entries injected into a selected engine container:
 
 ```yaml
 - name: MX_MODEL_REVISION
-  value: 56eba4e34d3d031b8a62ac6bfb87a723-0
+  value: default/bootstrap-accelerate/56eba4e34d3d031b8a62ac6bfb87a723-0
 - name: MX_SERVER_ADDRESS
   value: 215.80.6.74:8001
 - name: MX_P2P_METADATA
@@ -407,6 +409,20 @@ Example of the environment entries injected into a selected engine container:
   valueFrom:
     fieldRef:
       fieldPath: status.podIP
+- name: POD_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
+- name: POD_UID
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.uid
+- name: POD_NAMESPACE
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.namespace
+- name: MX_RDMA_NIC_PIN
+  value: auto
 ```
 
 Pod IP is a sensible default for `MX_WORKER_HOST`, not a guarantee of RDMA reachability. Users must override it when the advertised address needs another interface. NetworkPolicy and the GPU/RDMA device allocation must permit the worker gRPC/NIXL port ranges and data-plane traffic. Multiple engines sharing one Pod network, or host-network Pods sharing a node, need nonoverlapping port ranges; Kthena does not allocate those automatically.
@@ -434,7 +450,7 @@ Unit tests (table-driven, `-race` where concurrent):
 - **Pool identity:** replicas of another role template are neither sources nor in flight for the current pool; Running replicas without a template hash are not sources; legacy datastore records resolve their hash from the ControllerRevision.
 - **Controller:** new-group core creation with its PodGroup, core-deficit units, units of one, out-of-scope roles ungated, a failed unit render creating nothing, disabling the policy, and rolling-update pacing (`maxUnavailable`, `maxSurge`, `partition`, rollback).
 - **Revision neutrality:** adding, editing, or removing the strategy does not change `ModelServingRevision`, `CalRoleTemplateHash`, or `BuildRevisionData`.
-- **Environment injection:** only selected engine containers change; init containers and sidecars are untouched; `MX_MODEL_REVISION`, `MX_SERVER_ADDRESS`, `MX_P2P_METADATA`, `MX_METADATA_PORT`, `MX_WORKER_GRPC_PORT`, `MX_NIXL_BACKEND`, `MX_INSTANT_TENSOR`, `MX_ARTIFACT_TRANSFER`, `MX_POOL_REG`, `MX_VMM_ARENA`, `MX_ARTIFACT_READY_URL`, `MODEL_EXPRESS_LOG_LEVEL`, `NIXL_LOG_LEVEL`, `UCX_LOG_LEVEL`, and `MX_WORKER_HOST` are injected as expected; existing user-specified variables win; changing `readyURL` keeps the pool; nothing is injected when `modelExpress` is omitted; `MODEL_EXPRESS_URL` is never injected.
+- **Environment injection:** only selected engine containers change; init containers and sidecars are untouched; `MX_MODEL_REVISION`, `MX_SERVER_ADDRESS`, `MX_P2P_METADATA`, `MX_METADATA_PORT`, `MX_WORKER_GRPC_PORT`, `MX_NIXL_BACKEND`, `MX_INSTANT_TENSOR`, `MX_ARTIFACT_TRANSFER`, `MX_POOL_REG`, `MX_VMM_ARENA`, `MX_ARTIFACT_READY_URL`, `MODEL_EXPRESS_LOG_LEVEL`, `NIXL_LOG_LEVEL`, `UCX_LOG_LEVEL`, `MX_WORKER_HOST`, `POD_NAME`, `POD_UID`, `POD_NAMESPACE`, and `MX_RDMA_NIC_PIN` are injected as expected; `MX_MODEL_REVISION` differs between ModelServings with identical role templates and between positions of one replica; `MX_RDMA_NIC_PIN` is not injected when `UCX_NET_DEVICES` is set; existing user-specified variables win; changing `readyURL` keeps the pool; nothing is injected when `modelExpress` is omitted; `MODEL_EXPRESS_URL` is never injected.
 - **Webhook:** unknown or duplicate `roles[].name`, invalid `roles[].initialSeedReplicas`, malformed `readyURL`, missing engine containers in templates, and explicit registration of the managed plugin.
 
 E2E (`test/e2e/controller-manager`): a multi-replica ModelServing with the strategy and a stub engine (no MX needed) verifies batch order, gang cores with `schedulerName: volcano`, and a rolling update.

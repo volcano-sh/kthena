@@ -53,6 +53,14 @@ const (
 	EnvNIXLLog          = "NIXL_LOG_LEVEL"
 	EnvUCXLog           = "UCX_LOG_LEVEL"
 	EnvWorkerHost       = "MX_WORKER_HOST"
+	EnvRDMANICPin       = "MX_RDMA_NIC_PIN"
+	EnvUCXNetDevices    = "UCX_NET_DEVICES"
+	// Pod identity the client reports when it publishes a source. The
+	// Kubernetes metadata backend uses it to garbage-collect the source record
+	// with its Pod.
+	EnvPodName      = "POD_NAME"
+	EnvPodUID       = "POD_UID"
+	EnvPodNamespace = "POD_NAMESPACE"
 )
 
 // defaultEngineEnv holds the fixed central-server defaults. A variable already
@@ -70,7 +78,14 @@ var defaultEngineEnv = []corev1.EnvVar{
 	{Name: EnvModelExpressLog, Value: "INFO"},
 	{Name: EnvNIXLLog, Value: "INFO"},
 	{Name: EnvUCXLog, Value: "WARN"},
-	{Name: EnvWorkerHost, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"}}},
+	{Name: EnvWorkerHost, ValueFrom: podField("status.podIP")},
+	{Name: EnvPodName, ValueFrom: podField("metadata.name")},
+	{Name: EnvPodUID, ValueFrom: podField("metadata.uid")},
+	{Name: EnvPodNamespace, ValueFrom: podField("metadata.namespace")},
+}
+
+func podField(path string) *corev1.EnvVarSource {
+	return &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: path}}
 }
 
 // modelExpressPlugin injects the MX client environment into the selected
@@ -133,9 +148,7 @@ func (p *modelExpressPlugin) injectEngineEnv(container *corev1.Container, req *H
 		if err != nil {
 			return err
 		}
-		// Entry and worker Pods of one replica hold different weight shards, so
-		// the source identity is per position, not just per role template.
-		setEnvIfAbsent(container, corev1.EnvVar{Name: EnvModelRevision, Value: hash + "-" + strconv.Itoa(index)})
+		setEnvIfAbsent(container, corev1.EnvVar{Name: EnvModelRevision, Value: modelRevision(req.ModelServing, hash, index)})
 	}
 	if p.serverAddress != "" {
 		setEnvIfAbsent(container, corev1.EnvVar{Name: EnvServerAddress, Value: p.serverAddress})
@@ -146,7 +159,24 @@ func (p *modelExpressPlugin) injectEngineEnv(container *corev1.Container, req *H
 	for _, env := range defaultEngineEnv {
 		setEnvIfAbsent(container, *env.DeepCopy())
 	}
+	// The auto probe gives each rank its own RDMA NIC by overwriting
+	// UCX_NET_DEVICES, so it stays off when the template already selects devices.
+	if !hasEnv(container, EnvUCXNetDevices) {
+		setEnvIfAbsent(container, corev1.EnvVar{Name: EnvRDMANICPin, Value: "auto"})
+	}
 	return nil
+}
+
+// modelRevision is the ModelExpress source identity of one Pod position.
+//
+// The role template hash is equal for identical templates of other
+// ModelServings, whose volumes may hold different weights, so the identity is
+// scoped to this ModelServing; that is also the scope of the controller's
+// admission pools. Entry and worker Pods of one replica hold different weight
+// shards, and ModelExpress only tells them apart by rank when the engine
+// initializes torch.distributed across Pods, so the position is part of it too.
+func modelRevision(ms *workloadv1alpha1.ModelServing, roleTemplateHash string, index int) string {
+	return fmt.Sprintf("%s/%s/%s-%d", ms.Namespace, ms.Name, roleTemplateHash, index)
 }
 
 // workerIndex is the Pod's position inside its role replica: 0 for the entry
@@ -164,13 +194,19 @@ func workerIndex(container *corev1.Container, req *HookRequest) (int, error) {
 	return deriveWorkerIndex(req.IsEntry, req.Pod.Name)
 }
 
-func setEnvIfAbsent(container *corev1.Container, env corev1.EnvVar) {
+func hasEnv(container *corev1.Container, name string) bool {
 	for _, existing := range container.Env {
-		if existing.Name == env.Name {
-			return
+		if existing.Name == name {
+			return true
 		}
 	}
-	container.Env = append(container.Env, env)
+	return false
+}
+
+func setEnvIfAbsent(container *corev1.Container, env corev1.EnvVar) {
+	if !hasEnv(container, env.Name) {
+		container.Env = append(container.Env, env)
+	}
 }
 
 func (p *modelExpressPlugin) OnPodReady(_ context.Context, _ *HookRequest) error { return nil }
