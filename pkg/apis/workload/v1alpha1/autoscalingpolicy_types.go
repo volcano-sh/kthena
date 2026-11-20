@@ -143,7 +143,8 @@ type AutoscalingPolicyPanicPolicy struct {
 	// +kubebuilder:default=200
 	PanicThresholdPercent *int32 `json:"panicThresholdPercent,omitempty"`
 	// PanicModeHold defines the duration to remain in panic mode before returning to normal scaling.
-	// +kubebuilder:default="60s"
+	// A zero value disables panic mode entirely. Panic mode is disabled by default.
+	// +optional
 	PanicModeHold *metav1.Duration `json:"panicModeHold,omitempty"`
 }
 

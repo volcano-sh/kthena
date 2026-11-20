@@ -87,7 +87,8 @@ const (
 	defaultStablePolicyPeriod    = 15 * time.Second
 	defaultPanicPercent          = int32(1000)
 	defaultPanicThresholdPercent = int32(200)
-	defaultPanicModeHold         = 60 * time.Second
+	// A zero PanicModeHold disables panic mode; it is disabled by default.
+	defaultPanicModeHold = time.Duration(0)
 
 	// Stabilization windows have no CRD default and are owned by the webhook.
 	defaultScaleDownStabilizationWindow = 5 * time.Minute

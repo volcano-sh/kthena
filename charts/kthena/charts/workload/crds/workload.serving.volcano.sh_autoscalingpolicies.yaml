@@ -104,9 +104,9 @@ spec:
                           This policy activates during rapid load surges to prevent service degradation or timeouts.
                         properties:
                           panicModeHold:
-                            default: 60s
-                            description: PanicModeHold defines the duration to remain
-                              in panic mode before returning to normal scaling.
+                            description: |-
+                              PanicModeHold defines the duration to remain in panic mode before returning to normal scaling.
+                              A zero value disables panic mode entirely. Panic mode is disabled by default.
                             type: string
                           panicThresholdPercent:
                             default: 200

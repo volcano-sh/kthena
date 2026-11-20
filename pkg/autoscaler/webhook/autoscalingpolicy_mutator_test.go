@@ -178,7 +178,7 @@ func TestMutateAutoscalingPolicy_EmptyBehavior(t *testing.T) {
 	// Check ScaleUp PanicPolicy defaults
 	assert.Equal(t, ptr.To(int32(1000)), behavior.ScaleUp.PanicPolicy.Percent)
 	assert.Equal(t, ptr.To(int32(200)), behavior.ScaleUp.PanicPolicy.PanicThresholdPercent)
-	assert.Equal(t, 60*time.Second, behavior.ScaleUp.PanicPolicy.PanicModeHold.Duration)
+	assert.Equal(t, time.Duration(0), behavior.ScaleUp.PanicPolicy.PanicModeHold.Duration)
 }
 
 // TestMutateAutoscalingPolicy_NoChangesNeeded tests when no mutation is required
