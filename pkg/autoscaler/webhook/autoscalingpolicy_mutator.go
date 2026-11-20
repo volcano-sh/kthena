@@ -78,27 +78,44 @@ func (m *AutoscalingPolicyMutator) Handle(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// Default values mirror the +kubebuilder:default markers on the
+// AutoscalingPolicy API types so that policies created with or without the
+// webhook end up with the same behavior.
+const (
+	defaultStablePolicyInstances = int32(1)
+	defaultStablePolicyPercent   = int32(100)
+	defaultStablePolicyPeriod    = 15 * time.Second
+	defaultPanicPercent          = int32(1000)
+	defaultPanicThresholdPercent = int32(200)
+	// A zero PanicModeHold disables panic mode; it is disabled by default.
+	defaultPanicModeHold = time.Duration(0)
+
+	// Stabilization windows have no CRD default and are owned by the webhook.
+	defaultScaleDownStabilizationWindow = 5 * time.Minute
+	defaultScaleUpStabilizationWindow   = time.Duration(0)
+)
+
 func createPolicyBatch(policy *registryv1.AutoscalingPolicy) []jsonpatch.Operation {
 	// Define default values
 	DefaultScaleDown := registryv1.AutoscalingPolicyStablePolicy{
-		Instances:           ptr.To(int32(0)),
-		Percent:             ptr.To(int32(100)),
-		Period:              &metav1.Duration{Duration: time.Minute},
+		Instances:           ptr.To(defaultStablePolicyInstances),
+		Percent:             ptr.To(defaultStablePolicyPercent),
+		Period:              &metav1.Duration{Duration: defaultStablePolicyPeriod},
 		SelectPolicy:        registryv1.SelectPolicyOr,
-		StabilizationWindow: &metav1.Duration{Duration: time.Minute * 5},
+		StabilizationWindow: &metav1.Duration{Duration: defaultScaleDownStabilizationWindow},
 	}
 	DefaultScaleUpStablePolicy := registryv1.AutoscalingPolicyStablePolicy{
-		Instances:           ptr.To(int32(4)),
-		Percent:             ptr.To(int32(100)),
-		Period:              &metav1.Duration{Duration: time.Minute},
+		Instances:           ptr.To(defaultStablePolicyInstances),
+		Percent:             ptr.To(defaultStablePolicyPercent),
+		Period:              &metav1.Duration{Duration: defaultStablePolicyPeriod},
 		SelectPolicy:        registryv1.SelectPolicyOr,
-		StabilizationWindow: &metav1.Duration{Duration: 0},
+		StabilizationWindow: &metav1.Duration{Duration: defaultScaleUpStabilizationWindow},
 	}
 	DefaultScaleUpPanicPolicy := registryv1.AutoscalingPolicyPanicPolicy{
-		Percent:               ptr.To(int32(0)),
+		Percent:               ptr.To(defaultPanicPercent),
 		Period:                metav1.Duration{Duration: 0},
-		PanicThresholdPercent: ptr.To(int32(200)),
-		PanicModeHold:         &metav1.Duration{Duration: 0},
+		PanicThresholdPercent: ptr.To(defaultPanicThresholdPercent),
+		PanicModeHold:         &metav1.Duration{Duration: defaultPanicModeHold},
 	}
 
 	DefaultScaleUp := registryv1.AutoscalingPolicyScaleUpPolicy{

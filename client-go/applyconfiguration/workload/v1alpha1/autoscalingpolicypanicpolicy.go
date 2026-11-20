@@ -35,6 +35,7 @@ type AutoscalingPolicyPanicPolicyApplyConfiguration struct {
 	// When metrics exceed this percentage of target values, panic mode is activated.
 	PanicThresholdPercent *int32 `json:"panicThresholdPercent,omitempty"`
 	// PanicModeHold defines the duration to remain in panic mode before returning to normal scaling.
+	// A zero value disables panic mode entirely. Panic mode is disabled by default.
 	PanicModeHold *v1.Duration `json:"panicModeHold,omitempty"`
 }
 
