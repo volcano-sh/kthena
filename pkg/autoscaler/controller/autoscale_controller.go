@@ -116,7 +116,7 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 	klog.Info("start autoscale controller")
 	go wait.Until(func() {
 		ac.Reconcile(ctx)
-	}, time.Duration(ac.syncPeriodSeconds)*time.Second, nil)
+	}, time.Duration(ac.syncPeriodSeconds)*time.Second, ctx.Done())
 
 	<-ctx.Done()
 	klog.Info("shut down autoscale controller")
