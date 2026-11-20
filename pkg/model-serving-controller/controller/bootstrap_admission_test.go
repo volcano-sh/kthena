@@ -529,14 +529,6 @@ func TestBootstrapRoleRollingUpdateStagesNewTemplateBySeed(t *testing.T) {
 	assert.ElementsMatch(t, []string{"prefill-0", "prefill-1", "prefill-2"}, roleNames(roles))
 }
 
-func roleNames(roles []datastore.Role) []string {
-	names := make([]string, 0, len(roles))
-	for _, role := range roles {
-		names = append(names, role.Name)
-	}
-	return names
-}
-
 func filterEvents(events []string, reason string) []string {
 	var matched []string
 	for _, event := range events {
