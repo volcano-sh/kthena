@@ -51,6 +51,7 @@
         },
         "tls": {
           "type": "object",
+          "required": ["secretName"],
           "properties": {
             "enabled": {
               "type": "boolean"
@@ -174,7 +175,7 @@
         },
         "tokenizerService": {
           "type": "object",
-          "required": ["image", "standalone"],
+          "required": ["mode", "port", "image", "standalone"],
           "properties": {
             "enabled": {
               "type": "boolean"
