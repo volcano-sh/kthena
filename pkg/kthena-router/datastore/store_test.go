@@ -460,11 +460,87 @@ func TestStoreAddOrUpdatePod(t *testing.T) {
 	}
 }
 
+func TestStoreRegisterCallbackUnregister(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]callbackEntry),
+	}
+
+	events := make(chan EventData, 1)
+	unregister := s.RegisterCallback("Pod", func(data EventData) { events <- data })
+
+	s.triggerCallbacks("Pod", EventData{EventType: EventAdd})
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatal("registered callback did not fire")
+	}
+
+	// Unregistering twice is safe; the callback must not fire afterwards.
+	unregister()
+	unregister()
+	s.triggerCallbacks("Pod", EventData{EventType: EventAdd})
+	select {
+	case <-events:
+		t.Fatal("unregistered callback still fired")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestStoreUnregisterLeavesOtherCallbacks(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]callbackEntry),
+	}
+
+	events := make(chan string, 2)
+	unregisterFirst := s.RegisterCallback("Pod", func(data EventData) { events <- "first" })
+	s.RegisterCallback("Pod", func(data EventData) { events <- "second" })
+
+	unregisterFirst()
+	s.triggerCallbacks("Pod", EventData{EventType: EventAdd})
+
+	select {
+	case got := <-events:
+		assert.Equal(t, "second", got)
+	case <-time.After(time.Second):
+		t.Fatal("remaining callback did not fire")
+	}
+	select {
+	case got := <-events:
+		t.Fatalf("unregistered callback still fired: %q", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestStoreUnregisterStopsRealPodEvents(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]callbackEntry),
+	}
+	ms := &aiv1alpha1.ModelServer{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model1"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod1"}}
+
+	events := make(chan EventData, 1)
+	unregister := s.RegisterCallback("Pod", func(data EventData) { events <- data })
+	unregister()
+
+	assert.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
+	select {
+	case <-events:
+		t.Fatal("unregistered callback received a real pod event")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestStoreAddOrUpdatePodFiresPodEvents(t *testing.T) {
 	s := &store{
 		modelServer: sync.Map{},
 		pods:        sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 	ms := &aiv1alpha1.ModelServer{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model1"}}
 	assert.NoError(t, s.AddOrUpdateModelServer(ms, nil))
@@ -501,7 +577,7 @@ func TestStoreDeletePod(t *testing.T) {
 	s := &store{
 		pods:        sync.Map{},
 		modelServer: sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 
 	s.pods.Store(podName, podInfo)
@@ -539,7 +615,7 @@ func TestStoreDeletePod_MultiModelServers(t *testing.T) {
 	s := &store{
 		pods:        sync.Map{},
 		modelServer: sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 
 	s.pods.Store(podName, podInfo)
@@ -631,7 +707,7 @@ func TestStoreDeleteModelServerEmitsPodDeleteEvent(t *testing.T) {
 		s := &store{
 			modelServer: sync.Map{},
 			pods:        sync.Map{},
-			callbacks:   make(map[string][]CallbackFunc),
+			callbacks:   make(map[string][]callbackEntry),
 		}
 		ms := newMS("model1")
 		msName := utils.GetNamespaceName(ms)
@@ -675,7 +751,7 @@ func TestStoreDeleteModelServerEmitsPodDeleteEvent(t *testing.T) {
 		s := &store{
 			modelServer: sync.Map{},
 			pods:        sync.Map{},
-			callbacks:   make(map[string][]CallbackFunc),
+			callbacks:   make(map[string][]callbackEntry),
 		}
 		deletedMS, keptMS := newMS("model1"), newMS("model2")
 		deletedName, keptName := utils.GetNamespaceName(deletedMS), utils.GetNamespaceName(keptMS)
@@ -745,7 +821,7 @@ func TestStoreDeleteModelRoute(t *testing.T) {
 			routeInfo:           make(map[string]*modelRouteInfo),
 			routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 			loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-			callbacks:           make(map[string][]CallbackFunc),
+			callbacks:           make(map[string][]callbackEntry),
 			requestWaitingQueue: sync.Map{},
 		}
 
@@ -802,7 +878,7 @@ func TestStoreDeleteModelRoute(t *testing.T) {
 			routeInfo:           make(map[string]*modelRouteInfo),
 			routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 			loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-			callbacks:           make(map[string][]CallbackFunc),
+			callbacks:           make(map[string][]callbackEntry),
 			requestWaitingQueue: sync.Map{},
 		}
 
@@ -838,7 +914,7 @@ func TestStoreDeleteModelRoute(t *testing.T) {
 			routeInfo:           make(map[string]*modelRouteInfo),
 			routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 			loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-			callbacks:           make(map[string][]CallbackFunc),
+			callbacks:           make(map[string][]callbackEntry),
 			requestWaitingQueue: sync.Map{},
 		}
 
@@ -865,7 +941,7 @@ func TestStoreDeleteModelRoute(t *testing.T) {
 			routeInfo:           make(map[string]*modelRouteInfo),
 			routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 			loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-			callbacks:           make(map[string][]CallbackFunc),
+			callbacks:           make(map[string][]callbackEntry),
 			requestWaitingQueue: sync.Map{},
 		}
 
@@ -966,7 +1042,7 @@ func TestStoreDeleteModelRoute_RequestQueueCleanup(t *testing.T) {
 		routeInfo:           make(map[string]*modelRouteInfo),
 		routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 		loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-		callbacks:           make(map[string][]CallbackFunc),
+		callbacks:           make(map[string][]callbackEntry),
 		requestWaitingQueue: sync.Map{},
 	}
 
@@ -1010,7 +1086,7 @@ func TestStoreDeleteModelRoute_LoraQueueCleanup(t *testing.T) {
 		routeInfo:           make(map[string]*modelRouteInfo),
 		routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 		loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-		callbacks:           make(map[string][]CallbackFunc),
+		callbacks:           make(map[string][]callbackEntry),
 		requestWaitingQueue: sync.Map{},
 	}
 
@@ -1053,7 +1129,7 @@ func TestStoreDeleteModelRoute_ConcurrentAccess(t *testing.T) {
 		routeInfo:           make(map[string]*modelRouteInfo),
 		routes:              make(map[string][]*aiv1alpha1.ModelRoute),
 		loraRoutes:          make(map[string][]*aiv1alpha1.ModelRoute),
-		callbacks:           make(map[string][]CallbackFunc),
+		callbacks:           make(map[string][]callbackEntry),
 		requestWaitingQueue: sync.Map{},
 	}
 
@@ -3534,4 +3610,259 @@ func isClosed(ch chan struct{}) bool {
 	default:
 		return false
 	}
+}
+
+func TestStoreUnregisterClearsBackingArraySlot(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]callbackEntry),
+	}
+
+	unregister := s.RegisterCallback("Pod", func(EventData) {})
+	unregister()
+
+	entries := s.callbacks["Pod"]
+	assert.Empty(t, entries)
+	for _, e := range entries[:cap(entries)] {
+		assert.Nil(t, e.fn, "the vacated slot must not retain the callback")
+	}
+}
+
+func TestStoreUnregisterTailKeepsRemainingCallbacks(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+		callbacks:   make(map[string][]callbackEntry),
+	}
+
+	events := make(chan string, 2)
+	s.RegisterCallback("Pod", func(EventData) { events <- "first" })
+	unregisterSecond := s.RegisterCallback("Pod", func(EventData) { events <- "second" })
+
+	unregisterSecond()
+	s.triggerCallbacks("Pod", EventData{EventType: EventAdd})
+
+	select {
+	case got := <-events:
+		assert.Equal(t, "first", got)
+	case <-time.After(time.Second):
+		t.Fatal("remaining callback did not fire")
+	}
+	entries := s.callbacks["Pod"]
+	assert.Len(t, entries, 1)
+	for _, e := range entries[:cap(entries)][1:] {
+		assert.Nil(t, e.fn, "the vacated slot must not retain the callback")
+	}
+}
+
+// TestSchedulerProfileUpdateEventGatedOnSpecChange verifies a spec-identical
+// update (status/label churn, duplicate apply) does not fire the
+// "SchedulerProfile" callback: rebuilding a serving plugin chain must follow
+// the spec content, not the event count.
+func TestSchedulerProfileUpdateEventGatedOnSpecChange(t *testing.T) {
+	s := New()
+	events := make(chan EventData, 4)
+	s.RegisterCallback("SchedulerProfile", func(data EventData) {
+		events <- data
+	})
+
+	profile := &aiv1alpha1.SchedulerProfile{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "p1", ResourceVersion: "1"},
+		Spec: aiv1alpha1.SchedulerProfileSpec{
+			Plugins: aiv1alpha1.Plugins{
+				Score: aiv1alpha1.Score{
+					Enabled: []aiv1alpha1.PluginWithWeight{{Name: "random", Weight: 1}},
+				},
+			},
+		},
+	}
+	s.AddOrUpdateSchedulerProfile(profile)
+	select {
+	case data := <-events:
+		assert.Equal(t, EventAdd, data.EventType)
+	case <-time.After(time.Second):
+		t.Fatal("the first add must fire the callback")
+	}
+
+	// Identical spec, different metadata: no event.
+	bumped := profile.DeepCopy()
+	bumped.ResourceVersion = "2"
+	bumped.Labels = map[string]string{"team": "llm"}
+	s.AddOrUpdateSchedulerProfile(bumped)
+	select {
+	case data := <-events:
+		t.Fatalf("a spec-identical update must not fire the callback, got %v", data.EventType)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Real spec change: event fires.
+	changed := profile.DeepCopy()
+	changed.ResourceVersion = "3"
+	changed.Spec.Plugins.Score.Enabled[0].Weight = 2
+	s.AddOrUpdateSchedulerProfile(changed)
+	select {
+	case data := <-events:
+		assert.Equal(t, EventUpdate, data.EventType)
+	case <-time.After(time.Second):
+		t.Fatal("a spec change must fire the update callback")
+	}
+
+	// Delete: event fires with the last-known object.
+	s.DeleteSchedulerProfile(types.NamespacedName{Namespace: "default", Name: "p1"})
+	select {
+	case data := <-events:
+		assert.Equal(t, EventDelete, data.EventType)
+	case <-time.After(time.Second):
+		t.Fatal("the delete must fire the callback")
+	}
+}
+
+func newModelServerWithProfileRef(namespace, name, profile string) *aiv1alpha1.ModelServer {
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+	}
+	if profile != "" {
+		ms.Spec.TrafficPolicy = &aiv1alpha1.TrafficPolicy{
+			LoadBalancer: &aiv1alpha1.LoadBalancer{SchedulerProfile: &profile},
+		}
+	}
+	return ms
+}
+
+// TestSchedulerProfileReferenceIndex verifies the reverse Profile-to-MS
+// index tracks the reference relation through add, switch and delete.
+func TestSchedulerProfileReferenceIndex(t *testing.T) {
+	s := New().(*store)
+	p1 := types.NamespacedName{Namespace: "default", Name: "p1"}
+	p2 := types.NamespacedName{Namespace: "default", Name: "p2"}
+	count := func(key types.NamespacedName) int {
+		return s.GetModelServerCountForSchedulerProfile(key)
+	}
+
+	// A ModelServer referencing an absent profile still registers: the
+	// entry must exist so a later profile add can find its referrers.
+	s.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms1", "p1"), nil)
+	assert.Equal(t, 1, count(p1))
+	assert.Nil(t, s.GetSchedulerProfile(p1), "the profile itself is absent")
+
+	// A second ModelServer on the same profile accumulates.
+	s.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms2", "p1"), nil)
+	assert.Equal(t, 2, count(p1))
+
+	// Switching ms1 to p2 moves the reference between the two keys.
+	s.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms1", "p2"), nil)
+	assert.Equal(t, 1, count(p1))
+	assert.Equal(t, 1, count(p2))
+
+	// Deleting ms2 releases its reference.
+	s.DeleteModelServer(types.NamespacedName{Namespace: "default", Name: "ms2"})
+	assert.Equal(t, 0, count(p1))
+	assert.Equal(t, 1, count(p2))
+
+	// A ModelServer without a reference touches no index entry.
+	s.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms3", ""), nil)
+	assert.Equal(t, 1, count(p2))
+	assert.Equal(t, 0, count(types.NamespacedName{Namespace: "default", Name: "p3"}))
+}
+
+// TestSchedulerProfileReferenceIndexDanglingRetention verifies a reference
+// outlives its profile: deleting a SchedulerProfile keeps the referrers so
+// a same-name recreate can build for them, and the entry is only dropped
+// when the last referrer goes away.
+func TestSchedulerProfileReferenceIndexDanglingRetention(t *testing.T) {
+	s := New().(*store)
+	key := types.NamespacedName{Namespace: "default", Name: "p1"}
+	msName := types.NamespacedName{Namespace: "default", Name: "ms1"}
+	profile := &aiv1alpha1.SchedulerProfile{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "p1"},
+	}
+
+	// The reference can even register while the profile is absent, so a
+	// later profile add finds its referrers.
+	s.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms1", "p1"), nil)
+	assert.Equal(t, 1, s.GetModelServerCountForSchedulerProfile(key))
+	assert.Nil(t, s.GetSchedulerProfile(key))
+
+	// The profile lands: the existing entry gains the object.
+	s.AddOrUpdateSchedulerProfile(profile)
+	assert.NotNil(t, s.GetSchedulerProfile(key))
+	assert.Equal(t, 1, s.GetModelServerCountForSchedulerProfile(key))
+
+	// Deleting a profile that EXISTS and is referenced: the referrer must
+	// survive the delete, so a same-name recreate can build for it.
+	s.DeleteSchedulerProfile(key)
+	assert.Nil(t, s.GetSchedulerProfile(key))
+	assert.Equal(t, 1, s.GetModelServerCountForSchedulerProfile(key),
+		"the dangling reference must be retained for a later recreate")
+
+	// Recreate with the same name: the referrer is already registered.
+	s.AddOrUpdateSchedulerProfile(profile)
+	assert.NotNil(t, s.GetSchedulerProfile(key))
+	assert.Equal(t, 1, s.GetModelServerCountForSchedulerProfile(key))
+
+	// The last referrer going away keeps the entry: the profile itself
+	// exists and must stay queryable.
+	s.DeleteModelServer(msName)
+	assert.Equal(t, 0, s.GetModelServerCountForSchedulerProfile(key))
+	s.schedulerProfilesMu.RLock()
+	_, entryExists := s.schedulerProfiles[key]
+	s.schedulerProfilesMu.RUnlock()
+	assert.True(t, entryExists, "an existing profile must stay queryable without referrers")
+
+	// An absent profile whose last referrer leaves is dropped entirely.
+	s.DeleteSchedulerProfile(key)
+	s.schedulerProfilesMu.RLock()
+	_, entryExists = s.schedulerProfiles[key]
+	s.schedulerProfilesMu.RUnlock()
+	assert.False(t, entryExists, "an absent profile with no referrers must be dropped")
+
+	// A standalone unreferenced profile stays queryable.
+	s.AddOrUpdateSchedulerProfile(&aiv1alpha1.SchedulerProfile{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "solo"},
+	})
+	s.schedulerProfilesMu.RLock()
+	_, soloExists := s.schedulerProfiles[types.NamespacedName{Namespace: "default", Name: "solo"}]
+	s.schedulerProfilesMu.RUnlock()
+	assert.True(t, soloExists, "an unreferenced profile must stay queryable")
+}
+
+// TestSchedulerProfileReferenceEventsFireOnChangeOnly verifies the
+// SchedulerProfileReference callback fires exactly when a ModelServer's
+// reference changes — not on unrelated updates of the same ModelServer.
+func TestSchedulerProfileReferenceEventsFireOnChangeOnly(t *testing.T) {
+	s := New().(*store)
+	events := make(chan types.NamespacedName, 8)
+	s.RegisterCallback("SchedulerProfileReference", func(data EventData) {
+		events <- data.SchedulerProfileKey
+	})
+	drain := func() int {
+		n := 0
+		for {
+			select {
+			case <-events:
+				n++
+			case <-time.After(50 * time.Millisecond):
+				return n
+			}
+		}
+	}
+
+	msName := types.NamespacedName{Namespace: "default", Name: "ms1"}
+	s.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms1", "p1"), nil)
+	assert.Equal(t, 1, drain(), "the first reference must fire one event")
+
+	// Same reference, unrelated spec churn: no event.
+	updated := newModelServerWithProfileRef("default", "ms1", "p1")
+	updated.Labels = map[string]string{"team": "llm"}
+	s.AddOrUpdateModelServer(updated, nil)
+	assert.Equal(t, 0, drain(), "an unchanged reference must not fire")
+
+	// Switching fires once for the lost profile and once for the new one.
+	s.AddOrUpdateModelServer(newModelServerWithProfileRef("default", "ms1", "p2"), nil)
+	assert.Equal(t, 2, drain(), "a switch must notify both affected profiles")
+
+	// Deleting the ModelServer fires for the profile it referenced.
+	s.DeleteModelServer(msName)
+	assert.Equal(t, 1, drain(), "the delete must notify the lost reference")
 }

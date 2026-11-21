@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -123,10 +124,12 @@ type Metrics struct {
 	TokenizerUnsupportedEngineTotal prometheus.CounterVec
 
 	// prefix-cache score plugin metrics
-	PrefixCacheMatchRatio      prometheus.HistogramVec
-	PrefixCacheEvictionsTotal  prometheus.CounterVec
-	PrefixCacheEntries         prometheus.GaugeFunc
-	prefixCacheEntriesProvider atomic.Value // func() float64
+	PrefixCacheMatchRatio     prometheus.HistogramVec
+	PrefixCacheEvictionsTotal prometheus.CounterVec
+	PrefixCacheEntries        prometheus.GaugeFunc
+	prefixCacheProvidersMu    sync.Mutex
+	prefixCacheProviders      map[uint64]func() float64
+	nextPrefixCacheProviderID atomic.Uint64
 
 	// kvcache-aware score plugin metrics
 	KVCacheMatchRatio       prometheus.HistogramVec
@@ -390,25 +393,51 @@ func NewMetrics() *Metrics {
 		},
 	)
 
+	m.prefixCacheProviders = make(map[uint64]func() float64)
 	m.PrefixCacheEntries = promauto.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "kthena_router_prefix_cache_entries",
 			Help: "Total prefix-cache occupancy: number of (prefix block, pod) entries currently stored across all pods; a block cached on N pods is counted N times (once per pod)",
 		},
-		func() float64 {
-			if p, ok := m.prefixCacheEntriesProvider.Load().(func() float64); ok && p != nil {
-				return p()
-			}
-			return 0
-		},
+		m.sumPrefixCacheEntries,
 	)
 
 	return m
 }
 
-// SetPrefixCacheEntriesProvider sets the callback read by the prefix_cache_entries gauge at scrape time.
-func (m *Metrics) SetPrefixCacheEntriesProvider(provider func() float64) {
-	m.prefixCacheEntriesProvider.Store(provider)
+// RegisterPrefixCacheEntriesProvider registers a provider whose value is
+// summed into the prefix_cache_entries gauge at scrape time. Multiple
+// prefix-cache plugin instances live at once (one per SchedulerProfile
+// chain), so providers accumulate instead of overwriting. The returned
+// function unregisters it; callers must invoke it when their store is closed.
+func (m *Metrics) RegisterPrefixCacheEntriesProvider(provider func() float64) (unregister func()) {
+	m.prefixCacheProvidersMu.Lock()
+	defer m.prefixCacheProvidersMu.Unlock()
+	id := m.nextPrefixCacheProviderID.Add(1)
+	m.prefixCacheProviders[id] = provider
+	return func() {
+		m.prefixCacheProvidersMu.Lock()
+		defer m.prefixCacheProvidersMu.Unlock()
+		delete(m.prefixCacheProviders, id)
+	}
+}
+
+// sumPrefixCacheEntries sums all registered providers at scrape time. The
+// providers are invoked after releasing the map lock: a provider walks its
+// plugin's LRU state, and holding the lock through that would stall
+// registration/unregistration for the whole scrape.
+func (m *Metrics) sumPrefixCacheEntries() float64 {
+	m.prefixCacheProvidersMu.Lock()
+	providers := make([]func() float64, 0, len(m.prefixCacheProviders))
+	for _, provider := range m.prefixCacheProviders {
+		providers = append(providers, provider)
+	}
+	m.prefixCacheProvidersMu.Unlock()
+	var sum float64
+	for _, provider := range providers {
+		sum += provider()
+	}
+	return sum
 }
 
 func (m *Metrics) RecordPrefixCacheMatchRatio(model string, ratio float64) {

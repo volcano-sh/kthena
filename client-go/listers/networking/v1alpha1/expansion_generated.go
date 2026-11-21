@@ -41,3 +41,11 @@ type ModelServerListerExpansion interface{}
 // ModelServerNamespaceListerExpansion allows custom methods to be added to
 // ModelServerNamespaceLister.
 type ModelServerNamespaceListerExpansion interface{}
+
+// SchedulerProfileListerExpansion allows custom methods to be added to
+// SchedulerProfileLister.
+type SchedulerProfileListerExpansion interface{}
+
+// SchedulerProfileNamespaceListerExpansion allows custom methods to be added to
+// SchedulerProfileNamespaceLister.
+type SchedulerProfileNamespaceListerExpansion interface{}

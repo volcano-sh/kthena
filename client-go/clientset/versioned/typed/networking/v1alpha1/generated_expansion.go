@@ -23,3 +23,5 @@ type ExternalModelProviderExpansion interface{}
 type ModelRouteExpansion interface{}
 
 type ModelServerExpansion interface{}
+
+type SchedulerProfileExpansion interface{}

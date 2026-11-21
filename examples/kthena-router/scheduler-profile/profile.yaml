@@ -1,0 +1,32 @@
+# SchedulerProfile defines a scheduler plugin combination for the ModelServer
+# referencing it. This example demonstrates the structure; which plugins to
+# enable, and with which weights and arguments, depends on your workload —
+# tune them for your own traffic.
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: SchedulerProfile
+metadata:
+  name: sample-profile
+  namespace: default
+spec:
+  # Per-plugin arguments, keyed by plugin name. Each plugin has its own
+  # accepted fields; see the plugin implementations under
+  # pkg/kthena-router/scheduler/plugins/ for details.
+  pluginConfig:
+  - name: least-request
+    args:
+      maxWaitingRequests: 10
+  plugins:
+    # Filter plugins run in list order and drop ineligible pods.
+    # Available: least-request, lora-affinity
+    filter:
+      enabled:
+      - least-request
+    # Score plugins rank the remaining pods; weighted scores are summed.
+    # Available: gpu-usage, least-latency, least-request, prefix-cache,
+    # kvcache-aware.
+    score:
+      enabled:
+      - name: prefix-cache
+        weight: 1
+      - name: gpu-usage
+        weight: 1

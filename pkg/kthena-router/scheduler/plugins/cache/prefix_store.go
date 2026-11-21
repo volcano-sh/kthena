@@ -77,6 +77,9 @@ type ModelPrefixStore struct {
 	podHashes    map[types.NamespacedName]Cache[hashModelKey, struct{}] // Map of pod to its hash LRU
 	topK         int                                                    // Each match returns at most topK pods.
 	hashCapacity int                                                    // Capacity for each pod's hash LRU
+
+	// unregisterPodCallback removes the pod-deletion callback; set at construction.
+	unregisterPodCallback func()
 }
 
 // NewModelPrefixStore creates a new ModelPrefixStore with the specified capacity and topK
@@ -89,9 +92,19 @@ func NewModelPrefixStore(store datastore.Store, hashCapacity, topK int) *ModelPr
 	}
 
 	// Register callback for pod deletion
-	store.RegisterCallback("Pod", s.onPodDeleted)
+	s.unregisterPodCallback = store.RegisterCallback("Pod", s.onPodDeleted)
 
 	return s
+}
+
+// Close unregisters the pod-deletion callback. The hash data stays readable
+// for in-flight requests; it just stops tracking pod deletions.
+func (s *ModelPrefixStore) Close() error {
+	if s.unregisterPodCallback != nil {
+		s.unregisterPodCallback()
+		s.unregisterPodCallback = nil
+	}
+	return nil
 }
 
 // onPodDeleted is called when a pod is deleted

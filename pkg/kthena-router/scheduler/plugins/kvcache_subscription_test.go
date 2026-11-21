@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,19 +34,26 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 )
 
-type fakePodLister struct {
-	mu   sync.Mutex
-	pods map[types.NamespacedName]*datastore.PodInfo
+type fakeSubscriberStore struct {
+	mu           sync.Mutex
+	pods         map[types.NamespacedName]*datastore.PodInfo
+	modelServers map[types.NamespacedName]*aiv1alpha1.ModelServer
+	msPods       map[types.NamespacedName][]types.NamespacedName
 }
 
-func newFakePodLister() *fakePodLister {
-	return &fakePodLister{pods: make(map[types.NamespacedName]*datastore.PodInfo)}
+func newFakeSubscriberStore() *fakeSubscriberStore {
+	return &fakeSubscriberStore{
+		pods:         make(map[types.NamespacedName]*datastore.PodInfo),
+		modelServers: make(map[types.NamespacedName]*aiv1alpha1.ModelServer),
+		msPods:       make(map[types.NamespacedName][]types.NamespacedName),
+	}
 }
 
-func (f *fakePodLister) GetAllPods() map[types.NamespacedName]*datastore.PodInfo {
+func (f *fakeSubscriberStore) GetAllPods() map[types.NamespacedName]*datastore.PodInfo {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	pods := make(map[types.NamespacedName]*datastore.PodInfo, len(f.pods))
@@ -55,7 +63,7 @@ func (f *fakePodLister) GetAllPods() map[types.NamespacedName]*datastore.PodInfo
 	return pods
 }
 
-func (f *fakePodLister) add(name, uid, ip string, phase corev1.PodPhase) {
+func (f *fakeSubscriberStore) add(name, uid, ip string, phase corev1.PodPhase) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name, UID: types.UID(uid)}}
 	pod.Status.PodIP = ip
 	pod.Status.Phase = phase
@@ -64,10 +72,56 @@ func (f *fakePodLister) add(name, uid, ip string, phase corev1.PodPhase) {
 	f.pods[types.NamespacedName{Namespace: "default", Name: name}] = datastore.NewPodInfo(pod, "vLLM")
 }
 
-func (f *fakePodLister) remove(name string) {
+func (f *fakeSubscriberStore) remove(name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.pods, types.NamespacedName{Namespace: "default", Name: name})
+}
+
+// addModelServer registers a ModelServer in the default namespace; an empty
+// profile leaves its schedulerProfile unset.
+func (f *fakeSubscriberStore) addModelServer(name, profile string, podNames ...string) {
+	ms := &aiv1alpha1.ModelServer{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name}}
+	if profile != "" {
+		ms.Spec.TrafficPolicy = &aiv1alpha1.TrafficPolicy{
+			LoadBalancer: &aiv1alpha1.LoadBalancer{SchedulerProfile: &profile},
+		}
+	}
+	key := types.NamespacedName{Namespace: "default", Name: name}
+	podKeys := make([]types.NamespacedName, 0, len(podNames))
+	for _, podName := range podNames {
+		podKeys = append(podKeys, types.NamespacedName{Namespace: "default", Name: podName})
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.modelServers[key] = ms
+	f.msPods[key] = podKeys
+}
+
+func (f *fakeSubscriberStore) GetAllModelServers() map[types.NamespacedName]*aiv1alpha1.ModelServer {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	servers := make(map[types.NamespacedName]*aiv1alpha1.ModelServer, len(f.modelServers))
+	for name, ms := range f.modelServers {
+		servers[name] = ms
+	}
+	return servers
+}
+
+func (f *fakeSubscriberStore) GetPodsByModelServer(name types.NamespacedName) ([]*datastore.PodInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	podKeys, ok := f.msPods[name]
+	if !ok {
+		return nil, fmt.Errorf("model server not found: %v", name)
+	}
+	pods := make([]*datastore.PodInfo, 0, len(podKeys))
+	for _, podKey := range podKeys {
+		if pod, ok := f.pods[podKey]; ok {
+			pods = append(pods, pod)
+		}
+	}
+	return pods, nil
 }
 
 // fakeStream is one KV events stream served by a fakeSidecar.
@@ -190,9 +244,9 @@ func waitForOwners(t *testing.T, idx *KVBlockMemoryIndex, model string, hash uin
 	t.Fatalf("owners of block %d of %s = %v, want %v", hash, model, got, want)
 }
 
-func startTestSubscriber(t *testing.T, pods podLister, idx *KVBlockMemoryIndex, port int) (*kvEventSubscriber, context.CancelFunc) {
+func startTestSubscriber(t *testing.T, pods subscriberStore, idx *KVBlockMemoryIndex, port int) (*kvEventSubscriber, context.CancelFunc) {
 	t.Helper()
-	subscriber := newKVEventSubscriber(pods, idx, "kthena-system/router-0", port)
+	subscriber := newKVEventSubscriber(pods, idx, types.NamespacedName{}, "kthena-system/router-0", port)
 	subscriber.minBackoff = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -202,7 +256,7 @@ func startTestSubscriber(t *testing.T, pods podLister, idx *KVBlockMemoryIndex, 
 
 func TestKVEventSubscriber_AttributesEventsToDialedPod(t *testing.T) {
 	sidecar := newFakeSidecar(t)
-	pods := newFakePodLister()
+	pods := newFakeSubscriberStore()
 	pods.add("pod-a", "uid-a", "127.0.0.1", corev1.PodRunning)
 	pods.add("pod-b", "uid-b", "127.0.0.2", corev1.PodRunning)
 	pods.add("pending", "uid-p", "127.0.0.3", corev1.PodPending)
@@ -228,7 +282,7 @@ func TestKVEventSubscriber_AttributesEventsToDialedPod(t *testing.T) {
 
 func TestKVEventSubscriber_SkipsPodsSharingAnIP(t *testing.T) {
 	sidecar := newFakeSidecar(t)
-	pods := newFakePodLister()
+	pods := newFakeSubscriberStore()
 	pods.add("host-1", "uid-1", "127.0.0.1", corev1.PodRunning)
 	pods.add("host-2", "uid-2", "127.0.0.1", corev1.PodRunning)
 	subscriber, _ := startTestSubscriber(t, pods, NewKVBlockMemoryIndex(0), sidecar.port)
@@ -246,7 +300,7 @@ func TestKVEventSubscriber_SkipsPodsSharingAnIP(t *testing.T) {
 // them, so its warm cache is known again.
 func TestKVEventSubscriber_ResyncsPodBackFromNotReady(t *testing.T) {
 	sidecar := newFakeSidecar(t)
-	pods := newFakePodLister()
+	pods := newFakeSubscriberStore()
 	pods.add("pod-a", "uid-a", "127.0.0.1", corev1.PodRunning)
 	idx := NewKVBlockMemoryIndex(0)
 	subscriber, _ := startTestSubscriber(t, pods, idx, sidecar.port)
@@ -273,7 +327,7 @@ func TestKVEventSubscriber_ResyncsPodBackFromNotReady(t *testing.T) {
 
 func TestKVEventSubscriber_ReopensStreamOfReplacedPod(t *testing.T) {
 	sidecar := newFakeSidecar(t)
-	pods := newFakePodLister()
+	pods := newFakeSubscriberStore()
 	pods.add("pod-a", "uid-1", "127.0.0.1", corev1.PodRunning)
 	idx := NewKVBlockMemoryIndex(0)
 	subscriber, _ := startTestSubscriber(t, pods, idx, sidecar.port)
@@ -305,7 +359,7 @@ func TestKVEventSubscriber_ReopensStreamOfReplacedPod(t *testing.T) {
 // waiting for it: otherwise the next stream, which only waits for the
 // replaced one, could receive blocks the predecessor drops when it ends.
 func TestKVEventSubscriber_CancelledStreamWaitsForItsPredecessor(t *testing.T) {
-	subscriber := newKVEventSubscriber(newFakePodLister(), NewKVBlockMemoryIndex(0), "router-0", 1)
+	subscriber := newKVEventSubscriber(newFakeSubscriberStore(), NewKVBlockMemoryIndex(0), types.NamespacedName{}, "router-0", 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	prev := make(chan struct{})
@@ -336,7 +390,7 @@ func TestKVEventSubscriber_DoesNotFollowRedirects(t *testing.T) {
 	t.Cleanup(sidecar.Close)
 	port := sidecar.Listener.Addr().(*net.TCPAddr).Port
 
-	subscriber := newKVEventSubscriber(newFakePodLister(), NewKVBlockMemoryIndex(0), "router-0", port)
+	subscriber := newKVEventSubscriber(newFakeSubscriberStore(), NewKVBlockMemoryIndex(0), types.NamespacedName{}, "router-0", port)
 	opened, err := subscriber.stream(context.Background(), "pod-a.default", "127.0.0.1")
 	if opened || err == nil {
 		t.Fatalf("stream() = %v, %v; want a failure to open the stream", opened, err)
@@ -372,7 +426,7 @@ func TestKVEventSubscriber_DropsBlocksWhenStreamEnds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sidecar := newFakeSidecar(t)
-			pods := newFakePodLister()
+			pods := newFakeSubscriberStore()
 			pods.add("pod-a", "uid-a", "127.0.0.1", corev1.PodRunning)
 			idx := NewKVBlockMemoryIndex(0)
 			startTestSubscriber(t, pods, idx, sidecar.port)
@@ -393,10 +447,10 @@ func TestKVEventSubscriber_DropsBlocksWhenStreamEnds(t *testing.T) {
 
 func TestKVEventSubscriber_IdleStreamIsClosed(t *testing.T) {
 	sidecar := newFakeSidecar(t)
-	pods := newFakePodLister()
+	pods := newFakeSubscriberStore()
 	pods.add("pod-a", "uid-a", "127.0.0.1", corev1.PodRunning)
 	idx := NewKVBlockMemoryIndex(0)
-	subscriber := newKVEventSubscriber(pods, idx, "router-0", sidecar.port)
+	subscriber := newKVEventSubscriber(pods, idx, types.NamespacedName{}, "router-0", sidecar.port)
 	subscriber.minBackoff = 10 * time.Millisecond
 	subscriber.idleTimeout = 300 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
@@ -423,7 +477,7 @@ func TestKVEventSubscriber_IdleStreamIsClosed(t *testing.T) {
 
 func TestKVEventSubscriber_StopsWithContext(t *testing.T) {
 	sidecar := newFakeSidecar(t)
-	pods := newFakePodLister()
+	pods := newFakeSubscriberStore()
 	pods.add("pod-a", "uid-a", "127.0.0.1", corev1.PodRunning)
 	idx := NewKVBlockMemoryIndex(0)
 	_, cancel := startTestSubscriber(t, pods, idx, sidecar.port)
@@ -458,5 +512,68 @@ func TestRouterInstanceID(t *testing.T) {
 				t.Errorf("routerInstanceID() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// A profile chain streams only from the pods of its profile's ModelServers.
+func TestKVEventSubscriber_ScopesTargetsToProfileModelServers(t *testing.T) {
+	sidecar := newFakeSidecar(t)
+	pods := newFakeSubscriberStore()
+	pods.add("pod-a", "uid-a", "127.0.0.1", corev1.PodRunning)
+	pods.add("pod-b", "uid-b", "127.0.0.2", corev1.PodRunning)
+	pods.addModelServer("ms-a", "cache-heavy", "pod-a")
+	pods.addModelServer("ms-b", "", "pod-b")
+	profile := types.NamespacedName{Namespace: "default", Name: "cache-heavy"}
+
+	subscriber := newKVEventSubscriber(pods, NewKVBlockMemoryIndex(0), profile, "router-0", sidecar.port)
+	subscriber.minBackoff = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go subscriber.run(ctx)
+
+	streamA := sidecar.nextStream(t)
+	if streamA.host != "127.0.0.1" {
+		t.Fatalf("stream opened to %s, want 127.0.0.1", streamA.host)
+	}
+	sidecar.expectNoStream(t, 100*time.Millisecond)
+
+	// A pod joining a referenced ModelServer opens its stream.
+	pods.add("pod-c", "uid-c", "127.0.0.3", corev1.PodRunning)
+	pods.addModelServer("ms-a", "cache-heavy", "pod-a", "pod-c")
+	subscriber.onPodEvent(datastore.EventData{})
+	streamC := sidecar.nextStream(t)
+	if streamC.host != "127.0.0.3" {
+		t.Fatalf("stream opened to %s, want 127.0.0.3", streamC.host)
+	}
+
+	// The ModelServer switching to another profile closes the streams of
+	// its pods: they are no longer in this chain's scope.
+	pods.addModelServer("ms-a", "other-profile", "pod-a", "pod-c")
+	subscriber.onPodEvent(datastore.EventData{})
+	for _, stream := range []*fakeStream{streamA, streamC} {
+		select {
+		case <-stream.closed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stream of a pod that left the scope was not closed")
+		}
+	}
+	sidecar.expectNoStream(t, 100*time.Millisecond)
+}
+
+// Successive registrations of the same profile chain must not share a router
+// id: while a replaced chain drains, the two instances coexist.
+func TestRouterChainInstanceID(t *testing.T) {
+	t.Setenv("POD_NAME", "router-0")
+	t.Setenv("POD_NAMESPACE", "kthena-system")
+	profile := types.NamespacedName{Namespace: "default", Name: "cache-heavy"}
+
+	first := routerChainInstanceID(profile)
+	second := routerChainInstanceID(profile)
+	if first == second {
+		t.Errorf("routerChainInstanceID(%v) repeated %q; coexisting chain instances must not share an id", profile, first)
+	}
+	prefix := "kthena-system/router-0/default/cache-heavy/"
+	if !strings.HasPrefix(first, prefix) {
+		t.Errorf("routerChainInstanceID(%v) = %q, want the %q prefix", profile, first, prefix)
 	}
 }
