@@ -1,0 +1,31 @@
+# Lossless upgrade example: aggregated (non-PD) ModelServing.
+#
+# The annotation below enables the lossless drain: on deletion the router stops
+# dispatching new requests to the Pod and its preStop hook polls the engine
+# metrics until in-flight reaches zero (bounded by min(drain-timeout, 70% of
+# the grace period)) before SIGTERM is sent. Remove the annotation to restore
+# the default immediate-delete behavior.
+# A single-role aggregated deployment needs no drain-kv-buffer annotation: the
+# engine serves both prefill and decode, and its own counters are reliable.
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: sample-lossless
+  namespace: default
+  annotations:
+    modelserving.volcano.sh/drain-timeout: "300s"
+spec:
+  schedulerName: volcano
+  replicas: 1
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: inference          # single role: one Pod runs the full engine (aggregated)
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: vllm
+                image: ghcr.io/volcano-sh/kthena-engine:vllm-ascend_v0.10.1rc1_mooncake_v0.3.5
+                ports:
+                  - containerPort: 8000    # serving + metrics port, read by the preStop hook

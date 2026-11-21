@@ -106,6 +106,7 @@ func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServ
 	// Build environment variables into each container of all pod
 	envVars := createCommonEnvVars(role, 0)
 	AddPodEnvVars(entryPod, envVars...)
+	ApplyDrain(entryPod, role, ms)
 	return entryPod
 }
 
@@ -122,6 +123,7 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelSer
 	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
 	envVars := createCommonEnvVars(role, podIndex)
 	AddPodEnvVars(workerPod, envVars...)
+	ApplyDrain(workerPod, role, ms)
 	return workerPod
 }
 
