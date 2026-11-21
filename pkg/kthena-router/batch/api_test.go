@@ -17,12 +17,15 @@ limitations under the License.
 package batch
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -738,6 +741,38 @@ func TestUploadAnswersWithoutReadingTheRestOfARejectedPart(t *testing.T) {
 			assert.Empty(t, storedFiles(t, api.root))
 		})
 	}
+}
+
+// A real HTTP/1.1 server reads an unread body before it answers, unless the connection is closed instead.
+func TestRefusedUploadDoesNotWaitForTheRestOfTheBody(t *testing.T) {
+	api := newTestAPI(t)
+	engine := gin.New()
+	engine.Any("/v1/*path", func(c *gin.Context) {
+		c.Set(common.UserIdKey, "alice")
+		api.service.Serve(c)
+	})
+	server := httptest.NewServer(engine)
+	t.Cleanup(server.Close)
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	part := "--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.jsonl\"\r\n\r\n" + strings.Repeat("x", 4096)
+	_, err = fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: kthena\r\nContent-Type: multipart/form-data; boundary=b\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n", filesPath, len(part), part)
+	require.NoError(t, err)
+	// The client sends nothing more and waits for the answer.
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err, "the 413 must not wait for the rest of the body")
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
+	assert.True(t, resp.Close, "the connection is closed instead of read to the end")
+}
+
+func TestStoredUploadKeepsTheConnectionOpen(t *testing.T) {
+	api := newTestAPI(t)
+	rec := api.call(t, "alice", uploadRequest(t, "line\n", true, map[string]string{"purpose": PurposeBatch}))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, rec.Header().Get("Connection"))
 }
 
 func TestUploadRejectsAFormThatWasCutOff(t *testing.T) {

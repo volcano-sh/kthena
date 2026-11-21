@@ -139,6 +139,10 @@ func (s *Service) uploadFile(c *gin.Context) {
 	ctx := c.Request.Context()
 	// cleanup still removes bytes after the client is gone and the request is cancelled.
 	cleanup := context.WithoutCancel(ctx)
+	// HTTP/1 reads an unread body before it answers, so a refused upload closes the connection instead.
+	if c.Request.ProtoMajor == 1 {
+		c.Header("Connection", "close")
+	}
 	// A declared size over the limit is refused before the client sends the body.
 	if c.Request.ContentLength > s.config.MaxFileBytes+multipartSlack {
 		fail(c, http.StatusRequestEntityTooLarge, errInvalidRequest, "file", s.tooLarge())
@@ -221,6 +225,8 @@ func (s *Service) uploadFile(c *gin.Context) {
 		unavailable(c, "cannot record the uploaded file", err)
 		return
 	}
+	// The whole body was read, so the connection can be reused.
+	c.Writer.Header().Del("Connection")
 	c.JSON(http.StatusOK, fileObject(file))
 }
 
