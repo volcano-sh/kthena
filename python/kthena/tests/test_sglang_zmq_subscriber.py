@@ -204,3 +204,18 @@ async def test_process_message_decodes_and_dispatches():
     assert sub.event_publisher.publish.await_count == 2
     types = [c.args[0].event_type for c in sub.event_publisher.publish.await_args_list]
     assert types == [EventType.SGLANG_BLOCK_STORED, EventType.SGLANG_BLOCK_REMOVED]
+
+
+@pytest.mark.asyncio
+async def test_track_sequence_publishes_stream_started_after_restart():
+    sub = SGLangZMQSubscriber(pod_identifier="pod-a", model_name="m")
+    sub.event_publisher = AsyncMock()
+
+    for seq in [0, 1, 2, 0]:
+        await sub._track_sequence(seq.to_bytes(8, "big"))
+
+    published = [c.args[0] for c in sub.event_publisher.publish.await_args_list]
+    assert len(published) == 2
+    assert all(isinstance(e, SGLangEventData) for e in published)
+    assert {e.event_type for e in published} == {EventType.SGLANG_STREAM_STARTED}
+    assert published[0].pod_identifier == "pod-a"

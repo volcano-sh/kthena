@@ -149,6 +149,7 @@ async def lifespan(app: FastAPI):
                 EventType.VLLM_BLOCK_STORED,
                 EventType.VLLM_BLOCK_REMOVED,
                 EventType.VLLM_ALL_BLOCKS_CLEARED,
+                EventType.VLLM_STREAM_STARTED,
             ):
                 event_publisher.subscribe(event_type, vllm_kv_cache_handler)
             logger.info("vLLM KV-cache event handler registered")
@@ -158,6 +159,7 @@ async def lifespan(app: FastAPI):
                 EventType.SGLANG_BLOCK_STORED,
                 EventType.SGLANG_BLOCK_REMOVED,
                 EventType.SGLANG_ALL_BLOCKS_CLEARED,
+                EventType.SGLANG_STREAM_STARTED,
             ):
                 event_publisher.subscribe(event_type, sglang_kv_cache_handler)
             logger.info("SGLang KV-cache event handler registered")

@@ -17,6 +17,7 @@ import msgspec
 import pytest
 
 from kthena.runtime import zmq_subscriber
+from kthena.runtime.events import EventType
 from kthena.runtime.zmq_subscriber import VLLMZMQSubscriber
 
 
@@ -141,3 +142,72 @@ async def test_process_message_decodes_new_map_format_with_bytes_hashes():
     assert publisher.events[0].vllm_event.block_hashes == [expected_hash]
     assert publisher.events[0].vllm_event.token_ids == [1, 2]
     assert publisher.events[1].vllm_event.block_hashes == [expected_hash]
+
+
+@pytest.mark.asyncio
+async def test_stream_started_on_first_batch_restart_and_gap():
+    sub = VLLMZMQSubscriber(pod_identifier="pod-a", model_name="m")
+    publisher = _CapturePublisher()
+    sub.event_publisher = publisher
+
+    started = []
+    for seq in [0, 1, 2, 0, 1, 5, 6]:
+        before = len(publisher.events)
+        await sub._track_sequence(seq.to_bytes(8, "big"))
+        if len(publisher.events) > before:
+            started.append(seq)
+
+    # First batch, engine restart (2 -> 0) and lost batches (1 -> 5).
+    assert started == [0, 0, 5]
+    assert {e.event_type for e in publisher.events} == {EventType.VLLM_STREAM_STARTED}
+    assert publisher.events[0].pod_identifier == "pod-a"
+    assert publisher.events[0].model_name == "m"
+
+
+@pytest.mark.asyncio
+async def test_stream_started_is_published_before_the_batch(monkeypatch):
+    sub = VLLMZMQSubscriber(pod_identifier="pod-a", model_name="m")
+    sub.config = replace(sub.config, zmq_topic_filter="")
+    order = []
+
+    class _Publisher:
+        async def publish(self, event_data):
+            order.append(event_data.event_type)
+
+    class _FakeZMQ:
+        def socket(self, socket_type):
+            return self
+
+        def connect(self, endpoint):
+            pass
+
+        def setsockopt_string(self, option, value):
+            pass
+
+        def setsockopt(self, option, value):
+            pass
+
+        async def recv_multipart(self, flags):
+            return [b"", (7).to_bytes(8, "big"), b"batch"]
+
+        def close(self):
+            pass
+
+        def term(self):
+            pass
+
+    monkeypatch.setattr(zmq_subscriber.zmq.asyncio, "Context", lambda: _FakeZMQ())
+
+    async def process_message(payload, pod_identifier, model_name):
+        order.append(payload)
+        sub.running = False
+
+    sub.event_publisher = _Publisher()
+    sub._process_message = process_message
+    sub.running = True
+    # Seen on an earlier connection; 7 would continue it.
+    sub._last_seq = 6
+
+    await sub._run_subscriber()
+
+    assert order == [EventType.VLLM_STREAM_STARTED, b"batch"]
