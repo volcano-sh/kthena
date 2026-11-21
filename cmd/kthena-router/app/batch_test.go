@@ -256,6 +256,19 @@ func TestBatchUploadLimitComesFromTheEnvironment(t *testing.T) {
 	assert.Equal(t, http.StatusRequestEntityTooLarge, tooLarge.Code, tooLarge.Body.String())
 }
 
+func TestBatchFileWithoutExpiryLivesThirtyDays(t *testing.T) {
+	enableBatch(t)
+	handler := defaultListener(t, newBatchRouter(t, testRouterConfig))
+
+	uploaded := serve(handler, uploadRequest(t, "line\n", ""))
+	require.Equal(t, http.StatusOK, uploaded.Code, uploaded.Body.String())
+	body := decodeBody(t, uploaded)
+	createdAt, _ := body["created_at"].(float64)
+	expiresAt, ok := body["expires_at"].(float64)
+	require.True(t, ok, "expires_at must be set: %v", body["expires_at"])
+	assert.Equal(t, float64(2592000), expiresAt-createdAt)
+}
+
 func TestBatchAPIAnswers503UntilRedisIsBack(t *testing.T) {
 	redisServer, _ := enableBatch(t)
 	redisServer.Close()

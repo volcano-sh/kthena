@@ -33,6 +33,8 @@ const (
 	defaultBatchStoragePath = "/var/lib/kthena/batch"
 	// batchStartupCheckTimeout bounds the Redis check made when the batch API starts.
 	batchStartupCheckTimeout = 2 * time.Second
+	// batchFileExpiration is the proposal's default lifetime of a file uploaded without expires_after.
+	batchFileExpiration = 30 * 24 * time.Hour
 )
 
 // batchOptions is read from the environment, which the chart sets from kthenaRouter.batch.
@@ -83,6 +85,6 @@ func startBatch(ctx context.Context, r *router.Router) {
 	if err := client.Ping(checkCtx).Err(); err != nil {
 		klog.Errorf("Batch API: Redis is not reachable: %v", err)
 	}
-	r.SetAPIExtension(batch.NewService(batch.NewRedisStore(client, ""), files, batch.Config{MaxFileBytes: options.maxFileBytes}))
+	r.SetAPIExtension(batch.NewService(batch.NewRedisStore(client, ""), files, batch.Config{MaxFileBytes: options.maxFileBytes, FileExpiration: batchFileExpiration}))
 	klog.Infof("Batch API enabled, files under %s", options.storagePath)
 }
