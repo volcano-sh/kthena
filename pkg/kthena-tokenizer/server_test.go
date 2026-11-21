@@ -133,6 +133,38 @@ func TestServerRejectsBadRequests(t *testing.T) {
 	})
 }
 
+func TestServerLimitsRequestBody(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	body := `{"model": "served", "prompt": "` + strings.Repeat("a", 64) + `"}`
+	tests := []struct {
+		name  string
+		limit int64
+		want  int
+	}{
+		{"default limit", 0, http.StatusOK},
+		{"body within limit", int64(len(body)), http.StatusOK},
+		{"body over limit", int64(len(body)) - 1, http.StatusRequestEntityTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestServer(t, backend)
+			s.config.MaxRequestBodyBytes = tt.limit
+			frontend := httptest.NewServer(s.Handler())
+			defer frontend.Close()
+
+			resp, err := http.Post(frontend.URL+"/tokenize", "application/json", strings.NewReader(body))
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, tt.want, resp.StatusCode)
+		})
+	}
+}
+
 func TestServerReportsBackendFailure(t *testing.T) {
 	backend := httptest.NewServer(nil)
 	frontend := httptest.NewServer(newTestServer(t, backend).Handler())

@@ -173,13 +173,16 @@ Because the hash is taken from what the client sent, the same image sent once as
 
 vLLM expands each media item into placeholder tokens, and keys every KV block that overlaps an item by the item as well: its identifier, a hash of the processed media, and its position in the block. The router cannot compute these keys from the text, so for a request with media the [`kvcache-aware`](./kvcache-aware) plugin asks vLLM to render the prompt through the `/v1/chat/completions/render` endpoint, which returns the token IDs together with the identifier and the placeholder positions of every media item. The runtime sidecar reads the same media keys from the KV events of the engine, so the block hashes of the router and of the index match, media included.
 
-The render request goes to the [Tokenizer Service](./tokenizer-service) when it is enabled, and otherwise (or on fallback) to a vLLM pod of the model. Requirements:
+A Chat Completions request is rendered from its own fields, such as `tools`, `chat_template_kwargs` and `mm_processor_kwargs`, so the rendered prompt matches the one the engine computes for inference. Requests of the other APIs are rendered from their converted messages.
+
+The render request goes to the [Tokenizer Service](./tokenizer-service) when it is enabled, and otherwise (or on fallback) to a vLLM pod of the model. Rendering fetches media passed by URL. Because the tokenizer service may run in the router pod, where a client-provided URL could reach endpoints only meant to be reachable from within the pod, a prompt with media passed by URL is always rendered on a vLLM pod, which fetches the media for inference anyway; if fallback to the engine is disabled, such a request is not scored by `kvcache-aware`. Prompts whose media is inline (data URLs or `input_audio`) use the tokenizer service. Requirements:
 
 - On a vLLM model pod, the endpoint is only available when the server is started with `--enable-scale-out`; without it the render request fails with `403`. The tokenizer service always provides it.
 - vLLM v0.32 or later is recommended: the router asks the endpoint not to return the processed media, which older versions ignore, making the response larger.
-- The pod that renders the prompt fetches media passed by URL, so it needs access to those URLs, like the model server.
+- The vLLM pod that renders the prompt fetches media passed by URL, so it needs access to those URLs, like the model server. To restrict which hosts media may be fetched from, start vLLM with `--allowed-media-domains`.
+- The tokenizer service limits request bodies to 10 MiB by default, which bounds the inline media it renders; raise `MAX_REQUEST_BODY_BYTES` if clients send larger inline media.
 
-Rendering a prompt with media takes longer than tokenizing text, because the media is fetched and preprocessed. If this latency matters more than the KV cache hits, keep `kvcache-aware` disabled and rely on `prefix-cache` for multimodal affinity.
+Rendering a prompt with media takes longer than tokenizing text, because the media is fetched and preprocessed. The prompt is rendered once per request, also with Prefill-Decode Disaggregation, where both the decode and the prefill pods are scored. If this latency matters more than the KV cache hits, keep `kvcache-aware` disabled and rely on `prefix-cache` for multimodal affinity.
 
 SGLang replaces the tokens of each media item with pad token IDs derived from its hash, which the router cannot compute. If a model has only SGLang pods and no tokenizer service, or the prompt cannot be rendered (for example a Responses `input_image` given by `file_id`), `kvcache-aware` does not score the request and the other score plugins decide, which is why `kvcache-aware` must always be enabled together with another score plugin such as `least-request`.
 

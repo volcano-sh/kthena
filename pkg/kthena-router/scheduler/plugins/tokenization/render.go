@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
@@ -84,17 +85,39 @@ type vllmChatRenderResponse struct {
 // that has no Chat Completions form.
 var errNotRenderable = errors.New("prompt cannot be rendered as a chat request")
 
-func newVLLMChatRenderRequest(model string, prompt *common.ChatMessage) (*vllmChatRenderRequest, error) {
+// newVLLMChatRenderRequest builds the render request of a prompt. A prompt
+// parsed from a Chat Completions request is rendered from that request, so
+// that every field that shapes the prompt, such as tools, chat_template_kwargs,
+// mm_processor_kwargs or the tool calls of a message, is rendered as for
+// inference. A prompt of another API is rendered from its messages in the Chat
+// Completions format.
+func newVLLMChatRenderRequest(model string, prompt *common.ChatMessage) (interface{}, error) {
 	if prompt.Text != "" || len(prompt.Messages) == 0 {
 		return nil, errNotRenderable
+	}
+	for _, msg := range prompt.Messages {
+		if msg.ContentParts == nil && len(msg.MultiModal) > 0 {
+			return nil, errNotRenderable
+		}
+	}
+	if prompt.ChatRequest != nil {
+		request := make(map[string]interface{}, len(prompt.ChatRequest)+1)
+		for key, value := range prompt.ChatRequest {
+			request[key] = value
+		}
+		request["model"] = model
+		request["mm_payload"] = "none"
+		// The render response is not streamed, and vLLM rejects stream_options
+		// without stream.
+		delete(request, "stream")
+		delete(request, "stream_options")
+		return request, nil
 	}
 	messages := make([]vllmChatRenderMessage, 0, len(prompt.Messages))
 	for _, msg := range prompt.Messages {
 		var content interface{} = msg.Content
 		if msg.ContentParts != nil {
 			content = msg.ContentParts
-		} else if len(msg.MultiModal) > 0 {
-			return nil, errNotRenderable
 		}
 		messages = append(messages, vllmChatRenderMessage{Role: msg.Role, Content: content})
 	}
@@ -152,6 +175,12 @@ func parseVLLMChatRenderResponse(data []byte) (*RenderResult, error) {
 // it came from, media included. It uses the tokenizer service when it is
 // enabled, falling back to a vLLM pod as configured. Only vLLM pods are used,
 // since the render endpoint is specific to vLLM.
+//
+// Rendering fetches the media passed by URL. The tokenizer service can run in
+// the router pod, where a client-provided URL could reach endpoints that are
+// only meant to be reachable from within the pod, so a prompt holding such
+// media is rendered on a vLLM pod, which fetches the media for inference
+// anyway.
 func (m *TokenizerManager) RenderPrompt(
 	model string,
 	prompt *common.ChatMessage,
@@ -163,14 +192,20 @@ func (m *TokenizerManager) RenderPrompt(
 	}
 
 	if m.config.Service.Enabled {
-		result, err := m.renderWith(m.config.Service.Endpoint, request)
-		if err == nil {
-			return result, nil
+		if referencesRemoteMedia(prompt) {
+			if !m.config.Service.FallbackToEngine {
+				return nil, fmt.Errorf("prompt for model %s holds media passed by URL, which the tokenizer service does not render", model)
+			}
+		} else {
+			result, err := m.renderWith(m.config.Service.Endpoint, request)
+			if err == nil {
+				return result, nil
+			}
+			if !m.config.Service.FallbackToEngine {
+				return nil, fmt.Errorf("tokenizer service failed to render prompt for model %s: %w", model, err)
+			}
+			klog.V(2).Infof("TokenizerManager: tokenizer service failed to render prompt for model %s, falling back to engine: %v", model, err)
 		}
-		if !m.config.Service.FallbackToEngine {
-			return nil, fmt.Errorf("tokenizer service failed to render prompt for model %s: %w", model, err)
-		}
-		klog.V(2).Infof("TokenizerManager: tokenizer service failed to render prompt for model %s, falling back to engine: %v", model, err)
 	}
 
 	endpoint, ok := m.vllmEndpoint(pods)
@@ -180,7 +215,32 @@ func (m *TokenizerManager) RenderPrompt(
 	return m.renderWith(endpoint, request)
 }
 
-func (m *TokenizerManager) renderWith(endpoint string, request *vllmChatRenderRequest) (*RenderResult, error) {
+// referencesRemoteMedia reports whether a prompt holds media passed by URL
+// rather than inline in a data URL.
+func referencesRemoteMedia(prompt *common.ChatMessage) bool {
+	for _, msg := range prompt.Messages {
+		for _, part := range msg.ContentParts {
+			partType, _ := part["type"].(string)
+			switch partType {
+			case "text", "input_audio":
+				// input_audio always carries its data inline.
+				continue
+			}
+			// image_url, audio_url and video_url hold the URL either directly
+			// or in the url field of an object.
+			url, _ := part[partType].(string)
+			if source, ok := part[partType].(map[string]interface{}); ok {
+				url, _ = source["url"].(string)
+			}
+			if len(url) < len("data:") || !strings.EqualFold(url[:len("data:")], "data:") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m *TokenizerManager) renderWith(endpoint string, request interface{}) (*RenderResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	data, err := newHTTPClient(endpoint, m.client).Post(ctx, vllmChatRenderPath, request)

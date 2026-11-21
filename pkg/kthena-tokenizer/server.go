@@ -31,8 +31,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// maxRequestBody bounds proxied request bodies (prompts are small).
-const maxRequestBody = 10 << 20 // 10 MiB
+// defaultMaxRequestBody is the default bound on proxied request bodies.
+const defaultMaxRequestBody = 10 << 20 // 10 MiB
 
 // readyChecker reports whether the ModelServer watcher completed its initial
 // sync.
@@ -98,6 +98,13 @@ func (s *Server) Run(ctx context.Context) error {
 // match the KV cache of multimodal prompts.
 const chatRenderPath = "/v1/chat/completions/render"
 
+func (s *Server) maxRequestBody() int64 {
+	if s.config.MaxRequestBodyBytes > 0 {
+		return s.config.MaxRequestBodyBytes
+	}
+	return defaultMaxRequestBody
+}
+
 // proxy forwards a request to the renderer that serves the model named in the
 // request body.
 func (s *Server) proxy(path string) http.HandlerFunc {
@@ -106,8 +113,14 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxRequestBody()))
 		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeError(w, http.StatusRequestEntityTooLarge,
+					fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit))
+				return
+			}
 			writeError(w, http.StatusBadRequest, "failed to read request body")
 			return
 		}

@@ -76,6 +76,11 @@ type Config struct {
 	RendererStableWindow time.Duration
 	// ProxyTimeout bounds a proxied /tokenize request.
 	ProxyTimeout time.Duration
+	// MaxRequestBodyBytes bounds proxied request bodies. Render requests
+	// carry inline (base64) media, so it must fit the largest inline media
+	// clients send; larger requests are rejected and the router falls back
+	// to engine-side rendering. Non-positive means the default.
+	MaxRequestBodyBytes int64
 }
 
 // ConfigFromEnv builds the service configuration from environment variables,
@@ -95,6 +100,7 @@ func ConfigFromEnv() Config {
 		RendererMaxRestarts:    envInt("RENDERER_MAX_RESTARTS", 3),
 		RendererStableWindow:   time.Duration(envInt("RENDERER_STABLE_WINDOW_SECONDS", 600)) * time.Second,
 		ProxyTimeout:           time.Duration(envInt("PROXY_TIMEOUT_SECONDS", 5)) * time.Second,
+		MaxRequestBodyBytes:    int64(envInt("MAX_REQUEST_BODY_BYTES", defaultMaxRequestBody)),
 	}
 }
 

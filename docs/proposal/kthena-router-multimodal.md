@@ -163,7 +163,9 @@ the same block keys as the engine, media included.
   engine fetch and preprocess its media, which takes longer than tokenizing
   text. It runs only for multimodal requests and only when `kvcache-aware` is
   enabled, with the same timeout as tokenization, and the model server fetches
-  and processes the media again when it serves the request. Deployments sensitive to this latency can rely on `prefix-cache`
+  and processes the media again when it serves the request. The prompt is
+  rendered once per request, also when Prefill-Decode Disaggregation scores
+  several pod groups. Deployments sensitive to this latency can rely on `prefix-cache`
   alone for multimodal affinity, or run the tokenizer service close to the
   router.
 - **Hash compatibility between router and sidecar.** The router and the runtime
@@ -266,15 +268,24 @@ first placeholder token relative to the block. The router can only compute the
 same keys if it knows the token IDs, the placeholder positions and the
 identifiers, so it asks the engine instead of guessing:
 
-1. For a multimodal prompt, `kvcache-aware` sends the messages, with
-   `ContentParts` as their content, to the vLLM `/v1/chat/completions/render`
-   endpoint with `add_generation_prompt: true` and `mm_payload: "none"`. The
+1. For a multimodal prompt, `kvcache-aware` sends a render request with
+   `mm_payload: "none"` to the vLLM `/v1/chat/completions/render` endpoint. For
+   a Chat Completions request this is the request as sent, with the upstream
+   model and without `stream` and `stream_options`, so that fields such as
+   `tools`, `chat_template_kwargs` and `mm_processor_kwargs` render the same
+   prompt as for inference. For the other APIs it holds the converted messages,
+   with `ContentParts` as their content, and `add_generation_prompt: true`. The
    endpoint applies the chat template, processes the media and returns the token
    IDs, plus the identifier and placeholder range of every media item. The
    tokenizer service proxies this endpoint; with `fallbackToEngine`, or without
-   the service, the router renders on a vLLM pod of the model. A message without
-   `ContentParts` holding media makes the prompt unrenderable, and the plugin
-   does not score the request.
+   the service, the router renders on a vLLM pod of the model. Prompts with
+   media passed by URL are always rendered on a vLLM pod, since rendering
+   fetches the media and the tokenizer service may run in the router pod,
+   where a client-provided URL could reach pod-local endpoints. A message
+   without `ContentParts` holding media makes the prompt unrenderable, and the
+   plugin does not score the request. The result is kept for the whole
+   scheduling of the request, so with Prefill-Decode Disaggregation the decode
+   and prefill pods are scored with a single render.
 2. The router splits the token IDs into blocks of the engine block size, as for
    text, and hashes each block together with the media items overlapping it.
 3. The runtime sidecar reads the `extra_keys` of the vLLM `BlockStored` events,

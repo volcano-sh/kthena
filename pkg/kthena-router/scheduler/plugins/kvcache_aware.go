@@ -308,6 +308,46 @@ func (t *KVCacheAware) renderPrompt(ctx *framework.Context, pods []*datastore.Po
 	return result.Tokens, result.MultiModal, nil
 }
 
+// promptBlockHashes tokenizes the prompt and returns its KV block hashes, or
+// nil if the prompt cannot be tokenized.
+func (t *KVCacheAware) promptBlockHashes(ctx *framework.Context, pods []*datastore.PodInfo) []uint64 {
+	// The engine expands each media item into placeholder tokens and keys the
+	// KV blocks holding them by the item as well, so a multimodal prompt is
+	// rendered by the engine, which returns both, rather than tokenized.
+	start := time.Now()
+	var tokens []uint32
+	var media []tokenization.MultiModalPlaceholder
+	var err error
+	if ctx.Prompt.HasMultiModal() {
+		tokens, media, err = t.renderPrompt(ctx, pods)
+	} else {
+		tokens, err = t.normalizeAndTokenizePrompt(ctx, pods)
+	}
+	tokenizerDuration := time.Since(start)
+	klog.V(4).Infof("KVCacheAware.Score: tokenization took %v, tokens=%d, media=%d, err=%v",
+		tokenizerDuration, len(tokens), len(media), err)
+
+	if err != nil {
+		if ctx.MetricsRecorder != nil {
+			ctx.MetricsRecorder.RecordKVCacheError(metrics.StageTokenize)
+		}
+		klog.V(4).Infof("KVCacheAware.Score: tokenization failed (err=%v)", err)
+		return nil
+	}
+	if ctx.MetricsRecorder != nil {
+		ctx.MetricsRecorder.RecordKVCacheTokenizeDuration(tokenizerDuration)
+	}
+	if len(tokens) == 0 {
+		klog.V(4).Infof("KVCacheAware.Score: empty token sequence")
+		return nil
+	}
+
+	blockHashes := t.processor.MultiModalTokensToBlockHashes(tokens, media, t.maxBlocksToMatch)
+	klog.V(4).Infof("KVCacheAware.Score: generated %d block hashes from %d tokens (blockSize=%d)",
+		len(blockHashes), len(tokens), t.processor.blockSize)
+	return blockHashes
+}
+
 func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
 	scoreStart := time.Now()
 	if ctx == nil || ctx.Prompt == nil {
@@ -330,42 +370,13 @@ func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 		return nil
 	}
 
-	// The engine expands each media item into placeholder tokens and keys the
-	// KV blocks holding them by the item as well, so a multimodal prompt is
-	// rendered by the engine, which returns both, rather than tokenized.
-	start := time.Now()
-	var tokens []uint32
-	var media []tokenization.MultiModalPlaceholder
-	var err error
-	if ctx.Prompt.HasMultiModal() {
-		tokens, media, err = t.renderPrompt(ctx, pods)
-	} else {
-		tokens, err = t.normalizeAndTokenizePrompt(ctx, pods)
+	if !ctx.KVCacheBlockHashesComputed {
+		ctx.KVCacheBlockHashes = t.promptBlockHashes(ctx, pods)
+		ctx.KVCacheBlockHashesComputed = true
 	}
-	tokenizerDuration := time.Since(start)
-	klog.V(4).Infof("KVCacheAware.Score: tokenization took %v, tokens=%d, media=%d, err=%v",
-		tokenizerDuration, len(tokens), len(media), err)
-
-	if err != nil {
-		if ctx.MetricsRecorder != nil {
-			ctx.MetricsRecorder.RecordKVCacheError(metrics.StageTokenize)
-		}
-		klog.V(4).Infof("KVCacheAware.Score: early return — tokenization failed (err=%v)", err)
-		return nil
-	}
-	if ctx.MetricsRecorder != nil {
-		ctx.MetricsRecorder.RecordKVCacheTokenizeDuration(tokenizerDuration)
-	}
-	if len(tokens) == 0 {
-		klog.V(4).Infof("KVCacheAware.Score: early return — empty token sequence")
-		return nil
-	}
-
-	blockHashes := t.processor.MultiModalTokensToBlockHashes(tokens, media, t.maxBlocksToMatch)
-	klog.V(4).Infof("KVCacheAware.Score: generated %d block hashes from %d tokens (blockSize=%d)",
-		len(blockHashes), len(tokens), t.processor.blockSize)
+	blockHashes := ctx.KVCacheBlockHashes
 	if len(blockHashes) == 0 {
-		klog.V(4).Infof("KVCacheAware.Score: early return — no block hashes generated")
+		klog.V(4).Infof("KVCacheAware.Score: early return — no block hashes for the prompt")
 		return nil
 	}
 

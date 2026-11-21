@@ -57,6 +57,14 @@ type Context struct {
 
 	// MetricsRecorder for recording scheduler plugin metrics
 	MetricsRecorder *metrics.RequestMetricsRecorder
+
+	// KVCacheBlockHashes holds the KV block hashes kvcache-aware computed for
+	// the prompt once KVCacheBlockHashesComputed is set. PD scheduling scores
+	// pods several times for one request, and the prompt is tokenized, or
+	// rendered with its media, on the first call only. It is empty when the
+	// prompt could not be tokenized.
+	KVCacheBlockHashes         []uint64
+	KVCacheBlockHashesComputed bool
 }
 
 type ScorePlugin interface {

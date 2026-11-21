@@ -65,6 +65,8 @@ const (
 
 	successfulRequestFinishReason = "successful_request"
 	failedRequestFinishReason     = "request_failed"
+
+	chatCompletionsPath = "/v1/chat/completions"
 )
 
 func requestFinishReason(c *gin.Context) string {
@@ -335,6 +337,9 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
 			c.Set("finishReason", "prompt_parsing")
 			return
+		}
+		if c.Request.URL.Path == chatCompletionsPath {
+			prompt.ChatRequest = modelRequest
 		}
 		// Store parsed prompt to avoid re-parsing in doLoadbalance.
 		c.Set(PromptKey, prompt)

@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2415,7 +2416,9 @@ func TestKVCacheAware_ScoreMultiModal(t *testing.T) {
 	// tokens after 2 text tokens, identified by the image URL.
 	var renderBody map[string]interface{}
 	var renderStatus int
+	var renders atomic.Int32
 	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		renders.Add(1)
 		if r.URL.Path != "/v1/chat/completions/render" || renderStatus != http.StatusOK {
 			http.Error(w, "render disabled", http.StatusForbidden)
 			return
@@ -2466,8 +2469,8 @@ func TestKVCacheAware_ScoreMultiModal(t *testing.T) {
 		}),
 	}
 	recorder := metrics.NewRequestMetricsRecorder(metrics.DefaultMetrics, model, "/v1/chat/completions")
-	score := func(image string, pods ...*datastore.PodInfo) map[*datastore.PodInfo]int {
-		return plugin.Score(&framework.Context{
+	newContext := func(image string) *framework.Context {
+		return &framework.Context{
 			UpstreamModel: model,
 			Prompt: &common.ChatMessage{Messages: []common.Message{{
 				Role:       "user",
@@ -2479,7 +2482,10 @@ func TestKVCacheAware_ScoreMultiModal(t *testing.T) {
 				},
 			}}},
 			MetricsRecorder: recorder,
-		}, pods)
+		}
+	}
+	score := func(image string, pods ...*datastore.PodInfo) map[*datastore.PodInfo]int {
+		return plugin.Score(newContext(image), pods)
 	}
 
 	t.Run("same media matches", func(t *testing.T) {
@@ -2506,6 +2512,19 @@ func TestKVCacheAware_ScoreMultiModal(t *testing.T) {
 		before := counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize)
 		assert.Nil(t, score("cat", vllmPod))
 		assert.Equal(t, 1.0, counterValue(t, &metrics.DefaultMetrics.KVCacheErrorsTotal, model, metrics.StageTokenize)-before)
+	})
+
+	t.Run("the prompt is rendered once per request", func(t *testing.T) {
+		// PD scheduling scores decode pods, then the prefill pods of several
+		// decode candidates, with one context.
+		for _, status := range []int{http.StatusOK, http.StatusForbidden} {
+			renderStatus = status
+			ctx := newContext("cat")
+			before := renders.Load()
+			first := plugin.Score(ctx, []*datastore.PodInfo{vllmPod})
+			assert.Equal(t, first, plugin.Score(ctx, []*datastore.PodInfo{vllmPod}))
+			assert.Equal(t, int32(1), renders.Load()-before, "status %d", status)
+		}
 	})
 }
 
