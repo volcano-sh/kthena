@@ -37,6 +37,14 @@ The focused suite uses `test/e2e/router/router-plugins/testdata/LLM-Mock-plugins
 
 The tests calculate prompt block hashes independently and wait for the exact Redis mapping before checking routing. Cache eviction produces `BlockRemoved`; the simulator lifecycle endpoint produces `AllBlocksCleared`. Selection is verified from Router access logs, and plugin execution is verified from Router metrics.
 
+#### KV-cache-aware test inventory
+
+| Test | Coverage |
+|------|----------|
+| `TestSchedulerPluginKVCacheAware` | Cache-hit preference, cache-miss distribution, and plugin metrics |
+| `TestSchedulerPluginKVCacheAwarePrefixAndLifecycle` | Longest-prefix selection, `BlockRemoved`, `AllBlocksCleared`, and stale ownership after a same-name Pod restart |
+| `TestSchedulerPluginMixedWeights` | KV-cache-aware and GPU-usage plugins with each weight ordering |
+
 ## Prerequisites
 
 - [Kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) must be installed
@@ -139,6 +147,29 @@ When adding a scenario:
 5. Keep cleanup registered with `t.Cleanup` and confirm a second clean run passes.
 
 On failure, the tests print Redis mappings and ownership, relevant Pod and container state, recent container logs, and namespace events before cleanup. CI also uploads the existing `kind export logs` artifact for node and cluster state. For a local failure, run `kind export logs --name kthena-e2e ./kthena-e2e-logs` before cleanup.
+
+### Demonstrate the KV-cache-aware Suite
+
+Start from a clean cluster, run the focused target, then remove the cluster:
+
+```bash
+make test-e2e-cleanup
+make test-e2e-router-kvcache-aware
+make test-e2e-cleanup
+```
+
+The run shows the real simulator-to-ZMQ-to-Runtime-to-Redis path, routing for exact and longest-prefix cache matches, cache removal and clear events, stale-owner filtering after a same-name Pod restart, and mixed plugin weights.
+
+### Future KV-cache-aware Coverage
+
+The suite does not currently cover the following scenarios:
+
+| Scenario | Reason |
+|----------|--------|
+| Same Pod name in two namespaces | Redis assertions already verify the `pod.namespace` owner. Add a second namespace only for a reproduced identity bug. |
+| Partial-tail reuse | Incomplete-block behavior depends on the engine event contract and needs an agreed expected result before adding an E2E assertion. |
+| Redis faults, TTL, and garbage collection | Deterministic coverage needs fault or time controls that the current fixture does not provide. |
+| Alternative engines or cache media | These require separate images and fixture contracts and should be added only after maintainer agreement. |
 
 ### Reproduce a CI Category Locally
 
