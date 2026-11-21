@@ -147,14 +147,28 @@ func (v *AutoscalingPolicyValidator) validateTarget(policy *registryv1.Autoscali
 
 	switch {
 	case policy.Spec.HomogeneousTarget != nil:
+		homogeneousPath := specPath.Child("homogeneousTarget")
 		allErrs = append(allErrs, validateTargetRef(
 			&policy.Spec.HomogeneousTarget.Target.TargetRef,
-			specPath.Child("homogeneousTarget").Child("target").Child("targetRef"))...)
+			homogeneousPath.Child("target").Child("targetRef"))...)
+		if policy.Spec.HomogeneousTarget.MinReplicas > policy.Spec.HomogeneousTarget.MaxReplicas {
+			allErrs = append(allErrs, field.Invalid(
+				homogeneousPath.Child("minReplicas"),
+				policy.Spec.HomogeneousTarget.MinReplicas,
+				"minReplicas must be <= maxReplicas"))
+		}
 	case policy.Spec.HeterogeneousTarget != nil:
 		for idx, param := range policy.Spec.HeterogeneousTarget.Params {
+			paramPath := specPath.Child("heterogeneousTarget").Child("params").Index(idx)
 			allErrs = append(allErrs, validateTargetRef(
 				&param.Target.TargetRef,
-				specPath.Child("heterogeneousTarget").Child("params").Index(idx).Child("target").Child("targetRef"))...)
+				paramPath.Child("target").Child("targetRef"))...)
+			if param.MinReplicas > param.MaxReplicas {
+				allErrs = append(allErrs, field.Invalid(
+					paramPath.Child("minReplicas"),
+					param.MinReplicas,
+					"minReplicas must be <= maxReplicas"))
+			}
 		}
 	case policy.Spec.DisaggregatedTarget != nil:
 		allErrs = append(allErrs, validateTargetRef(
