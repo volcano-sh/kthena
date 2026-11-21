@@ -92,8 +92,8 @@ func (s *fakeStream) send(t *testing.T, payload KVEventPayload) {
 	}
 }
 
-// fakeSidecar serves KV events streams on every local address; the address a
-// router dials tells the pod apart.
+// fakeSidecar serves KV events streams on every local address; the Host of a
+// request tells the pod apart.
 type fakeSidecar struct {
 	server  *httptest.Server
 	port    int
@@ -194,6 +194,16 @@ func startTestSubscriber(t *testing.T, pods podLister, idx *KVBlockMemoryIndex, 
 	t.Helper()
 	subscriber := newKVEventSubscriber(pods, idx, "kthena-system/router-0", port)
 	subscriber.minBackoff = 10 * time.Millisecond
+	// macOS only assigns 127.0.0.1 on loopback, so always connect there. The
+	// request keeps the pod IP as its Host, which is how the fake sidecar
+	// tells pods apart.
+	subscriber.client.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		_, dialPort, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort("127.0.0.1", dialPort))
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go subscriber.run(ctx)
