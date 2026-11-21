@@ -22,7 +22,7 @@ When multiple Score plugins are enabled, the Router adds each plugin score multi
 
 | Test | Signal | Main assertion |
 |------|--------|----------------|
-| KV-cache aware | Redis block ownership | A cache-hit prompt prefers the owning replica, while misses do not pin to one replica |
+| KV-cache aware | Redis block ownership | Cache hits prefer the owner of the longest matching prefix; misses and removed, cleared, or stale ownership do not pin routing |
 | Prefix cache | Router prefix history | Repeated prompts prefer the replica with the matching prefix |
 | Least request | Waiting requests | Traffic avoids saturated replicas |
 | GPU usage | Backend KV-cache utilization | Traffic prefers the replica with lower cache utilization |
