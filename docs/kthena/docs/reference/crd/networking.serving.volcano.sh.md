@@ -184,7 +184,7 @@ _Underlying type:_ _string_
 InferenceEngine defines the inference framework used by the modelServer to serve LLM requests.
 
 _Validation:_
-- Enum: [vLLM SGLang]
+- Enum: [vLLM SGLang Triton]
 
 _Appears in:_
 - [ModelServerSpec](#modelserverspec)
@@ -193,6 +193,7 @@ _Appears in:_
 | --- | --- |
 | `vLLM` | https://github.com/vllm-project/vllm<br /> |
 | `SGLang` | https://github.com/sgl-project/sglang<br /> |
+| `Triton` | https://github.com/triton-inference-server/server<br />Requires Triton's OpenAI frontend (python/openai) exposing /v1/*; the<br />router does not use Triton's native /v2 inference API.<br /> |
 
 
 #### KVConnectorSpec
@@ -370,7 +371,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _string_ | The real model that the modelServers are running.<br />If the `model` in LLM inference request is different from this field, it should be overwritten by this field.<br />Otherwise, the `model` in LLM inference request will not be mutated. |  | MaxLength: 256 <br /> |
-| `inferenceEngine` _[InferenceEngine](#inferenceengine)_ | The inference engine used to serve the model. |  | Enum: [vLLM SGLang] <br />Required: \{\} <br /> |
+| `inferenceEngine` _[InferenceEngine](#inferenceengine)_ | The inference engine used to serve the model. |  | Enum: [vLLM SGLang Triton] <br />Required: \{\} <br /> |
 | `workloadSelector` _[WorkloadSelector](#workloadselector)_ | WorkloadSelector is used to match the model serving instances.<br />Currently, they must be pods within the same namespace as modelServer object.<br />`workloadSelector.matchLabels` and `endpoints` are mutually exclusive ways of<br />declaring the serving instances, so exactly one of them must be used.<br />`workloadSelector.pdGroup` does not select instances; it only assigns them<br />prefill and decode roles, and therefore is the sole `workloadSelector` field<br />that may also be combined with `endpoints`. |  |  |
 | `endpoints` _[Endpoint](#endpoint) array_ | Endpoints is a static list of model serving instances. It is intended for<br />deployments where the serving instances are not discoverable as pods of the<br />cluster the router runs in, for example when the router reads its<br />configuration from local files instead of the Kubernetes API server.<br />`endpoints` and `workloadSelector.matchLabels` are mutually exclusive;<br />exactly one of them must be specified. |  | MaxItems: 1024 <br /> |
 | `workloadPort` _[WorkloadPort](#workloadport)_ | WorkloadPort defines the port and protocol configuration for the model server.<br />It may be omitted only when every entry in `endpoints` declares its own<br />`port`; endpoints without an explicit `port` fall back to `workloadPort.port`. |  |  |

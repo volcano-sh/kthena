@@ -650,6 +650,8 @@ func TestNormalizeEngine(t *testing.T) {
 		{"SGLang", EngineSGLang, false},
 		{"sglang", EngineSGLang, false},
 		{"SGLANG", EngineSGLang, false},
+		{"Triton", EngineTriton, false},
+		{"triton", EngineTriton, false},
 		{"", "", true},
 		{"unknown", "", true},
 	}
@@ -693,6 +695,7 @@ func TestNewRemoteTokenizerEngineDispatch(t *testing.T) {
 	}{
 		{name: "vllm explicit", engine: "vllm", want: wantVLLM},
 		{name: "vllm uppercase", engine: "VLLM", want: wantVLLM},
+		{name: "triton uses vllm adapter", engine: "Triton", want: wantVLLM},
 		{name: "default (empty)", engine: "", want: wantError},
 		{name: "sglang", engine: "sglang", want: wantSGLang},
 		{name: "sglang mixed case", engine: "SGLang", want: wantSGLang},

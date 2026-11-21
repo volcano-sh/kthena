@@ -552,8 +552,7 @@ func TestBuildDecodeRequest(t *testing.T) {
 					assert.Equal(t, true, value)
 				}
 			} else if !isStreamingRequest(tt.modelRequest) {
-				// Non-streaming should have include_usage
-				assert.Equal(t, true, parsedRequest["include_usage"])
+				assert.NotContains(t, parsedRequest, "include_usage")
 			}
 
 			// URL scheme should be http

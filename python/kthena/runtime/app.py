@@ -143,7 +143,11 @@ async def lifespan(app: FastAPI):
 
         engine = state.metric_standard.engine if state.metric_standard else None
 
-        if pod_identifier and model_name and engine == EngineType.VLLM:
+        # Triton with vLLM backend reuses the vLLM KV ZMQ protocol.
+        if pod_identifier and model_name and engine in (
+            EngineType.VLLM,
+            EngineType.TRITON,
+        ):
             vllm_kv_cache_handler = get_vllm_kv_cache_handler(state.memory_kv_manager)
             for event_type in (
                 EventType.VLLM_BLOCK_STORED,
@@ -151,7 +155,7 @@ async def lifespan(app: FastAPI):
                 EventType.VLLM_ALL_BLOCKS_CLEARED,
             ):
                 event_publisher.subscribe(event_type, vllm_kv_cache_handler)
-            logger.info("vLLM KV-cache event handler registered")
+            logger.info("%s KV-cache event handler registered", engine.value)
         elif pod_identifier and model_name and engine == EngineType.SGLANG:
             sglang_kv_cache_handler = get_sglang_kv_cache_handler(state.memory_kv_manager)
             for event_type in (
@@ -175,7 +179,7 @@ async def lifespan(app: FastAPI):
     state.sglang_zmq_subscriber = None
 
     if (state.metric_standard and
-            state.metric_standard.engine == EngineType.VLLM and
+            state.metric_standard.engine in (EngineType.VLLM, EngineType.TRITON) and
             state.pod_identifier and
             state.model_name):
 
@@ -187,7 +191,7 @@ async def lifespan(app: FastAPI):
             vllm_task = asyncio.create_task(vllm_zmq_subscriber.start())
             vllm_task.add_done_callback(_log_subscriber_task_exception("vLLM ZMQ subscriber"))
             state.vllm_zmq_subscriber = vllm_zmq_subscriber
-            logger.info("vLLM ZMQ subscriber initialized successfully")
+            logger.info("%s ZMQ subscriber initialized successfully", state.metric_standard.engine.value)
         except Exception as e:
             logger.warning("Failed to initialize vLLM ZMQ subscriber: %s", e)
     elif (state.metric_standard and

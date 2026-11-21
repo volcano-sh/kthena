@@ -49,8 +49,8 @@ def test_build_operators_dict_with_invalid_engine():
 
     with pytest.raises(
         UnsupportedEngineError,
-        match=r"Unsupported engine: invalid_engine.*Supported engine: vllm, sglang"
-              r"|Supported engine: \['vllm', 'sglang'\]",
+        match=r"Unsupported engine: invalid_engine.*Supported engine:.*vllm.*sglang.*triton"
+              r"|Supported engine: \['vllm', 'sglang', 'triton'\]",
     ):
         MetricStandard(invalid_engine_name)
 
