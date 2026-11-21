@@ -17,6 +17,9 @@ limitations under the License.
 package main
 
 import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -150,6 +153,31 @@ func TestParseControllers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := parseControllers(tt.input)
 			assert.Equal(t, tt.expected, result, "parseControllers(%q) result mismatch", tt.input)
+		})
+	}
+}
+
+func TestHealthz(t *testing.T) {
+	tests := []struct {
+		name     string
+		check    func() error
+		wantCode int
+		wantBody string
+	}{
+		{name: "controllers running", check: func() error { return nil }, wantCode: http.StatusOK, wantBody: "ok"},
+		{
+			name:     "controller stopped",
+			check:    func() error { return errors.New("controllers stopped: ModelServing") },
+			wantCode: http.StatusInternalServerError,
+			wantBody: "controllers stopped: ModelServing\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			healthz(tt.check)(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+			assert.Equal(t, tt.wantCode, rec.Code)
+			assert.Equal(t, tt.wantBody, rec.Body.String())
 		})
 	}
 }

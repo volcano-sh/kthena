@@ -26,4 +26,5 @@ type Config struct {
 	KubeAPIBurst                 int
 	DebugPort                    int
 	AutoscalingSyncPeriodSeconds int
+	Health                       *Health
 }

@@ -55,6 +55,7 @@ type webhookConfig struct {
 	kubeAPIBurst       int
 	enableEviction     bool
 	evictionTrackerTTL time.Duration
+	healthCheck        func() error
 }
 
 func main() {
@@ -111,6 +112,8 @@ func main() {
 	}()
 	wc.kubeAPIQPS = cc.KubeAPIQPS
 	wc.kubeAPIBurst = cc.KubeAPIBurst
+	cc.Health = &controller.Health{}
+	wc.healthCheck = cc.Health.Check
 	if enableWebhook {
 		go func() {
 			if err := setupWebhook(ctx, wc); err != nil {
@@ -226,12 +229,7 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	mux.HandleFunc("/validate/autoscalingpolicy", autoscalingPolicyValidator.Handle)
 	mux.HandleFunc("/mutate/autoscalingpolicy", autoscalingPolicyMutator.Handle)
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write([]byte("ok")); err != nil {
-			klog.Errorf("failed to write health check response: %v", err)
-		}
-	})
+	mux.HandleFunc("/healthz", healthz(wc.healthCheck))
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", wc.port),
@@ -260,6 +258,19 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	defer cancel()
 	_ = server.Shutdown(ctxTimeout)
 	return nil
+}
+
+// healthz answers 500 with the reason when check reports a stopped controller.
+func healthz(check func() error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := check(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, err := w.Write([]byte("ok")); err != nil {
+			klog.Errorf("failed to write health check response: %v", err)
+		}
+	}
 }
 
 // getNamespace returns the current pod namespace or "default".

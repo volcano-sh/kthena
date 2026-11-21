@@ -101,26 +101,31 @@ func SetupController(ctx context.Context, cc Config) {
 		}
 	}
 
+	// run starts a controller and reports it to /healthz if it stops before the manager does.
+	run := func(name string, fn func()) {
+		go cc.Health.run(ctx, name, fn)
+	}
+
 	startControllers := func(ctx context.Context) {
 		if mc != nil {
-			go mc.Run(ctx, cc.Workers)
+			run("ModelBooster", func() { mc.Run(ctx, cc.Workers) })
 			klog.Info("ModelBooster controller started")
 		}
 		if msc != nil {
-			go msc.Run(ctx, cc.Workers)
+			run("ModelServing", func() { msc.Run(ctx, cc.Workers) })
 			klog.Info("ModelServing controller started")
 
 			if lwsc != nil {
-				go func() {
-					if err = lwsc.Run(ctx, 1); err != nil {
+				run("ModelServing lws", func() {
+					if err := lwsc.Run(ctx, 1); err != nil {
 						klog.Errorf("Error running LWS controller: %s", err.Error())
 					}
-				}()
+				})
 				klog.Info("ModelServing lws controller started")
 			}
 		}
 		if ac != nil {
-			go ac.Run(ctx)
+			run("Autoscaler", func() { ac.Run(ctx) })
 			klog.Info("Autoscaler controller started")
 		}
 
