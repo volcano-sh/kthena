@@ -53,6 +53,8 @@ class PVCDownloader(ModelDownloader):
             "-av",
             "--partial",
             "--progress",
+            # Replacing the active lock inode would allow concurrent downloads.
+            "--exclude=/.lock",
             f"{str(pvc_path_obj)}/",
             f"{str(output_dir_obj)}/"
         ]
