@@ -46,8 +46,17 @@ STANDARD_RULES: Dict[str, List[MetricOperator]] = {
             "vllm:time_to_first_token_seconds",
             StandardMetricNames.TIME_TO_FIRST_TOKEN_SECONDS,
         ),
+        # vLLM 0.10.2 added vllm:inter_token_latency_seconds as the new name of
+        # this histogram, 0.12 hid the old name by default and 0.15 removed it.
+        # Both rules stay, so every vLLM version maps to the same standard
+        # name. A version that exposes both names still yields one standard
+        # family (see MetricAdapter).
         RenameMetric(
             "vllm:time_per_output_token_seconds",
+            StandardMetricNames.TIME_PER_OUTPUT_TOKEN_SECONDS,
+        ),
+        RenameMetric(
+            "vllm:inter_token_latency_seconds",
             StandardMetricNames.TIME_PER_OUTPUT_TOKEN_SECONDS,
         ),
         RenameMetric(
