@@ -297,6 +297,57 @@ func (t *KVCacheAware) normalizeAndTokenizePrompt(ctx *framework.Context, pods [
 	return t.tokenizerManager.TokenizePrompt(ctx.UpstreamModel, ctx.Prompt, pods)
 }
 
+func (t *KVCacheAware) renderPrompt(ctx *framework.Context, pods []*datastore.PodInfo) ([]uint32, []tokenization.MultiModalPlaceholder, error) {
+	if t.tokenizerManager == nil {
+		return nil, nil, fmt.Errorf("tokenizer manager not available")
+	}
+	result, err := t.tokenizerManager.RenderPrompt(ctx.UpstreamModel, ctx.Prompt, pods)
+	if err != nil {
+		return nil, nil, err
+	}
+	return result.Tokens, result.MultiModal, nil
+}
+
+// promptBlockHashes tokenizes the prompt and returns its KV block hashes, or
+// nil if the prompt cannot be tokenized.
+func (t *KVCacheAware) promptBlockHashes(ctx *framework.Context, pods []*datastore.PodInfo) []uint64 {
+	// The engine expands each media item into placeholder tokens and keys the
+	// KV blocks holding them by the item as well, so a multimodal prompt is
+	// rendered by the engine, which returns both, rather than tokenized.
+	start := time.Now()
+	var tokens []uint32
+	var media []tokenization.MultiModalPlaceholder
+	var err error
+	if ctx.Prompt.HasMultiModal() {
+		tokens, media, err = t.renderPrompt(ctx, pods)
+	} else {
+		tokens, err = t.normalizeAndTokenizePrompt(ctx, pods)
+	}
+	tokenizerDuration := time.Since(start)
+	klog.V(4).Infof("KVCacheAware.Score: tokenization took %v, tokens=%d, media=%d, err=%v",
+		tokenizerDuration, len(tokens), len(media), err)
+
+	if err != nil {
+		if ctx.MetricsRecorder != nil {
+			ctx.MetricsRecorder.RecordKVCacheError(metrics.StageTokenize)
+		}
+		klog.V(4).Infof("KVCacheAware.Score: tokenization failed (err=%v)", err)
+		return nil
+	}
+	if ctx.MetricsRecorder != nil {
+		ctx.MetricsRecorder.RecordKVCacheTokenizeDuration(tokenizerDuration)
+	}
+	if len(tokens) == 0 {
+		klog.V(4).Infof("KVCacheAware.Score: empty token sequence")
+		return nil
+	}
+
+	blockHashes := t.processor.MultiModalTokensToBlockHashes(tokens, media, t.maxBlocksToMatch)
+	klog.V(4).Infof("KVCacheAware.Score: generated %d block hashes from %d tokens (blockSize=%d)",
+		len(blockHashes), len(tokens), t.processor.blockSize)
+	return blockHashes
+}
+
 func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) map[*datastore.PodInfo]int {
 	scoreStart := time.Now()
 	if ctx == nil || ctx.Prompt == nil {
@@ -319,31 +370,13 @@ func (t *KVCacheAware) Score(ctx *framework.Context, pods []*datastore.PodInfo) 
 		return nil
 	}
 
-	start := time.Now()
-	tokens, err := t.normalizeAndTokenizePrompt(ctx, pods)
-	tokenizerDuration := time.Since(start)
-	klog.V(4).Infof("KVCacheAware.Score: tokenization took %v, tokens=%d, err=%v", tokenizerDuration, len(tokens), err)
-
-	if err != nil {
-		if ctx.MetricsRecorder != nil {
-			ctx.MetricsRecorder.RecordKVCacheError(metrics.StageTokenize)
-		}
-		klog.V(4).Infof("KVCacheAware.Score: early return — tokenization failed (err=%v)", err)
-		return nil
+	if !ctx.KVCacheBlockHashesComputed {
+		ctx.KVCacheBlockHashes = t.promptBlockHashes(ctx, pods)
+		ctx.KVCacheBlockHashesComputed = true
 	}
-	if ctx.MetricsRecorder != nil {
-		ctx.MetricsRecorder.RecordKVCacheTokenizeDuration(tokenizerDuration)
-	}
-	if len(tokens) == 0 {
-		klog.V(4).Infof("KVCacheAware.Score: early return — empty token sequence")
-		return nil
-	}
-
-	blockHashes := t.processor.TokensToBlockHashes(tokens, t.maxBlocksToMatch)
-	klog.V(4).Infof("KVCacheAware.Score: generated %d block hashes from %d tokens (blockSize=%d)",
-		len(blockHashes), len(tokens), t.processor.blockSize)
+	blockHashes := ctx.KVCacheBlockHashes
 	if len(blockHashes) == 0 {
-		klog.V(4).Infof("KVCacheAware.Score: early return — no block hashes generated")
+		klog.V(4).Infof("KVCacheAware.Score: early return — no block hashes for the prompt")
 		return nil
 	}
 
@@ -686,9 +719,59 @@ func (tbp *TokenBlockProcessor) TokensToBlockHashes(tokens []uint32, maxBlocks i
 	return hashes
 }
 
+// MultiModalTokensToBlockHashes is TokensToBlockHashes for a prompt rendered
+// with media, whose items are given ordered by offset. The hash of a block
+// holding placeholder tokens of media items also covers the identifier of each
+// item and its offset relative to the block, as the engine keys such blocks.
+// Blocks without media hash as in TokensToBlockHashes.
+func (tbp *TokenBlockProcessor) MultiModalTokensToBlockHashes(
+	tokens []uint32,
+	media []tokenization.MultiModalPlaceholder,
+	maxBlocks int,
+) []uint64 {
+	if len(media) == 0 {
+		return tbp.TokensToBlockHashes(tokens, maxBlocks)
+	}
+
+	chunks := tbp.chunkTokens(tokens, maxBlocks)
+	hashes := make([]uint64, len(chunks))
+	// next is the first item not wholly before the current block.
+	next := 0
+	var keys []multiModalBlockKey
+	for i, chunk := range chunks {
+		blockStart := i * tbp.blockSize
+		blockEnd := blockStart + tbp.blockSize
+		for next < len(media) && media[next].Offset+media[next].Length <= blockStart {
+			next++
+		}
+		keys = keys[:0]
+		for _, item := range media[next:] {
+			if item.Offset >= blockEnd {
+				break
+			}
+			keys = append(keys, multiModalBlockKey{identifier: item.Identifier, offset: int64(item.Offset - blockStart)})
+		}
+		hashes[i] = computeStandardizedHash(chunk, keys...)
+	}
+	return hashes
+}
+
+// multiModalBlockKey is a media item overlapping a KV block: the identifier
+// the engine keys the item by, and the offset of its first placeholder token
+// relative to the block, which is negative if it starts in an earlier block.
+type multiModalBlockKey struct {
+	identifier string
+	offset     int64
+}
+
 // computeStandardizedHash generates a consistent hash for token sequences using SHA-256
-// Returns a 63-bit positive integer for Redis/database compatibility
-func computeStandardizedHash(tokenIds []uint32) uint64 {
+// Returns a 63-bit positive integer for Redis/database compatibility.
+// The media items overlapping the block, if any, follow the tokens in the
+// hashed bytes, each as the big-endian uint32 byte length of its identifier,
+// the identifier, and its offset as a big-endian int64. The runtime sidecar
+// hashes the blocks reported by the engine the same way, and both must change
+// together.
+func computeStandardizedHash(tokenIds []uint32, mmKeys ...multiModalBlockKey) uint64 {
 	if len(tokenIds) == 0 {
 		return 0
 	}
@@ -698,6 +781,14 @@ func computeStandardizedHash(tokenIds []uint32) uint64 {
 	for _, tokenId := range tokenIds {
 		binary.BigEndian.PutUint32(tokenBytes[:], tokenId)
 		h.Write(tokenBytes[:])
+	}
+	var offsetBytes [8]byte
+	for _, key := range mmKeys {
+		binary.BigEndian.PutUint32(tokenBytes[:], uint32(len(key.identifier)))
+		h.Write(tokenBytes[:])
+		h.Write([]byte(key.identifier))
+		binary.BigEndian.PutUint64(offsetBytes[:], uint64(key.offset))
+		h.Write(offsetBytes[:])
 	}
 
 	hashBytes := h.Sum(nil)

@@ -19,7 +19,10 @@ import sys
 import pytest
 
 from kthena.runtime import memory_kv_manager as mkm
-from kthena.runtime.kv_cache_manager import compute_standardized_hash
+from kthena.runtime.kv_cache_manager import (
+    compute_standardized_hash,
+    multimodal_block_keys,
+)
 from kthena.runtime.memory_kv_manager import (
     KV_EVENT_CLEARED,
     KV_EVENT_REMOVED,
@@ -377,3 +380,46 @@ async def test_add_blocks_with_mismatched_tokens_fails():
     ok = await manager.add_blocks("qwen", [1, 2, 3], "pod-1.default", list(range(10)))
     assert not ok
     assert _queued(stream) == []
+
+
+def test_compute_standardized_hash_with_media_matches_router():
+    # The same values are pinned by TestComputeStandardizedHashMultiModal in
+    # pkg/kthena-router/scheduler/plugins/kvcache_aware_test.go.
+    assert compute_standardized_hash([1, 2, 9, 9], [("content:abc", 2)]) == 619686922261892976
+    assert compute_standardized_hash([9, 9, 3, 4], [("content:abc", -2)]) == 8783969653476926990
+    assert compute_standardized_hash(
+        [9, 9, 8, 8], [("content:abc", -2), ("uuid:x", 2)]) == 4363586767729316969
+    assert compute_standardized_hash([1, 2], []) == compute_standardized_hash([1, 2])
+
+
+def test_multimodal_block_keys_skips_other_extra_keys():
+    assert multimodal_block_keys(None) == []
+    assert multimodal_block_keys(
+        ["my-lora", ["content:a", -2], ("mm", "content:b", 3), "salt", b"digest", ["x", True]]
+    ) == [("content:a", -2), ("content:b", 3)]
+
+
+@pytest.mark.asyncio
+async def test_add_blocks_hashes_media_from_extra_keys():
+    manager = MemoryKVCacheManager()
+    stream = manager.open_stream("router-a")
+
+    token_ids = [1, 2, 9, 9, 9, 9, 3, 4]
+    ok = await manager.add_blocks(
+        "qwen", [111, 222], "pod-1.default", token_ids,
+        extra_keys=[[["content:abc", 2]], ["my-lora", ["content:abc", -2]]])
+
+    assert ok
+    expected = [
+        compute_standardized_hash([1, 2, 9, 9], [("content:abc", 2)]),
+        compute_standardized_hash([9, 9, 3, 4], [("content:abc", -2)]),
+    ]
+    (event,) = _queued(stream)[-1]["events"]
+    assert event["block_hashes"] == expected
+
+
+@pytest.mark.asyncio
+async def test_add_blocks_rejects_extra_keys_not_one_per_block():
+    manager = MemoryKVCacheManager()
+    assert not await manager.add_blocks(
+        "qwen", [111, 222], "pod-1.default", list(range(8)), extra_keys=[None])

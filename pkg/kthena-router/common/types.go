@@ -24,17 +24,70 @@ const (
 	UpstreamTransportKey = "upstream_transport"
 )
 
+// Modality is the kind of a non-text input carried by a request.
+type Modality string
+
+const (
+	ModalityImage Modality = "image"
+	ModalityAudio Modality = "audio"
+	ModalityVideo Modality = "video"
+)
+
+// MultiModalItem is a non-text input (image, audio or video) of a request.
+// The router never fetches or decodes media; it only records what is needed
+// to tell items apart.
+type MultiModalItem struct {
+	Modality Modality
+	// Hash identifies the item by what the client sent: the URL for media
+	// passed by reference, or the encoded payload for inline media.
+	Hash uint64
+	// Offset is the byte offset in Message.Content at which the item appears,
+	// so the item keeps its position relative to the text of its message.
+	Offset int
+}
+
 // Message represents a single message in a chat conversation
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+
+	// MultiModal lists the non-text items of the message in request order.
+	// It is not serialized, so tokenizer requests built from Message stay text-only.
+	MultiModal []MultiModalItem `json:"-"`
+	// ContentParts holds the content parts of a message given as a list, in
+	// request order and in the Chat Completions format, so that the engine can
+	// render a multimodal prompt exactly as it renders the request. It is nil
+	// for string content, and for content holding media that has no Chat
+	// Completions form, such as a file referenced by its ID. It is not
+	// serialized.
+	ContentParts []map[string]interface{} `json:"-"`
 }
 
-// ChatMessage represents either a direct text prompt or structured chat messages
+// ChatMessage represents either a direct text prompt or structured chat message
 type ChatMessage struct {
 	// Text is used for direct prompt input (completion mode)
 	Text string `json:"text,omitempty"`
 
 	// Messages is used for chat conversation input (chat mode)
 	Messages []Message `json:"messages,omitempty"`
+
+	// ChatRequest is the body of the Chat Completions request the prompt was
+	// parsed from. The engine renders a multimodal prompt from it, so that the
+	// request fields that shape the prompt, such as tools,
+	// chat_template_kwargs or mm_processor_kwargs, are rendered as for
+	// inference. It is nil for other APIs, and it is not serialized.
+	ChatRequest map[string]interface{} `json:"-"`
+}
+
+// HasMultiModal reports whether any message carries a non-text input.
+func (m *ChatMessage) HasMultiModal() bool {
+	if m == nil {
+		return false
+	}
+	for _, msg := range m.Messages {
+		if len(msg.MultiModal) > 0 {
+			return true
+		}
+	}
+	return false
 }

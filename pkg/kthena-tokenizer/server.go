@@ -31,8 +31,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// maxRequestBody bounds proxied request bodies (prompts are small).
-const maxRequestBody = 10 << 20 // 10 MiB
+// defaultMaxRequestBody is the default bound on proxied request bodies.
+const defaultMaxRequestBody = 10 << 20 // 10 MiB
 
 // readyChecker reports whether the ModelServer watcher completed its initial
 // sync.
@@ -41,8 +41,9 @@ type readyChecker interface {
 }
 
 // Server is the HTTP frontend of the tokenizer service. It exposes the
-// vLLM-compatible /tokenize and /detokenize endpoints and proxies each request
-// to the renderer subprocess serving the requested model. Requests for models
+// vLLM-compatible /tokenize, /detokenize and /v1/chat/completions/render
+// endpoints and proxies each request to the renderer subprocess serving the
+// requested model. Requests for models
 // without a ready renderer get 503 so that the router falls back to
 // engine-side tokenization.
 type Server struct {
@@ -66,6 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tokenize", s.proxy("/tokenize"))
 	mux.HandleFunc("/detokenize", s.proxy("/detokenize"))
+	mux.HandleFunc(chatRenderPath, s.proxy(chatRenderPath))
 	mux.HandleFunc("/models", s.models)
 	mux.HandleFunc("/healthz", s.healthz)
 	mux.HandleFunc("/readyz", s.readyz)
@@ -91,16 +93,34 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-// proxy forwards a tokenize/detokenize request to the renderer that serves
-// the model named in the request body.
+// chatRenderPath renders a chat request into the token IDs and multimodal
+// placeholders the engine would compute for it, which the router needs to
+// match the KV cache of multimodal prompts.
+const chatRenderPath = "/v1/chat/completions/render"
+
+func (s *Server) maxRequestBody() int64 {
+	if s.config.MaxRequestBodyBytes > 0 {
+		return s.config.MaxRequestBodyBytes
+	}
+	return defaultMaxRequestBody
+}
+
+// proxy forwards a request to the renderer that serves the model named in the
+// request body.
 func (s *Server) proxy(path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.maxRequestBody()))
 		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeError(w, http.StatusRequestEntityTooLarge,
+					fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit))
+				return
+			}
 			writeError(w, http.StatusBadRequest, "failed to read request body")
 			return
 		}

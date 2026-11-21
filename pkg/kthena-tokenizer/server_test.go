@@ -77,6 +77,30 @@ func TestServerProxiesTokenize(t *testing.T) {
 	assert.Equal(t, []int{1, 2, 3}, parsed.Tokens)
 }
 
+func TestServerProxiesChatRender(t *testing.T) {
+	const rendered = `{"token_ids": [1, 9, 9, 2], "features": {"mm_hashes": {"image": ["h"]}, "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}}}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/chat/completions/render", r.URL.Path)
+		body, _ := io.ReadAll(r.Body)
+		assert.Contains(t, string(body), `"mm_payload": "none"`)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(rendered))
+	}))
+	defer backend.Close()
+
+	frontend := httptest.NewServer(newTestServer(t, backend).Handler())
+	defer frontend.Close()
+
+	resp, err := http.Post(frontend.URL+"/v1/chat/completions/render", "application/json",
+		strings.NewReader(`{"model": "served", "messages": [], "mm_payload": "none"}`))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.JSONEq(t, rendered, string(body))
+}
+
 func TestServerRejectsBadRequests(t *testing.T) {
 	backend := httptest.NewServer(http.NotFoundHandler())
 	defer backend.Close()
@@ -107,6 +131,38 @@ func TestServerRejectsBadRequests(t *testing.T) {
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
 	})
+}
+
+func TestServerLimitsRequestBody(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer backend.Close()
+
+	body := `{"model": "served", "prompt": "` + strings.Repeat("a", 64) + `"}`
+	tests := []struct {
+		name  string
+		limit int64
+		want  int
+	}{
+		{"default limit", 0, http.StatusOK},
+		{"body within limit", int64(len(body)), http.StatusOK},
+		{"body over limit", int64(len(body)) - 1, http.StatusRequestEntityTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestServer(t, backend)
+			s.config.MaxRequestBodyBytes = tt.limit
+			frontend := httptest.NewServer(s.Handler())
+			defer frontend.Close()
+
+			resp, err := http.Post(frontend.URL+"/tokenize", "application/json", strings.NewReader(body))
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, tt.want, resp.StatusCode)
+		})
+	}
 }
 
 func TestServerReportsBackendFailure(t *testing.T) {

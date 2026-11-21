@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import AsyncIterator, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from kthena.runtime.kv_cache_manager import standardize_block_hashes
 
@@ -234,13 +234,14 @@ class MemoryKVCacheManager:
             self._close_stream(stream)
 
     async def add_blocks(self, model_name: str, block_hashes: List[int],
-                         pod_identifier: str, token_ids: Optional[List[int]] = None) -> bool:
+                         pod_identifier: str, token_ids: Optional[List[int]] = None,
+                         extra_keys: Optional[List[Any]] = None) -> bool:
         if not block_hashes or not model_name or not pod_identifier:
             return not block_hashes
         if not token_ids:
             return True
 
-        pairs = standardize_block_hashes(block_hashes, token_ids)
+        pairs = standardize_block_hashes(block_hashes, token_ids, extra_keys)
         if pairs is None:
             return False
 
