@@ -99,6 +99,10 @@ kthenaRouter:
 | `kthenaRouter.sessionBoost.inflightPerPod` | int     | `16`             | Inflight requests per backend pod; total = perPod x pod count                 |
 | `kthenaRouter.sessionBoost.gracePeriod`    | string  | `"0s"`           | Wait time for a same-session follow-up (disabled by default)                  |
 | `kthenaRouter.sessionBoost.timeout`        | string  | `"30s"`          | Max queue wait before 504; set a non-positive duration (e.g. `0s`) to disable |
+| `kthenaRouter.sessionSticky.backend`       | string  | `"memory"`       | Session affinity backing store: `"memory"` (default) or `"redis"`             |
+| `kthenaRouter.sessionSticky.redis.address` | string  | `""`             | Redis address (required when backend is `"redis"`)                            |
+| `kthenaRouter.sessionSticky.redis.secretRef.name` | string | `""`       | Kubernetes Secret name holding Redis password                                 |
+| `kthenaRouter.sessionSticky.redis.secretRef.key`  | string | `""`       | Key in Secret holding password (defaults to `"password"` if omitted)          |
 | `kthenaRouter.accessLog.enabled`           | boolean | `true`           | Enable request access logging                                                  |
 | `kthenaRouter.accessLog.format`            | string  | `"text"`         | Access-log format: `text` or `json`                                            |
 | `kthenaRouter.accessLog.output`            | string  | `"stdout"`       | Access-log destination: `stdout`, `stderr`, or a file path                     |
