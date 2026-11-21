@@ -209,6 +209,12 @@ func (l *accessLoggerImpl) formatText(entry *AccessLogEntry) (string, error) {
 	if entry.InputTokens > 0 || entry.OutputTokens > 0 {
 		fmt.Fprintf(&line, " tokens=%d/%d", entry.InputTokens, entry.OutputTokens)
 	}
+	if entry.UpstreamInputTokens != nil {
+		fmt.Fprintf(&line, " upstream_input_tokens=%d", *entry.UpstreamInputTokens)
+	}
+	if entry.CachedInputTokens != nil {
+		fmt.Fprintf(&line, " cached_input_tokens=%d", *entry.CachedInputTokens)
+	}
 
 	// Add complete timing breakdown with total and breakdown
 	fmt.Fprintf(&line, " timings=%dms(%d+%d+%d)",

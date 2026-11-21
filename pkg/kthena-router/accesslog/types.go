@@ -53,8 +53,13 @@ type AccessLogEntry struct {
 	InferencePool string `json:"inference_pool,omitempty"`
 
 	// Token information
-	InputTokens  int `json:"input_tokens,omitempty"`
-	OutputTokens int `json:"output_tokens,omitempty"`
+	InputTokens int `json:"input_tokens,omitempty"`
+	// UpstreamInputTokens and CachedInputTokens are the counts the upstream
+	// reported in its usage. nil means the upstream did not report the count
+	// and omits the field; an explicit 0 is written as 0.
+	UpstreamInputTokens *int `json:"upstream_input_tokens,omitempty"`
+	CachedInputTokens   *int `json:"cached_input_tokens,omitempty"`
+	OutputTokens        int  `json:"output_tokens,omitempty"`
 
 	// Timing breakdown (in milliseconds) - flattened fields
 	DurationTotal              int64 `json:"duration_total"`
@@ -95,6 +100,10 @@ type AccessLogContext struct {
 	// Token counts
 	InputTokens  int
 	OutputTokens int
+
+	// Upstream-reported token counts; nil when not reported.
+	UpstreamInputTokens *int
+	CachedInputTokens   *int
 
 	// Timing checkpoints
 	RequestProcessingStart  time.Time
@@ -171,6 +180,14 @@ func (ctx *AccessLogContext) SetGatewayAPIInfo(gateway, httpRoute, inferencePool
 func (ctx *AccessLogContext) SetTokenCounts(inputTokens, outputTokens int) {
 	ctx.InputTokens = inputTokens
 	ctx.OutputTokens = outputTokens
+}
+
+// SetUpstreamUsage records the input and cached-input token counts from one
+// upstream usage report. Both are replaced together, so the logged pair always
+// comes from the same report; nil means the report did not include that count.
+func (ctx *AccessLogContext) SetUpstreamUsage(inputTokens, cachedInputTokens *int) {
+	ctx.UpstreamInputTokens = inputTokens
+	ctx.CachedInputTokens = cachedInputTokens
 }
 
 // SetError sets error information
@@ -255,6 +272,8 @@ func (ctx *AccessLogContext) ToAccessLogEntry(statusCode int) *AccessLogEntry {
 		HTTPRoute:                  ctx.HTTPRoute,
 		InferencePool:              ctx.InferencePool,
 		InputTokens:                ctx.InputTokens,
+		UpstreamInputTokens:        ctx.UpstreamInputTokens,
+		CachedInputTokens:          ctx.CachedInputTokens,
 		OutputTokens:               ctx.OutputTokens,
 		DurationTotal:              total,
 		DurationRequestProcessing:  requestProcessing,

@@ -53,6 +53,24 @@ Authentication configuration is used to enable and configure JWT authentication.
 | audiences | []string | JWT audiences list |
 | jwksUri   | string   | Jwks Provider  URI |
 
+### Access Log Configuration
+
+The `accessLog` section holds access-log options that are not set through the
+`ACCESS_LOG_*` environment variables. Enablement, format and output stay on
+those variables; see [Router Observability](./router-observability.md#access-logs).
+
+| Parameter            | Type | Default | Description |
+| -------------------- | ---- | ------- | ----------- |
+| includeUpstreamUsage | bool | `false` | Record the input and cached-input token counts the upstream reports in its usage as `upstream_input_tokens` and `cached_input_tokens` |
+
+```yaml
+accessLog:
+  includeUpstreamUsage: true
+```
+
+When installing with Helm, set `networking.kthenaRouter.accessLog.includeUpstreamUsage`
+instead of editing the ConfigMap by hand.
+
 <!-- Add routing rules here -->
 
 ## Examples

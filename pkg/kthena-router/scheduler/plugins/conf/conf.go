@@ -31,6 +31,16 @@ type RouterConfiguration struct {
 	Scheduler     SchedulerConfiguration `yaml:"scheduler"`
 	Auth          AuthenticationConfig   `yaml:"auth"`
 	SessionSticky *SessionStickyConfig   `yaml:"sessionSticky,omitempty"`
+	AccessLog     AccessLogConfig        `yaml:"accessLog,omitempty"`
+}
+
+// AccessLogConfig holds access-log options that do not fit the ACCESS_LOG_*
+// environment variables, which keep controlling enablement, format and output.
+type AccessLogConfig struct {
+	// IncludeUpstreamUsage records the input and cached-input token counts the
+	// upstream reports in its usage as upstream_input_tokens and
+	// cached_input_tokens.
+	IncludeUpstreamUsage bool `yaml:"includeUpstreamUsage"`
 }
 
 // SessionStickyConfig selects the session affinity backing store for the router.

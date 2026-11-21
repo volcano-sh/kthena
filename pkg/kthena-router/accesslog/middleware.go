@@ -122,6 +122,14 @@ func SetTokenCounts(c *gin.Context, inputTokens, outputTokens int) {
 	}
 }
 
+// SetUpstreamUsage sets the upstream-reported input and cached-input token
+// counts in the access log context.
+func SetUpstreamUsage(c *gin.Context, inputTokens, cachedInputTokens *int) {
+	if ctx := GetAccessLogContext(c); ctx != nil {
+		ctx.SetUpstreamUsage(inputTokens, cachedInputTokens)
+	}
+}
+
 // SetError sets error information in the access log context
 func SetError(c *gin.Context, errorType, message string) {
 	if ctx := GetAccessLogContext(c); ctx != nil {

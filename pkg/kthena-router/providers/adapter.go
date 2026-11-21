@@ -51,6 +51,17 @@ type TokenUsage struct {
 	PromptTokens     int `json:"prompt_tokens,omitempty"`
 	CompletionTokens int `json:"completion_tokens,omitempty"`
 	TotalTokens      int `json:"total_tokens,omitempty"`
+
+	// CachedPromptTokens is the part of the prompt the upstream reported as
+	// served from its prompt cache.
+	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
+
+	// PromptTokensReported and CachedPromptTokensReported tell an explicit
+	// count from a field the upstream omitted or sent as null, so an explicit
+	// 0 is not mistaken for "not reported". Only parsers that support these
+	// fields set them.
+	PromptTokensReported       bool `json:"-"`
+	CachedPromptTokensReported bool `json:"-"`
 }
 
 // StreamUsageParseResult describes token usage found in a provider stream

@@ -80,6 +80,8 @@ networking:
       format: "text"
       # -- Access-log destination: `stdout`, `stderr`, or a file path.
       output: "stdout"
+      # -- Record the upstream-reported input and cached-input token counts as `upstream_input_tokens` and `cached_input_tokens`.
+      includeUpstreamUsage: false
     tls:
       # -- Enable TLS for Kthena Router server.
       enabled: false

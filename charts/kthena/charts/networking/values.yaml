@@ -93,6 +93,10 @@ kthenaRouter:
     format: "text"
     # output specifies where to write logs: "stdout", "stderr", or file path (default: stdout)
     output: "stdout"
+    # includeUpstreamUsage records the input and cached-input token counts reported
+    # in the upstream usage as upstream_input_tokens and cached_input_tokens.
+    # Rendered into the router ConfigMap as accessLog.includeUpstreamUsage.
+    includeUpstreamUsage: false
   # gatewayAPI configuration
   gatewayAPI:
     # enabled controls whether Gateway API related features are enabled
