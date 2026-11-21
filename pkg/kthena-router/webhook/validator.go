@@ -225,12 +225,14 @@ func ValidateModelRoute(modelRoute *networkingv1alpha1.ModelRoute) (bool, string
 			continue
 		}
 		totalWeight := uint32(0)
+		hasValidTarget := false
 		for j, targetModel := range rule.TargetModels {
 			targetModelField := ruleField.Child("targetModels").Index(j)
 			if targetModel == nil {
 				allErrs = append(allErrs, field.Invalid(targetModelField, targetModel, "target model must not be nil"))
 				continue
 			}
+			hasValidTarget = true
 			hasModelServer := targetModel.ModelServerName != ""
 			hasExternalProvider := targetModel.ExternalModelProviderName != ""
 			if hasModelServer == hasExternalProvider {
@@ -249,7 +251,7 @@ func ValidateModelRoute(modelRoute *networkingv1alpha1.ModelRoute) (bool, string
 				totalWeight += 100
 			}
 		}
-		if totalWeight == 0 {
+		if hasValidTarget && totalWeight == 0 {
 			allErrs = append(allErrs, field.Invalid(ruleField.Child("targetModels"), totalWeight, "total weight must be greater than zero"))
 		}
 		if rule.ModelMatch != nil {
