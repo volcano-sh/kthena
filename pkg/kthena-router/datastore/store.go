@@ -749,22 +749,19 @@ func (s *store) Enqueue(req *Request) error {
 }
 
 // makeBackendWaitingChecker returns a BackendWaitingChecker function that checks
-// whether any backend pod serving the given model has an empty waiting queue
-// (RequestWaitingNum == 0). Returns true when at least one such pod has capacity,
-// allowing the session boost queue to dequeue a request.
+// whether the session boost queue may dequeue a request. It returns true when a
+// backend pod has an empty waiting queue (RequestWaitingNum == 0), when there are no
+// backend pods, or when the request may go to an external provider.
 func (s *store) makeBackendWaitingChecker(modelName string) BackendWaitingChecker {
 	return func() bool {
+		// A provider has no pods to wait on, so a request that may go to one is not held.
+		if _, external := s.routedModelServers(modelName); external {
+			return true
+		}
 		hasCapacity := false
 		podCount := 0
 		var totalWaiting float64
-		s.pods.Range(func(key, value any) bool {
-			podInfo, ok := value.(*PodInfo)
-			if !ok || podInfo == nil {
-				return true
-			}
-			if !podInfo.Contains(modelName) {
-				return true
-			}
+		s.rangeBackendPods(modelName, func(podInfo *PodInfo) bool {
 			podCount++
 			waitingNum := podInfo.GetRequestWaitingNum()
 			totalWaiting += waitingNum
@@ -791,18 +788,80 @@ func (s *store) makeBackendWaitingChecker(modelName string) BackendWaitingChecke
 func (s *store) makeBackendPodCounter(modelName string) PodCounter {
 	return func() int {
 		podCount := 0
-		s.pods.Range(func(key, value any) bool {
-			podInfo, ok := value.(*PodInfo)
-			if !ok || podInfo == nil {
-				return true
-			}
-			if podInfo.Contains(modelName) {
-				podCount++
-			}
+		s.rangeBackendPods(modelName, func(*PodInfo) bool {
+			podCount++
 			return true
 		})
 		return podCount
 	}
+}
+
+// rangeBackendPods calls visit once for each backend pod of modelName, until visit
+// returns false. There are two kinds of backend pod:
+//   - Pods in the ModelServers its ModelRoutes can send to. The name in a request can
+//     differ from the name pods report, so name matching alone would miss them. They
+//     count only after their models are known, so an unscraped pod does not look free.
+//   - Pods that report the name. They serve LoRA adapters, and InferencePool requests
+//     that no ModelRoute rule matches.
+func (s *store) rangeBackendPods(modelName string, visit func(*PodInfo) bool) {
+	visited := sets.New[*PodInfo]()
+	visitOnce := func(podInfo *PodInfo) bool {
+		if visited.Has(podInfo) {
+			return true
+		}
+		visited.Insert(podInfo)
+		return visit(podInfo)
+	}
+
+	modelServers, _ := s.routedModelServers(modelName)
+	for name := range modelServers {
+		pods, err := s.GetPodsByModelServer(name)
+		if err != nil {
+			continue
+		}
+		for _, podInfo := range pods {
+			if podInfo.hasKnownModels() && !visitOnce(podInfo) {
+				return
+			}
+		}
+	}
+
+	s.pods.Range(func(_, value any) bool {
+		podInfo, ok := value.(*PodInfo)
+		if !ok || podInfo == nil || !podInfo.Contains(modelName) {
+			return true
+		}
+		return visitOnce(podInfo)
+	})
+}
+
+// routedModelServers finds where the ModelRoutes of modelName can send traffic.
+//   - modelServers: the ModelServers they can send to.
+//   - external: whether they can also send to an external provider.
+func (s *store) routedModelServers(modelName string) (modelServers sets.Set[types.NamespacedName], external bool) {
+	s.routeMutex.RLock()
+	defer s.routeMutex.RUnlock()
+
+	modelServers = sets.New[types.NamespacedName]()
+	for _, route := range s.routes[modelName] {
+		for _, rule := range route.Spec.Rules {
+			if !ruleMatchesModel(rule, modelName) {
+				continue
+			}
+			for _, target := range rule.TargetModels {
+				destination, err := modelTargetFromDestination(route.Namespace, target)
+				if err != nil || (target.Weight != nil && *target.Weight == 0) {
+					continue
+				}
+				if destination.Kind == ModelTargetKindModelServer {
+					modelServers.Insert(destination.Name)
+				} else {
+					external = true
+				}
+			}
+		}
+	}
+	return modelServers, external
 }
 
 func (s *store) MarkSessionRequestCompleted(modelName, sessionID string) {
@@ -1617,18 +1676,23 @@ func (s *store) matchesSpecificGateway(mr *aiv1alpha1.ModelRoute, gatewayKey str
 	return false
 }
 
+// ruleMatchesModel reports whether a rule can serve modelName. A rule that does not
+// name a model in its body match serves every model.
+func ruleMatchesModel(rule *aiv1alpha1.Rule, modelName string) bool {
+	if rule.ModelMatch == nil || rule.ModelMatch.Body == nil || rule.ModelMatch.Body.Model == nil {
+		return true
+	}
+	return *rule.ModelMatch.Body.Model == modelName
+}
+
 func (s *store) selectRule(modelName string, req *http.Request, rules []*aiv1alpha1.Rule) (*aiv1alpha1.Rule, error) {
 	for _, rule := range rules {
 		if rule.ModelMatch == nil {
 			return rule, nil
 		}
 
-		// Check Model match if specified
-		if rule.ModelMatch.Body != nil && rule.ModelMatch.Body.Model != nil {
-			// Perform exact match on Model
-			if modelName != *rule.ModelMatch.Body.Model {
-				continue // Skip this rule if model name doesn't match
-			}
+		if !ruleMatchesModel(rule, modelName) {
+			continue // Skip this rule if model name doesn't match
 		}
 
 		headersMatched := true
@@ -2001,6 +2065,14 @@ func (p *PodInfo) Contains(model string) bool {
 	defer p.mutex.RUnlock()
 
 	return p.models != nil && p.models.Has(model)
+}
+
+// hasKnownModels reports whether the pod currently lists at least one model.
+func (p *PodInfo) hasKnownModels() bool {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+
+	return len(p.models) > 0
 }
 
 // UpdateModels updates the models set with a new list of models

@@ -3527,6 +3527,300 @@ func TestStorePodRemovalRechecksHeldRequests(t *testing.T) {
 	}
 }
 
+func TestSessionBoostBackendPodsFollowModelRoute(t *testing.T) {
+	const (
+		publicName = "deepseek-simple"
+		servedName = "deepseek-ai/DeepSeek-R1"
+		loraName   = "my-lora"
+	)
+	weight := func(w uint32) *uint32 { return &w }
+	type backendPod struct {
+		namespace    string
+		name         string
+		modelServers []string
+		waiting      float64
+		models       []string
+	}
+	served := []string{servedName}
+	premium := "premium"
+
+	tests := []struct {
+		name         string
+		request      string
+		targets      []*aiv1alpha1.TargetModel
+		secondRule   []*aiv1alpha1.TargetModel
+		ruleForModel string                    // the second rule only matches this model
+		otherRoute   []*aiv1alpha1.TargetModel // same model name, in namespace "other"
+		pods         []backendPod
+		wantPods     int
+		wantCapacity bool
+	}{
+		{
+			name:    "public name finds idle pods",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, models: served},
+				{name: "a-1", modelServers: []string{"a"}, models: served},
+			},
+			wantPods:     2,
+			wantCapacity: true,
+		},
+		{
+			name:    "public name finds busy pods",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+				{name: "a-1", modelServers: []string{"a"}, waiting: 5, models: served},
+			},
+			wantPods:     2,
+			wantCapacity: false,
+		},
+		{
+			name:    "pod outside the route that reports the name counts",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+				{name: "pool-0", modelServers: []string{"pool"}, models: []string{publicName}},
+			},
+			wantPods:     2,
+			wantCapacity: true,
+		},
+		{
+			name:    "ModelServer outside the route is ignored even with the same served name",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+				{name: "other-0", modelServers: []string{"other"}, models: served},
+			},
+			wantPods:     1,
+			wantCapacity: false,
+		},
+		{
+			name:    "every destination counts",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{{ModelServerName: "a"}, {ModelServerName: "b"}},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: []string{"v1"}},
+				{name: "b-0", modelServers: []string{"b"}, models: []string{"v2"}},
+			},
+			wantPods:     2,
+			wantCapacity: true,
+		},
+		{
+			name:       "every rule counts",
+			request:    publicName,
+			targets:    []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			secondRule: []*aiv1alpha1.TargetModel{{ModelServerName: "b"}},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+				{name: "b-0", modelServers: []string{"b"}, models: served},
+			},
+			wantPods:     2,
+			wantCapacity: true,
+		},
+		{
+			name:         "rule for another model is ignored",
+			request:      publicName,
+			targets:      []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			secondRule:   []*aiv1alpha1.TargetModel{{ModelServerName: "b"}},
+			ruleForModel: loraName,
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+				{name: "b-0", modelServers: []string{"b"}, models: served},
+			},
+			wantPods:     1,
+			wantCapacity: false,
+		},
+		{
+			name:         "rule that names this model counts",
+			request:      publicName,
+			targets:      []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			secondRule:   []*aiv1alpha1.TargetModel{{ModelServerName: "b"}},
+			ruleForModel: publicName,
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+				{name: "b-0", modelServers: []string{"b"}, models: served},
+			},
+			wantPods:     2,
+			wantCapacity: true,
+		},
+		{
+			name:       "every ModelRoute of the name counts, each in its own namespace",
+			request:    publicName,
+			targets:    []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			otherRoute: []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+				{namespace: "other", name: "a-0", modelServers: []string{"a"}, models: served},
+			},
+			wantPods:     2,
+			wantCapacity: true,
+		},
+		{
+			name:    "pod in two destinations counts once",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{{ModelServerName: "a"}, {ModelServerName: "b"}},
+			pods: []backendPod{
+				{name: "shared", modelServers: []string{"a", "b"}, waiting: 5, models: served},
+			},
+			wantPods:     1,
+			wantCapacity: false,
+		},
+		{
+			name:    "destination with zero weight gets no traffic",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{
+				{ModelServerName: "a", Weight: weight(100)},
+				{ModelServerName: "b", Weight: weight(0)},
+			},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+				{name: "b-0", modelServers: []string{"b"}, models: served},
+			},
+			wantPods:     1,
+			wantCapacity: false,
+		},
+		{
+			name:    "pod with unknown models does not count yet",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+				{name: "a-1", modelServers: []string{"a"}},
+			},
+			wantPods:     1,
+			wantCapacity: false,
+		},
+		{
+			name:         "no pods yet still allows dequeue",
+			request:      publicName,
+			targets:      []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			wantPods:     0,
+			wantCapacity: true,
+		},
+		{
+			name:    "external provider has no pods, even if a ModelServer has its name",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{{ExternalModelProviderName: "a"}},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+			},
+			wantPods:     0,
+			wantCapacity: true,
+		},
+		{
+			name:    "provider in a split means there is room, and only pods count toward the limit",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{
+				{ModelServerName: "a", Weight: weight(80)},
+				{ExternalModelProviderName: "provider", Weight: weight(20)},
+			},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+				{name: "a-1", modelServers: []string{"a"}, waiting: 5, models: served},
+			},
+			wantPods:     2,
+			wantCapacity: true,
+		},
+		{
+			name:    "provider with zero weight gets no traffic",
+			request: publicName,
+			targets: []*aiv1alpha1.TargetModel{
+				{ModelServerName: "a", Weight: weight(100)},
+				{ExternalModelProviderName: "provider", Weight: weight(0)},
+			},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: served},
+			},
+			wantPods:     1,
+			wantCapacity: false,
+		},
+		{
+			name:    "LoRA name counts only the pods that loaded it",
+			request: loraName,
+			targets: []*aiv1alpha1.TargetModel{{ModelServerName: "a"}},
+			pods: []backendPod{
+				{name: "a-0", modelServers: []string{"a"}, waiting: 5, models: []string{servedName, loraName}},
+				{name: "a-1", modelServers: []string{"a"}, models: served},
+			},
+			wantPods:     1,
+			wantCapacity: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rules := []*aiv1alpha1.Rule{{Name: "default", TargetModels: tt.targets}}
+			if tt.secondRule != nil {
+				// selectRule never gets past a first rule that matches everything.
+				rules[0].ModelMatch = &aiv1alpha1.ModelMatch{Headers: map[string]*aiv1alpha1.StringMatch{"user-type": {Exact: &premium}}}
+				second := &aiv1alpha1.Rule{Name: "second", TargetModels: tt.secondRule}
+				if tt.ruleForModel != "" {
+					second.ModelMatch = &aiv1alpha1.ModelMatch{Body: &aiv1alpha1.BodyMatch{Model: &tt.ruleForModel}}
+				}
+				rules = append(rules, second)
+			}
+			route := &aiv1alpha1.ModelRoute{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route"},
+				Spec:       aiv1alpha1.ModelRouteSpec{ModelName: publicName, Rules: rules},
+			}
+			routes := []*aiv1alpha1.ModelRoute{route}
+			if tt.otherRoute != nil {
+				routes = append(routes, &aiv1alpha1.ModelRoute{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "other", Name: "route"},
+					Spec: aiv1alpha1.ModelRouteSpec{
+						ModelName: publicName,
+						Rules:     []*aiv1alpha1.Rule{{Name: "default", TargetModels: tt.otherRoute}},
+					},
+				})
+			}
+			s := &store{
+				routes:     map[string][]*aiv1alpha1.ModelRoute{publicName: routes},
+				loraRoutes: map[string][]*aiv1alpha1.ModelRoute{},
+			}
+			if tt.request == loraName {
+				route.Spec.LoraAdapters = []string{loraName}
+				s.loraRoutes[loraName] = []*aiv1alpha1.ModelRoute{route}
+			}
+			msPods := map[types.NamespacedName]sets.Set[types.NamespacedName]{}
+			for _, target := range tt.targets {
+				if target.ModelServerName != "" {
+					msPods[types.NamespacedName{Namespace: "default", Name: target.ModelServerName}] = sets.New[types.NamespacedName]()
+				}
+			}
+			for _, pod := range tt.pods {
+				namespace := pod.namespace
+				if namespace == "" {
+					namespace = "default"
+				}
+				name := types.NamespacedName{Namespace: namespace, Name: pod.name}
+				s.pods.Store(name, &PodInfo{
+					Pod:               &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: name.Namespace, Name: name.Name}},
+					models:            sets.New(pod.models...),
+					RequestWaitingNum: pod.waiting,
+				})
+				for _, ms := range pod.modelServers {
+					key := types.NamespacedName{Namespace: namespace, Name: ms}
+					if msPods[key] == nil {
+						msPods[key] = sets.New[types.NamespacedName]()
+					}
+					msPods[key].Insert(name)
+				}
+			}
+			for ms, pods := range msPods {
+				s.modelServer.Store(ms, &modelServer{pods: pods})
+			}
+
+			assert.Equal(t, tt.wantPods, s.makeBackendPodCounter(tt.request)())
+			assert.Equal(t, tt.wantCapacity, s.makeBackendWaitingChecker(tt.request)())
+		})
+	}
+}
+
 func isClosed(ch chan struct{}) bool {
 	select {
 	case <-ch:
