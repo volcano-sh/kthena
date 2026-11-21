@@ -223,6 +223,15 @@ or long retention.
 | `kthena_router_kvcache_aware_tokenize_duration_seconds` | Histogram | `model` | Prompt tokenization latency for KV-cache-aware matching |
 | `kthena_router_kvcache_aware_errors_total` | Counter | `model`, `stage` | Aborted KV-cache-aware attempts; `stage` is `tokenize` or `redis` |
 
+### Access log
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `kthena_router_access_log_claim_missing_total` | Counter | `field` | Requests with a validated JWT whose access log record leaves out a configured claim field because the token has no usable value for its claim |
+
+`field` takes only names configured in `accessLog.claimFields`, never claim
+values.
+
 ### Session-boost queue
 
 | Metric | Type | Labels | Description |
@@ -318,6 +327,140 @@ when routing or queue time falls between phase checkpoints. See the
 [access-log field reference](../reference/router-access-log-fields.md) for
 field-by-field descriptions and error examples.
 
+### Upstream-reported token usage
+
+`input_tokens` is the router's own estimate, calculated before the request is
+sent. To also log what the upstream reported in its response usage, set
+`accessLog.includeUpstreamUsage` in the router configuration. With Helm, set the
+`networking.kthenaRouter.accessLog.includeUpstreamUsage` value, which renders
+into the `kthena-router-config` ConfigMap:
+
+```yaml
+networking:
+  kthenaRouter:
+    accessLog:
+      includeUpstreamUsage: true
+```
+
+The router reads this setting at startup, so restart it after changing the
+ConfigMap. Access logging itself must still be enabled through
+`ACCESS_LOG_ENABLED`. Two fields are then added next to `input_tokens`:
+
+| Field | Source |
+| --- | --- |
+| `upstream_input_tokens` | `usage.prompt_tokens` reported by the upstream |
+| `cached_input_tokens` | `usage.prompt_tokens_details.cached_tokens` reported by the upstream |
+
+```json
+{
+  "input_tokens": 1790,
+  "upstream_input_tokens": 1830,
+  "cached_input_tokens": 1536,
+  "output_tokens": 412
+}
+```
+
+Each field records only what the upstream reported. A field the upstream omits
+or sends as `null` is left out of the record, and `0` is written only when the
+upstream explicitly reports `0`. As for `output_tokens`, a usage report is used
+only when its token total is positive (`total_tokens`, or prompt plus
+completion tokens when `total_tokens` is absent or `0`); an all-zero report is
+ignored and neither field is written. Both values come from the same usage report;
+`cached_input_tokens` is never derived from `input_tokens`. The meaning of
+`input_tokens` and `output_tokens` does not change.
+
+Current coverage and limits:
+
+- The fields are recorded for OpenAI-compatible Chat Completions and
+  Completions requests to ModelServer and InferencePool backends and to
+  `ExternalModelProvider` backends. They are not yet recorded for the Responses
+  API, Anthropic Messages, other `/v1/*` endpoints such as `/v1/embeddings`, or
+  prefill-decode disaggregated requests.
+- For streaming requests the router asks the upstream for a usage event when the
+  client did not. If the stream breaks off, values from a usage event already
+  received are kept; otherwise the fields are omitted.
+- Most engines report `cached_tokens` only when asked to, for example vLLM with
+  `--enable-prompt-tokens-details` or SGLang with `--enable-cache-report`. Check
+  the documentation for your engine version.
+
+### JWT claim fields
+
+To attribute requests to a user or tenant, map access log fields to claims of
+the JWT the router validated with `accessLog.claimFields`. Kthena does not
+assume where an issuer puts the tenant; you name the claims. With Helm, set
+`networking.kthenaRouter.accessLog.claimFields`:
+
+```yaml
+networking:
+  kthenaRouter:
+    accessLog:
+      claimFields:
+        user_id: sub
+        tenant: tid
+```
+
+Each key is the access log field name and each value is a top-level claim name.
+Restart the router after changing the ConfigMap. With the mapping above, a JSON
+record gains the two fields after its other fields:
+
+```json
+{
+  "model_name": "qwen3-32b",
+  "input_tokens": 1790,
+  "output_tokens": 412,
+  "duration_response_processing": 5,
+  "tenant": "team-search",
+  "user_id": "u-1024"
+}
+```
+
+Values follow these rules:
+
+- Strings are written with surrounding whitespace trimmed. Numbers and booleans
+  are written as strings, for example `"1024"` and `"true"`; `exp`, `iat` and
+  `nbf` are written as seconds since the epoch. Integers beyond 2^53 lose
+  precision.
+- A field is left out of the record when the claim is absent, `null`, an object,
+  an array (including `aud`), an empty string, or longer than 256 bytes. Long
+  values are left out rather than truncated. The request itself is not
+  rejected.
+- Claims are read once, after the request completes, and only from a JWT the
+  `auth` section validated. Requests rejected by authentication, and all
+  requests while JWT authentication or access logging is disabled, carry no
+  claim fields.
+
+Example mappings for common issuers. They are starting points; decode one of
+your own tokens to confirm which claims it carries:
+
+| Issuer | Example mapping | Notes |
+| --- | --- | --- |
+| Keycloak | `user_id: sub`, `client_id: azp`, `tenant: <claim>` | Keycloak adds no tenant claim by default; add one to the token with a protocol mapper and map its name |
+| Microsoft Entra ID | `user_id: oid`, `tenant: tid` | `oid` is stable across applications in a tenant; `sub` differs per application |
+| Auth0 | `user_id: sub`, `tenant: https://example.com/tenant` | Namespaced custom claims are top-level claim names, so map the full URL |
+| In-house issuer or gateway | Any top-level claim | Nested claims cannot be mapped |
+
+The Helm values file carries the same examples, commented out under
+`claimFields`.
+
+A misspelled claim name cannot be detected at startup, so the router counts the
+records that leave out a configured field in
+`kthena_router_access_log_claim_missing_total`. Only requests with a validated
+JWT are counted, once per request.
+
+#### Privacy and retention
+
+Claim fields put user and tenant identifiers into every access log record, so
+treat the access log as personal data where those identifiers identify people:
+
+- Only the claims named in `claimFields` are logged. The raw token and every
+  other claim are never written, and there is no wildcard.
+- Map the least identifying claim that serves the purpose, for example an
+  opaque subject ID rather than an email address or a name.
+- Restrict who can read the router logs and the log store they are shipped to,
+  and set a retention period that matches your billing or audit requirement.
+- Prometheus metrics still never carry user identifiers: the claim-missing
+  counter is labeled only with configured field names.
+
 When `ACCESS_LOG_OUTPUT` is `stdout` or `stderr`, `kubectl logs` can contain
 access-log records alongside other process logs. Parse each input line as JSON
 and discard non-JSON process logs. This is safer than matching lines with a
@@ -332,7 +475,8 @@ If access logs use a file path, they do not appear in `kubectl logs`; inspect th
 mounted file or the configured log collector instead. Access records can contain
 request IDs, routing object names, pod names, and error messages, so apply the
 same access controls and retention policy used for other potentially sensitive
-operational logs.
+operational logs. With `accessLog.claimFields` configured, records also contain
+the mapped user and tenant identifiers.
 
 ## Health endpoints
 

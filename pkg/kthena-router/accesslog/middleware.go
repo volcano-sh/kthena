@@ -19,7 +19,10 @@ package accesslog
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lestrrat-go/jwx/v3/jwt"
 	"k8s.io/klog/v2"
+
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 )
 
 const (
@@ -27,8 +30,11 @@ const (
 	AccessLogContextKey = "access_log_context"
 )
 
-// AccessLogMiddleware returns a Gin middleware that tracks request timing and metadata
-func AccessLogMiddleware(logger AccessLogger) gin.HandlerFunc {
+// AccessLogMiddleware returns a Gin middleware that tracks request timing and
+// metadata. claimFields may be nil; otherwise it reads the claim fields from
+// the JWT the auth middleware validated, once per request after the request
+// completes, so requests without a validated JWT carry no claim fields.
+func AccessLogMiddleware(logger AccessLogger, claimFields *ClaimFieldExtractor) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Generate request ID if not present
 		requestID := c.Request.Header.Get("x-request-id")
@@ -51,6 +57,14 @@ func AccessLogMiddleware(logger AccessLogger) gin.HandlerFunc {
 
 		// Process request
 		c.Next()
+
+		if claimFields != nil {
+			if token, ok := c.Get(common.JWTTokenKey); ok {
+				if token, ok := token.(jwt.Token); ok {
+					ctx.ClaimFields = claimFields.Extract(token)
+				}
+			}
+		}
 
 		// Log the access entry after request completion
 		statusCode := c.Writer.Status()
@@ -119,6 +133,14 @@ func SetGatewayAPIInfo(c *gin.Context, gateway, httpRoute, inferencePool string)
 func SetTokenCounts(c *gin.Context, inputTokens, outputTokens int) {
 	if ctx := GetAccessLogContext(c); ctx != nil {
 		ctx.SetTokenCounts(inputTokens, outputTokens)
+	}
+}
+
+// SetUpstreamUsage sets the upstream-reported input and cached-input token
+// counts in the access log context.
+func SetUpstreamUsage(c *gin.Context, inputTokens, cachedInputTokens *int) {
+	if ctx := GetAccessLogContext(c); ctx != nil {
+		ctx.SetUpstreamUsage(inputTokens, cachedInputTokens)
 	}
 }
 

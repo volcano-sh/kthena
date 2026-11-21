@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -303,6 +304,82 @@ func TestLoadSchedulerConfigRejectsNegativeMaxWaitingRequests(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("load scheduler configuration: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseRouterConfigAccessLog(t *testing.T) {
+	tt := []struct {
+		name   string
+		config string
+		want   AccessLogConfig
+	}{
+		{name: "section absent", config: "scheduler: {}\n", want: AccessLogConfig{}},
+		{name: "upstream usage disabled", config: "accessLog:\n  includeUpstreamUsage: false\n", want: AccessLogConfig{}},
+		{name: "upstream usage enabled", config: "accessLog:\n  includeUpstreamUsage: true\n", want: AccessLogConfig{IncludeUpstreamUsage: true}},
+		{
+			name:   "claim fields",
+			config: "accessLog:\n  claimFields:\n    user_id: sub\n    tenant: https://example.com/tenant\n",
+			want:   AccessLogConfig{ClaimFields: map[string]string{"user_id": "sub", "tenant": "https://example.com/tenant"}},
+		},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "routerConfiguration.yaml")
+			if err := os.WriteFile(configPath, []byte(tc.config), 0o600); err != nil {
+				t.Fatalf("write router configuration: %v", err)
+			}
+			routerConfig, err := ParseRouterConfig(configPath)
+			if err != nil {
+				t.Fatalf("parse router configuration: %v", err)
+			}
+			if !reflect.DeepEqual(routerConfig.AccessLog, tc.want) {
+				t.Fatalf("AccessLog = %+v, want %+v", routerConfig.AccessLog, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseRouterConfigRejectsInvalidClaimFields(t *testing.T) {
+	tt := []struct {
+		name    string
+		config  string
+		wantErr string
+	}{
+		{
+			name:    "reserved field name",
+			config:  "accessLog:\n  claimFields:\n    model_name: sub\n",
+			wantErr: `invalid accessLog.claimFields: claim field name "model_name" is reserved by the access log`,
+		},
+		{
+			name:    "invalid field name",
+			config:  "accessLog:\n  claimFields:\n    User: sub\n",
+			wantErr: `invalid accessLog.claimFields: claim field name "User" must match ^[a-z][a-z0-9_]*$`,
+		},
+		{
+			name:    "empty claim name",
+			config:  "accessLog:\n  claimFields:\n    user_id: \"\"\n",
+			wantErr: `invalid accessLog.claimFields: claim field "user_id" must name a JWT claim`,
+		},
+		{
+			// goyaml.v3 rejects duplicate keys before validation runs.
+			name:    "duplicate field name",
+			config:  "accessLog:\n  claimFields:\n    user_id: sub\n    user_id: oid\n",
+			wantErr: `mapping key "user_id" already defined`,
+		},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "routerConfiguration.yaml")
+			if err := os.WriteFile(configPath, []byte(tc.config), 0o600); err != nil {
+				t.Fatalf("write router configuration: %v", err)
+			}
+			_, err := ParseRouterConfig(configPath)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ParseRouterConfig() error = %v, want it to contain %q", err, tc.wantErr)
 			}
 		})
 	}

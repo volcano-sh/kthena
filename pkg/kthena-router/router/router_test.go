@@ -1715,7 +1715,7 @@ func TestForwardResponseWithUsageParser_OpenAIUsageEventForwarding(t *testing.T)
 			assert.Equal(t, tt.wantFinishReason, strings.Contains(w.Body.String(), `"finish_reason":"stop"`))
 			assert.Equal(t, tt.wantFinishReason, strings.Contains(w.Body.String(), `"content":"tail"`))
 			assert.Equal(t, 1, callbackCount)
-			assert.Equal(t, providers.TokenUsage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}, got)
+			assert.Equal(t, providers.TokenUsage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, PromptTokensReported: true}, got)
 		})
 	}
 }

@@ -53,6 +53,45 @@ Authentication configuration is used to enable and configure JWT authentication.
 | audiences | []string | JWT audiences list |
 | jwksUri   | string   | Jwks Provider  URI |
 
+### Access Log Configuration
+
+The `accessLog` section holds access-log options that are not set through the
+`ACCESS_LOG_*` environment variables. Enablement, format and output stay on
+those variables; see [Router Observability](./router-observability.md#access-logs).
+
+| Parameter            | Type | Default | Description |
+| -------------------- | ---- | ------- | ----------- |
+| includeUpstreamUsage | bool | `false` | Record the input and cached-input token counts the upstream reports in its usage as `upstream_input_tokens` and `cached_input_tokens` |
+| claimFields | map[string]string | none | Map access log field names to top-level JWT claim names; each request with a validated JWT logs the mapped claims |
+
+```yaml
+accessLog:
+  includeUpstreamUsage: true
+  claimFields:
+    user_id: sub
+    tenant: tid
+```
+
+`claimFields` is checked at startup, and the router fails to start with the
+reason when it is invalid:
+
+- At most 8 fields.
+- Field names must match `^[a-z][a-z0-9_]*$`, are at most 64 bytes, and cannot
+  be a name the access log already writes, such as `model_name`, `tokens`,
+  `timings`, `upstream_input_tokens` or `cached_input_tokens`.
+- Claim names must be non-empty, at most 64 bytes, and without leading or
+  trailing whitespace. They name top-level claims exactly; nested paths are not
+  supported.
+
+Claims are read only from a JWT validated by the `auth` section, so the mapping
+has no effect while JWT authentication or access logging is disabled; the
+router logs this at startup. See
+[JWT claim fields](./router-observability.md#jwt-claim-fields) for the value rules.
+
+When installing with Helm, set `networking.kthenaRouter.accessLog.includeUpstreamUsage`
+and `networking.kthenaRouter.accessLog.claimFields` instead of editing the
+ConfigMap by hand.
+
 <!-- Add routing rules here -->
 
 ## Examples
