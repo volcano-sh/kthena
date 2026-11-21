@@ -31,6 +31,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -458,10 +459,17 @@ func (t *KVCacheAware) queryRedisForBlocks(blockHashes []uint64, modelName strin
 		klog.V(2).Infof("KVCacheAware.queryRedis: sample keys [0]=%s, [last]=%s", keys[0], keys[len(keys)-1])
 	}
 
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		klog.Warningf("KVCacheAware.queryRedis: pipeline exec failed: %v", err)
-		return nil, err
+	if _, err := pipe.Exec(ctx); err != nil {
+		// go-redis returns a non-nil error when any command in the pipeline failed.
+		// redis.Error covers server-side errors (e.g. WRONGTYPE): these are per-key
+		// and the successful commands still have results worth using. Any other error
+		// (connection refused, timeout, EOF) means the whole pipeline failed and
+		// there is no usable data — return it so the caller can record the outage metric.
+		var redisErr redis.Error
+		if !errors.As(err, &redisErr) {
+			return nil, err
+		}
+		klog.Warningf("KVCacheAware.queryRedis: pipeline exec had per-command errors, processing partial results: %v", err)
 	}
 
 	// Process results and extract pod names
