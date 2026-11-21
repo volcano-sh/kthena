@@ -38,8 +38,9 @@ var scriptFS embed.FS
 const listScan = 100
 
 var (
-	createFileScript = mustLoadScript("create_file.lua")
-	deleteFileScript = mustLoadScript("delete_file.lua")
+	createFileScript  = mustLoadScript("create_file.lua")
+	deleteFileScript  = mustLoadScript("delete_file.lua")
+	claimVolumeScript = mustLoadScript("claim_volume.lua")
 )
 
 func mustLoadScript(name string) *redis.Script {
@@ -70,6 +71,12 @@ func NewRedisStore(client *redis.Client, prefix string) *RedisStore {
 func (s *RedisStore) fileKey(id string) string          { return s.prefix + "file:" + id }
 func (s *RedisStore) fileRefsKey(id string) string      { return s.prefix + "fileref:" + id }
 func (s *RedisStore) fileIndexKey(tenant string) string { return s.prefix + "idx:files:" + tenant }
+func (s *RedisStore) volumeKey() string                 { return s.prefix + "volume" }
+
+// ClaimVolume records volumeID as the volume of these records unless one is recorded, and returns the recorded one.
+func (s *RedisStore) ClaimVolume(ctx context.Context, volumeID string) (string, error) {
+	return claimVolumeScript.Run(ctx, s.client, []string{s.volumeKey()}, volumeID).Text()
+}
 
 // indexTime is the write time in microseconds, kept inside the second of created_at.
 func (s *RedisStore) indexTime(createdAt int64) int64 {

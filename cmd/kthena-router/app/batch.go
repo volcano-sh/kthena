@@ -31,8 +31,6 @@ import (
 
 const (
 	defaultBatchStoragePath = "/var/lib/kthena/batch"
-	// batchStartupCheckTimeout bounds the Redis check made when the batch API starts.
-	batchStartupCheckTimeout = 2 * time.Second
 	// batchFileExpiration is the proposal's default lifetime of a file uploaded without expires_after.
 	batchFileExpiration = 30 * 24 * time.Hour
 )
@@ -74,17 +72,10 @@ func startBatch(ctx context.Context, r *router.Router) {
 	if !options.enabled {
 		return
 	}
-	files := batch.NewFSStore(options.storagePath)
-	client := utils.NewRedisClient()
-	// A dependency that is down now is only logged: requests answer 503 until it is back.
-	if err := files.Probe(ctx); err != nil {
-		klog.Errorf("Batch API: %v", err)
-	}
-	checkCtx, cancel := context.WithTimeout(ctx, batchStartupCheckTimeout)
-	defer cancel()
-	if err := client.Ping(checkCtx).Err(); err != nil {
-		klog.Errorf("Batch API: Redis is not reachable: %v", err)
-	}
-	r.SetAPIExtension(batch.NewService(batch.NewRedisStore(client, ""), files, batch.Config{MaxFileBytes: options.maxFileBytes, FileExpiration: batchFileExpiration}))
+	store := batch.NewRedisStore(utils.NewRedisClient(), "")
+	service := batch.NewService(store, batch.NewFSStore(options.storagePath), batch.Config{MaxFileBytes: options.maxFileBytes, FileExpiration: batchFileExpiration})
+	// The storage check runs in the background: requests answer 503 until it passes, and the listeners never wait for it.
+	service.Start(ctx)
+	r.SetAPIExtension(service)
 	klog.Infof("Batch API enabled, files under %s", options.storagePath)
 }

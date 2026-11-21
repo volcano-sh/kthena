@@ -280,6 +280,10 @@ func storedFiles(t *testing.T, root string) []string {
 		if err != nil {
 			return err
 		}
+		// The reserved directory holds the probe and the volume ID, not uploaded bytes.
+		if info.IsDir() && info.Name() == reservedDir {
+			return filepath.SkipDir
+		}
 		if !info.IsDir() {
 			found = append(found, path)
 		}
@@ -768,11 +772,26 @@ func TestRefusedUploadDoesNotWaitForTheRestOfTheBody(t *testing.T) {
 	assert.True(t, resp.Close, "the connection is closed instead of read to the end")
 }
 
-func TestStoredUploadKeepsTheConnectionOpen(t *testing.T) {
+func TestOnlyARefusedPostClosesTheConnection(t *testing.T) {
 	api := newTestAPI(t)
-	rec := api.call(t, "alice", uploadRequest(t, "line\n", true, map[string]string{"purpose": PurposeBatch}))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Empty(t, rec.Header().Get("Connection"))
+	id := mustUpload(t, api, "alice", "line\n")
+	tests := []struct {
+		name   string
+		req    *http.Request
+		closes bool
+	}{
+		{name: "refused upload", req: uploadRequest(t, "line\n", true, map[string]string{"purpose": "assistants"}), closes: true},
+		{name: "unknown POST route", req: httptest.NewRequest(http.MethodPost, filesPath+"/"+id+"/content", strings.NewReader("x")), closes: true},
+		{name: "stored upload", req: uploadRequest(t, "line\n", true, map[string]string{"purpose": PurposeBatch}), closes: false},
+		{name: "missing file", req: httptest.NewRequest(http.MethodGet, filesPath+"/file-missing", nil), closes: false},
+		{name: "list", req: httptest.NewRequest(http.MethodGet, filesPath, nil), closes: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := api.call(t, "alice", tt.req)
+			assert.Equal(t, tt.closes, rec.Header().Get("Connection") == "close", "%d %s", rec.Code, rec.Body.String())
+		})
+	}
 }
 
 func TestUploadRejectsAFormThatWasCutOff(t *testing.T) {

@@ -28,6 +28,8 @@ type Store interface {
 	DeleteFile(ctx context.Context, id string) (bool, error)
 	// ListFiles returns one page of a tenant's files and whether more follow.
 	ListFiles(ctx context.Context, query FileQuery) ([]*File, bool, error)
+	// ClaimVolume records volumeID as the volume of these records unless one is recorded, and returns the recorded one.
+	ClaimVolume(ctx context.Context, volumeID string) (string, error)
 }
 
 // FileQuery selects one page of a tenant's files.

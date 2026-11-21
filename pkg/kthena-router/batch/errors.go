@@ -35,6 +35,10 @@ func fail(c *gin.Context, status int, kind, param, message string) {
 	if param != "" {
 		body["param"] = param
 	}
+	// HTTP/1 reads an unread body before it answers, so a refused POST closes the connection instead.
+	if c.Request.Method == http.MethodPost && c.Request.ProtoMajor == 1 {
+		c.Header("Connection", "close")
+	}
 	c.AbortWithStatusJSON(status, gin.H{"error": body})
 }
 

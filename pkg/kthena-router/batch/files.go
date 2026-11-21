@@ -67,6 +67,8 @@ type FileStore interface {
 	Remove(ctx context.Context, tenant, id string) error
 	// Probe checks that this pod can write, sync and rename on the volume.
 	Probe(ctx context.Context) error
+	// VolumeID returns the ID of the volume, writing a new one the first time.
+	VolumeID(ctx context.Context) (string, error)
 }
 
 // FSStore keeps files on a mounted volume, one directory per tenant.

@@ -59,11 +59,14 @@ type Config struct {
 
 // Service serves the OpenAI-compatible files API.
 type Service struct {
-	store  Store
-	files  FileStore
-	config Config
-	now    func() time.Time
-	newID  func(prefix string) string
+	store      Store
+	files      FileStore
+	config     Config
+	now        func() time.Time
+	newID      func(prefix string) string
+	gate       *readiness
+	readyWait  time.Duration
+	retryEvery time.Duration
 }
 
 // NewService builds the API on a record store and a file store.
@@ -71,7 +74,9 @@ func NewService(store Store, files FileStore, config Config) *Service {
 	if config.MaxFileBytes <= 0 {
 		config.MaxFileBytes = defaultMaxBytes
 	}
-	return &Service{store: store, files: files, config: config, now: time.Now, newID: newID}
+	s := &Service{store: store, files: files, config: config, now: time.Now, newID: newID, readyWait: defaultReadyWait, retryEvery: defaultRetryEvery}
+	s.gate = &readiness{check: s.checkStorage}
+	return s
 }
 
 func newID(prefix string) string {
@@ -90,6 +95,10 @@ func (s *Service) Handles(_, path string) bool {
 // Serve answers one request that Handles accepted.
 func (s *Service) Serve(c *gin.Context) {
 	method := c.Request.Method
+	if !s.gate.await(c.Request.Context(), s.readyWait) {
+		fail(c, http.StatusServiceUnavailable, errAPI, "", "batch storage is not ready")
+		return
+	}
 	rest := strings.Trim(strings.TrimPrefix(c.Request.URL.Path, filesPath), "/")
 	switch {
 	case rest == "" && method == http.MethodGet:
@@ -139,10 +148,6 @@ func (s *Service) uploadFile(c *gin.Context) {
 	ctx := c.Request.Context()
 	// cleanup still removes bytes after the client is gone and the request is cancelled.
 	cleanup := context.WithoutCancel(ctx)
-	// HTTP/1 reads an unread body before it answers, so a refused upload closes the connection instead.
-	if c.Request.ProtoMajor == 1 {
-		c.Header("Connection", "close")
-	}
 	// A declared size over the limit is refused before the client sends the body.
 	if c.Request.ContentLength > s.config.MaxFileBytes+multipartSlack {
 		fail(c, http.StatusRequestEntityTooLarge, errInvalidRequest, "file", s.tooLarge())
@@ -225,8 +230,6 @@ func (s *Service) uploadFile(c *gin.Context) {
 		unavailable(c, "cannot record the uploaded file", err)
 		return
 	}
-	// The whole body was read, so the connection can be reused.
-	c.Writer.Header().Del("Connection")
 	c.JSON(http.StatusOK, fileObject(file))
 }
 

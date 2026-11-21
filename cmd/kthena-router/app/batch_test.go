@@ -292,7 +292,8 @@ func TestBatchUploadAnswers503UntilTheVolumeIsUsable(t *testing.T) {
 	refused := serve(handler, uploadRequest(t, "line\n", ""))
 	require.Equal(t, http.StatusServiceUnavailable, refused.Code, refused.Body.String())
 	assert.Equal(t, "api_error", errorType(t, refused))
-	assert.Empty(t, listedIDs(t, serve(handler, request(http.MethodGet, "/v1/files", ""))), "listing needs only the records")
+	listed := serve(handler, request(http.MethodGet, "/v1/files", ""))
+	assert.Equal(t, http.StatusServiceUnavailable, listed.Code, "no files route answers while the volume is unusable: %s", listed.Body.String())
 
 	require.NoError(t, os.Remove(volume))
 	accepted := serve(handler, uploadRequest(t, "line\n", ""))
