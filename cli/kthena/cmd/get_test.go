@@ -17,13 +17,18 @@ limitations under the License.
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/yaml"
 
+	networking "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
@@ -235,4 +240,128 @@ users:
 	_, contextNamespace, err := getKthenaClient()
 	assert.NoError(t, err)
 	assert.Equal(t, "kubeconfig-env-namespace", contextNamespace)
+}
+
+func TestValidateOutputFormat(t *testing.T) {
+	tests := []struct {
+		format  string
+		wantErr bool
+	}{
+		{format: ""},
+		{format: "table"},
+		{format: "yaml"},
+		{format: "json"},
+		{format: "foo", wantErr: true},
+		{format: "YAML", wantErr: true},
+		{format: "yml", wantErr: true},
+		{format: "wide", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.format, func(t *testing.T) {
+			err := validateOutputFormat(tt.format)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestGetCmdRejectsUnsupportedOutputFormat verifies every get subcommand
+// fails on an unknown -o value before it talks to the cluster.
+func TestGetCmdRejectsUnsupportedOutputFormat(t *testing.T) {
+	original := outputFormat
+	t.Cleanup(func() { outputFormat = original })
+
+	outputFormat = "foo"
+	err := getCmd.PersistentPreRunE(getModelServersCmd, nil)
+	assert.ErrorContains(t, err, `unsupported output format "foo"`)
+
+	outputFormat = "json"
+	assert.NoError(t, getCmd.PersistentPreRunE(getModelServersCmd, nil))
+}
+
+func TestPrintList(t *testing.T) {
+	model := "qwen2.5-0.5b"
+	server := networking.ModelServer{
+		TypeMeta: metav1.TypeMeta{APIVersion: "networking.serving.volcano.sh/v1alpha1", Kind: "ModelServer"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:          "qwen-small",
+			Namespace:     "default",
+			ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "kubectl-client-side-apply"}},
+		},
+		Spec: networking.ModelServerSpec{Model: &model, InferenceEngine: "vLLM"},
+	}
+
+	tests := []struct {
+		name      string
+		format    string
+		items     []networking.ModelServer
+		wantNames []string
+	}{
+		{name: "yaml", format: "yaml", items: []networking.ModelServer{server}, wantNames: []string{"qwen-small"}},
+		{name: "json", format: "json", items: []networking.ModelServer{server}, wantNames: []string{"qwen-small"}},
+		{name: "yaml empty list", format: "yaml", items: []networking.ModelServer{}, wantNames: []string{}},
+		{name: "json nil list", format: "json", items: nil, wantNames: []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			require.NoError(t, printList(&buf, tt.format, tt.items))
+
+			var got struct {
+				APIVersion string                   `json:"apiVersion"`
+				Kind       string                   `json:"kind"`
+				Items      []networking.ModelServer `json:"items"`
+			}
+			if tt.format == "json" {
+				require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+			} else {
+				require.NoError(t, yaml.Unmarshal(buf.Bytes(), &got))
+			}
+
+			assert.Equal(t, "v1", got.APIVersion)
+			assert.Equal(t, "List", got.Kind)
+			require.NotNil(t, got.Items, "items should be an empty list, not null")
+			names := []string{}
+			for _, item := range got.Items {
+				names = append(names, item.Name)
+				assert.Equal(t, "ModelServer", item.Kind)
+				assert.Equal(t, "qwen2.5-0.5b", *item.Spec.Model)
+				assert.Empty(t, item.ManagedFields, "managedFields should be hidden like kubectl")
+			}
+			assert.Equal(t, tt.wantNames, names)
+		})
+	}
+}
+
+func TestPrintObjectUnsupportedFormat(t *testing.T) {
+	var buf bytes.Buffer
+	err := printObject(&buf, "table", ManifestInfo{Name: "x"})
+	assert.Error(t, err)
+	assert.Empty(t, buf.String())
+}
+
+func TestPrintObjectTemplateInfo(t *testing.T) {
+	info := ManifestInfo{Name: "Qwen/Qwen3-32B", Description: "Qwen3 32B", FilePath: "Qwen/Qwen3-32B.yaml"}
+
+	var buf bytes.Buffer
+	require.NoError(t, printObject(&buf, "json", info))
+	var got ManifestInfo
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	assert.Equal(t, info, got)
+}
+
+// TestGetTemplateRejectsJSON verifies get template refuses -o json before it
+// reads the template, since the template has no json form.
+func TestGetTemplateRejectsJSON(t *testing.T) {
+	original := outputFormat
+	t.Cleanup(func() { outputFormat = original })
+
+	outputFormat = "json"
+	err := runGetTemplate(nil, []string{"Qwen/Qwen3-32B"})
+	assert.ErrorContains(t, err, "-o json is not supported for get template")
 }
