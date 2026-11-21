@@ -1,0 +1,29 @@
+# tokenizer-engine-mock backend for tokenizer e2e tests.
+# The image is overridden at test time via os.Getenv("IMG_TOKENIZER_ENGINE_MOCK").
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tokenizer-test-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tokenizer-test-engine
+  template:
+    metadata:
+      labels:
+        app: tokenizer-test-engine
+    spec:
+      containers:
+        - name: engine
+          image: ghcr.io/volcano-sh/kthena-tokenizer-engine-mock:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 2
+            periodSeconds: 2
