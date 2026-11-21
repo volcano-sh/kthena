@@ -243,6 +243,9 @@ type Store interface {
 	GetDecodePods(modelServerName types.NamespacedName) ([]*PodInfo, error)
 	GetPrefillPods(modelServerName types.NamespacedName) ([]*PodInfo, error)
 	GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*PodInfo, error)
+	// GetPrefillPodsAndGroupForDecode returns the decode's PD group and its
+	// prefill pods from one classification snapshot.
+	GetPrefillPodsAndGroupForDecode(modelServerName types.NamespacedName, decodePodName types.NamespacedName) (string, []*PodInfo, error)
 
 	// New methods for callback management
 	RegisterCallback(kind string, callback CallbackFunc)
@@ -1114,19 +1117,26 @@ func (s *store) GetPrefillPods(modelServerName types.NamespacedName) ([]*PodInfo
 
 // GetPrefillPodsForDecodeGroup returns prefill pods that match the same PD group as the decode pod
 func (s *store) GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*PodInfo, error) {
+	_, prefillPods, err := s.GetPrefillPodsAndGroupForDecode(modelServerName, decodePodName)
+	return prefillPods, err
+}
+
+// GetPrefillPodsAndGroupForDecode returns the decode's PD group and its prefill
+// pods from one classification snapshot.
+func (s *store) GetPrefillPodsAndGroupForDecode(modelServerName types.NamespacedName, decodePodName types.NamespacedName) (string, []*PodInfo, error) {
 	value, ok := s.modelServer.Load(modelServerName)
 	if !ok {
-		return nil, fmt.Errorf("model server not found: %v", modelServerName)
+		return "", nil, fmt.Errorf("model server not found: %v", modelServerName)
 	}
 	ms := value.(*modelServer)
 
 	pod, ok := s.pods.Load(decodePodName)
 	if !ok {
-		return nil, fmt.Errorf("pod not found: %v", decodePodName)
+		return "", nil, fmt.Errorf("pod not found: %v", decodePodName)
 	}
 	podInfo := pod.(*PodInfo)
 
-	prefillPodNames := ms.getPrefillPodsForDecodeGroup(podInfo)
+	groupValue, prefillPodNames := ms.getPrefillPodsAndGroupForDecode(podInfo)
 	prefillPods := make([]*PodInfo, 0, len(prefillPodNames))
 	for _, podName := range prefillPodNames {
 		if value, ok := s.pods.Load(podName); ok {
@@ -1134,7 +1144,7 @@ func (s *store) GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedNam
 		}
 	}
 
-	return prefillPods, nil
+	return groupValue, prefillPods, nil
 }
 
 func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.ModelServer) error {
