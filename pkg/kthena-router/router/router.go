@@ -1506,6 +1506,8 @@ func (r *Router) getKVConnector(modelServerName types.NamespacedName) (connector
 		connectorType = modelServer.Spec.KVConnector.Type
 	} else if modelServer.Spec.InferenceEngine == v1alpha1.SGLang {
 		connectorType = connectors.ConnectorTypeSGLang
+	} else if modelServer.Spec.InferenceEngine == v1alpha1.TensorRTLLM {
+		connectorType = connectors.ConnectorTypeTensorRTLLM
 	}
 
 	connector := r.connectorFactory.GetConnector(connectorType)

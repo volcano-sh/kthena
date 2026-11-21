@@ -23,6 +23,7 @@ class EngineType(Enum):
     VLLM = "vllm"
     SGLANG = "sglang"
     VLLM_DISAGGREGATED = "vllmdisaggregated"
+    TENSORRTLLM = "tensorrtllm"
 
 
 class StandardMetricNames:
@@ -74,6 +75,7 @@ STANDARD_RULES: Dict[str, List[MetricOperator]] = {
             StandardMetricNames.E2E_REQUEST_LATENCY_SECONDS,
         ),
     ],
+    EngineType.TENSORRTLLM.value: [],
 }
 
 
@@ -95,6 +97,8 @@ class MetricStandard:
             return EngineType.VLLM
         if engine.lower() == EngineType.SGLANG.value:
             return EngineType.SGLANG
+        if engine.lower() == EngineType.TENSORRTLLM.value:
+            return EngineType.TENSORRTLLM
         supported_engines = list(STANDARD_RULES.keys())
         raise UnsupportedEngineError(
             f"Unsupported engine: {engine}. "

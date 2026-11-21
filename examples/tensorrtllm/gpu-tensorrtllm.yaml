@@ -1,0 +1,105 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: trtllm-tinyllama
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 1
+  recoveryPolicy: ServingGroupRecreate
+  template:
+    restartGracePeriodSeconds: 60
+    roles:
+      - name: server
+        replicas: 1
+        entryTemplate:
+          spec:
+            initContainers:
+              - name: downloader
+                imagePullPolicy: IfNotPresent
+                image: ghcr.io/volcano-sh/downloader:latest
+                args:
+                  - --source
+                  - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+                  - --output-dir
+                  - /models/TinyLlama-1.1B-Chat-v1.0/
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+            containers:
+              - name: server
+                # Official NGC TensorRT-LLM release image.
+                image: nvcr.io/nvidia/tensorrt-llm/release:1.0.0
+                command: ["sh", "-c"]
+                args:
+                  - |
+                    cat >/tmp/extra_llm_api_options.yaml <<'EOF'
+                    enable_iter_perf_stats: true
+                    EOF
+                    trtllm-serve serve /models/TinyLlama-1.1B-Chat-v1.0 \
+                      --host 0.0.0.0 \
+                      --port 8000 \
+                      --backend pytorch \
+                      --extra_llm_api_options /tmp/extra_llm_api_options.yaml
+                volumeMounts:
+                  - name: models
+                    mountPath: /models
+                    readOnly: true
+                  - name: shared-mem
+                    mountPath: /dev/shm
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1
+                readinessProbe:
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                  timeoutSeconds: 10
+                  failureThreshold: 60
+                  httpGet:
+                    path: /health
+                    port: 8000
+                livenessProbe:
+                  initialDelaySeconds: 900
+                  periodSeconds: 10
+                  timeoutSeconds: 10
+                  failureThreshold: 10
+                  httpGet:
+                    path: /health
+                    port: 8000
+            volumes:
+              - name: models
+                emptyDir: {}
+              - name: shared-mem
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 8Gi
+        workerReplicas: 0
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: trtllm-tinyllama
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      modelserving.volcano.sh/name: trtllm-tinyllama
+  workloadPort:
+    port: 8000
+  # trtllm-serve uses the local directory basename as the OpenAI model id.
+  model: "TinyLlama-1.1B-Chat-v1.0"
+  inferenceEngine: "TensorRTLLM"
+  trafficPolicy:
+    timeout: 120s
+---
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelRoute
+metadata:
+  name: trtllm-tinyllama
+  namespace: default
+spec:
+  modelName: "TinyLlama-1.1B-Chat-v1.0"
+  rules:
+    - name: default
+      targetModels:
+        - modelServerName: trtllm-tinyllama

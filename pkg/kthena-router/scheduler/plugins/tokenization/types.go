@@ -19,8 +19,9 @@ package tokenization
 import "github.com/volcano-sh/kthena/pkg/kthena-router/common"
 
 const (
-	EngineVLLM   = "vllm"
-	EngineSGLang = "sglang"
+	EngineVLLM        = "vllm"
+	EngineSGLang      = "sglang"
+	EngineTensorRTLLM = "tensorrtllm"
 )
 
 type TokenizeInputType string
