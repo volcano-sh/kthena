@@ -36,6 +36,20 @@ Filter Plugins (Filter):
 | enabled            | List of enabled filter plugins  |
 | disabled           | List of disabled filter plugins |
 
+The built-in defaults and the Helm chart enable `lora-affinity`. For requests matching
+`ModelRoute.spec.loraAdapters`, this filter keeps only pods whose cached `/v1/models`
+list includes the requested adapter. Base-model requests, including aliases, pass
+through without requiring model discovery. If no pod advertises the adapter,
+scheduling fails instead of forwarding the request to an incompatible pod.
+
+Adapter availability follows the datastore's model-discovery polling. Newly loaded
+or removed adapters may take time to appear in the cache; a failed refresh retains
+the previous model list. HTTPRoute/InferencePool-only requests have no ModelRoute
+adapter classification and bypass this filter.
+
+A custom scheduler configuration replaces the defaults. Include `lora-affinity`
+in `Filter.enabled` to use it, or omit it to opt out.
+
 Score Plugins (Score):
 
 | Configuration Item | Description                                  |
@@ -92,7 +106,6 @@ data:
         Filter:
           enabled:
             - least-request
-          disabled:
             - lora-affinity
         Score:
           enabled:
@@ -140,7 +153,6 @@ data:
         Filter:
           enabled:
             - least-request
-          disabled:
             - lora-affinity
         Score:
           enabled:

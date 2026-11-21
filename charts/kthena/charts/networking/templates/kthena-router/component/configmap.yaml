@@ -25,7 +25,6 @@ data:
         Filter:
           enabled:
             - least-request
-          disabled:
             - lora-affinity
         Score:
           enabled:
