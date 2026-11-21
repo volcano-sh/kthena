@@ -1,6 +1,8 @@
 kthenaRouter:
   # replicas is the number of kthena-router instances to run.
   replicas: 1
+  # strategy is the Deployment update strategy for the router pods; empty keeps the Kubernetes default (RollingUpdate)
+  strategy: {}
   enabled: true
   # metrics configures the dedicated internal Prometheus listener.
   metrics:
@@ -55,7 +57,7 @@ kthenaRouter:
     enabled: false
     # storage is the volume that every router replica shares
     storage:
-      # claimName is an existing PersistentVolumeClaim; it must be ReadWriteMany when replicas is more than one
+      # claimName is an existing PersistentVolumeClaim; it must be ReadWriteMany when replicas is more than one, and one replica on a ReadWriteOnce claim needs strategy.type Recreate
       claimName: ""
       # mountPath is where the claim is mounted in the router container
       mountPath: /var/lib/kthena/batch

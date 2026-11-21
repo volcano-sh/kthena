@@ -8,6 +8,10 @@ metadata:
     {{- include "kthena.labels" . | nindent 4 }}
 spec:
   replicas: {{.Values.kthenaRouter.replicas}}
+  {{- with .Values.kthenaRouter.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/component: kthena-router

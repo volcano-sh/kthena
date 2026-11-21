@@ -54,6 +54,8 @@ networking:
     enabled: true
     # -- Number of Kthena Router instances to run.
     replicas: 1
+    # -- Deployment update strategy for the router pods; empty keeps the Kubernetes default (RollingUpdate).
+    strategy: {}
     # -- Container port for Kthena Router.
     port: 8080
     metrics:
@@ -191,7 +193,7 @@ networking:
       # -- Enable the batch API. It needs the Redis from the `redis-config` ConfigMap.
       enabled: false
       storage:
-        # -- Existing PersistentVolumeClaim shared by every router replica. Required when batch is enabled; ReadWriteMany when `replicas` is more than one.
+        # -- Existing PersistentVolumeClaim shared by every router replica. Required when batch is enabled; ReadWriteMany when `replicas` is more than one. With one replica on a ReadWriteOnce claim, set `strategy.type` to `Recreate`, or a rollout can wait for the volume forever.
         claimName: ""
         # -- Path where the claim is mounted in the router container.
         mountPath: /var/lib/kthena/batch
