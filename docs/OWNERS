@@ -4,8 +4,10 @@ reviewers:
   - LiZhenCheng9527
   - hzxuzhonghu
   - FAUST-BENCHOU
+  - kube-gopher
 approvers:
   - git-malu
   - YaoZengzeng
   - LiZhenCheng9527
   - FAUST-BENCHOU
+  - kube-gopher
