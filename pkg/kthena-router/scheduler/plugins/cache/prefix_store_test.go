@@ -799,7 +799,7 @@ func (noopPodRuntimeInspector) GetPodMetrics(_ string, _ *corev1.Pod, _ uint32, 
 	return nil, nil
 }
 
-func (noopPodRuntimeInspector) GetPodModels(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
+func (noopPodRuntimeInspector) GetPodModels(_ string, _ *corev1.Pod, _ uint32, _ string) ([]string, error) {
 	return nil, nil
 }
 

@@ -18,6 +18,7 @@ package vllm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,10 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/metrics"
 )
 
+// ErrUnauthorized reports that the backend refused the credential, as opposed to
+// the router being unable to resolve one.
+var ErrUnauthorized = errors.New("backend rejected the API key")
+
 type Model struct {
 	ID string `json:"id"`
 }
@@ -35,14 +40,27 @@ type ModelList struct {
 	Data []Model `json:"data"`
 }
 
-func FetchPodModels(podIP string, port uint32) ([]string, error) {
+// FetchPodModels lists the models a pod serves. apiKey is sent as a bearer token
+// when set, for backends that require authentication on /v1/models.
+func FetchPodModels(podIP string, port uint32, apiKey string) ([]string, error) {
 	url := metrics.PodEndpointURL(podIP, port, "/v1/models")
-	resp, err := metrics.HTTPClient().Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := metrics.HTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("%w: pod IP %s returned HTTP %d", ErrUnauthorized, podIP, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to get models from pod IP %s: HTTP %d", podIP, resp.StatusCode)
 	}
@@ -65,9 +83,9 @@ func FetchPodModels(podIP string, port uint32) ([]string, error) {
 	return models, nil
 }
 
-func (engine *vllmEngine) GetPodModels(pod *corev1.Pod, port uint32) ([]string, error) {
+func (engine *vllmEngine) GetPodModels(pod *corev1.Pod, port uint32, apiKey string) ([]string, error) {
 	if port == 0 {
 		port = 8000
 	}
-	return FetchPodModels(pod.Status.PodIP, port)
+	return FetchPodModels(pod.Status.PodIP, port, apiKey)
 }
