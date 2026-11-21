@@ -124,6 +124,7 @@ spec:
   behavior:
     scaleUp:
       panicPolicy:
+        period: 5s
         panicThresholdPercent: 150
         panicModeHold: 5m
       stablePolicy:
@@ -165,6 +166,7 @@ spec:
   behavior:
     scaleUp:
       panicPolicy:
+        period: 5s
         panicThresholdPercent: 150
         panicModeHold: 5m
       stablePolicy:
