@@ -147,6 +147,41 @@ func TestWebhook(t *testing.T) {
 			name:     "Valid ModelServing (zero replicas skip replica-bound budget checks)",
 			resource: createModelServingWithMaxUnavailable("webhook-zero-replicas", 0, 3),
 		},
+		{
+			name:        "Invalid ModelServing (bootstrapAccelerateStrategy unknown role)",
+			resource:    createInvalidBootstrapModelServingUnknownRole(),
+			expectError: true,
+			errorMsg:    "does not exist in spec.template.roles",
+		},
+		{
+			name:        "Invalid ModelServing (managed modelexpress plugin in spec.plugins)",
+			resource:    createInvalidBootstrapModelServingManagedPlugin(),
+			expectError: true,
+			errorMsg:    "plugin modelexpress is managed by spec.bootstrapAccelerateStrategy",
+		},
+		{
+			name:        "Invalid ModelServing (bootstrapAccelerateStrategy missing engine container)",
+			resource:    createInvalidBootstrapModelServingMissingEngineContainer(),
+			expectError: true,
+			errorMsg:    "must contain one of the ModelExpress engine containers",
+		},
+		{
+			name:        "Invalid ModelServing (bootstrapAccelerateStrategy non-positive initialSeedReplicas)",
+			resource:    createInvalidBootstrapModelServingInvalidSeed(),
+			expectError: true,
+			errorMsg:    "must be a positive integer",
+		},
+		{
+			name:        "Invalid ModelServing (bootstrapAccelerateStrategy invalid readyURL)",
+			resource:    createInvalidBootstrapModelServingInvalidReadyURL(),
+			expectError: true,
+			errorMsg:    "must be an absolute http or https URL",
+		},
+		{
+			name:        "Valid ModelServing with BootstrapAccelerateStrategy (DryRun)",
+			resource:    createValidBootstrapModelServingForWebhookTest(),
+			expectError: false,
+		},
 	}
 
 	for _, tc := range testCases {

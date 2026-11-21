@@ -197,6 +197,41 @@ type inPlacePlugin struct {
 
 func (p *inPlacePlugin) SupportsInPlaceUpdate() bool { return p.supported }
 
+func TestChainWithManagedPlugin(t *testing.T) {
+	calls := []string{}
+	user := &testPlugin{name: "user", calls: &calls}
+	managed := &testPlugin{name: "managed", calls: &calls}
+	scope := &workloadv1alpha1.PluginScope{Roles: []string{"prefill"}}
+
+	var none *Chain
+	chain := none.WithManagedPlugin(managed, scope)
+	if err := chain.OnPodCreate(context.Background(), &HookRequest{RoleName: "prefill"}); err != nil {
+		t.Fatalf("unexpected create error: %v", err)
+	}
+	if got := strings.Join(calls, ","); got != "create-managed" {
+		t.Fatalf("managed plugin on an empty chain, got %s", got)
+	}
+
+	calls = calls[:0]
+	base := &Chain{entries: []entry{{plugin: user, spec: workloadv1alpha1.PluginSpec{Name: "user"}}}}
+	chain = base.WithManagedPlugin(managed, scope)
+	if len(base.entries) != 1 {
+		t.Fatalf("the configured chain must not be mutated, got %d entries", len(base.entries))
+	}
+	if err := chain.OnPodCreate(context.Background(), &HookRequest{RoleName: "prefill"}); err != nil {
+		t.Fatalf("unexpected create error: %v", err)
+	}
+	if err := chain.OnPodCreate(context.Background(), &HookRequest{RoleName: "decode"}); err != nil {
+		t.Fatalf("unexpected create error: %v", err)
+	}
+	if got := strings.Join(calls, ","); got != "create-user,create-managed,create-user" {
+		t.Fatalf("managed plugin must run last and honor its scope, got %s", got)
+	}
+	if name, unsupported := chain.PluginWithoutInPlaceUpdate(); !unsupported || name != "user" {
+		t.Fatalf("PluginWithoutInPlaceUpdate() = %q, %v", name, unsupported)
+	}
+}
+
 func TestChainPluginWithoutInPlaceUpdate(t *testing.T) {
 	calls := []string{}
 	supported := &inPlacePlugin{testPlugin: testPlugin{name: "supported", calls: &calls}, supported: true}

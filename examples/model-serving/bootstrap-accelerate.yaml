@@ -1,0 +1,50 @@
+# Bootstrap acceleration with ModelExpress peer-to-peer weight loading.
+#
+# While the prefill pool has no Ready replica, the controller creates only
+# initialSeedReplicas role replicas; they load weights from storage and become
+# ModelExpress sources. Once a seed replica is Ready, every remaining replica is
+# created and pulls weights P2P from the ready ones.
+#
+# The ModelExpress server address comes from the controller
+# (--modelexpress-server-address / Helm controllerManager.modelExpressServerAddress).
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: bootstrap-accelerate
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 16
+  bootstrapAccelerateStrategy:
+    provider: ModelExpress
+    roles:
+      - name: prefill
+        initialSeedReplicas: 2
+    modelExpress:
+      engineContainers: ["vllm"]
+      readyURL: http://127.0.0.1:8000/health
+  template:
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+              - name: vllm
+                image: vllm/vllm-openai:latest
+                args:
+                  - --model
+                  - /models/deepseek-v4
+                  - --load-format
+                  - modelexpress
+                  - --tensor-parallel-size
+                  - "8"
+                ports:
+                  - containerPort: 8000
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                resources:
+                  limits:
+                    nvidia.com/gpu: "8"

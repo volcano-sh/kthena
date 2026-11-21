@@ -26,4 +26,8 @@ type Config struct {
 	KubeAPIBurst                 int
 	DebugPort                    int
 	AutoscalingSyncPeriodSeconds int
+	// ModelExpressServerAddress is the gRPC host:port of the ModelExpress server
+	// injected as MX_SERVER_ADDRESS into engine containers of ModelServings that
+	// enable bootstrapAccelerateStrategy. Empty leaves the variable unset.
+	ModelExpressServerAddress string
 }
