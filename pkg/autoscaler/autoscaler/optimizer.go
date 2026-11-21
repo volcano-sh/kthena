@@ -168,6 +168,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 	// external metric so that the correct aggregation can be applied afterwards.
 	externalSamples := make(map[string][]backendExternalSample)
 	instancesCountSum := int32(0)
+	servingGroups := make(map[string]servingGroupCount)
 	// Update all model serving instances' metrics
 	for _, param := range optimizer.Meta.Config.Params {
 		targetKey := HeterogeneousTargetKey(param.Target.TargetRef, autoscalePolicy.Namespace)
@@ -179,7 +180,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 
 		backendReplicas := currentInstancesCounts[targetKey]
 		instancesCountSum += backendReplicas
-		currentUnreadyInstancesCountByMetric, currentReadyInstancesMetrics, currentExternalMetrics, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
+		currentUnreadyInstancesCountByMetric, currentReadyInstancesMetrics, currentExternalMetrics, currentServingGroups, err := collector.UpdateMetrics(ctx, podLister, param.Target.MetricSources)
 		if err != nil {
 			klog.Warningf("update metrics error: %v", err)
 			continue
@@ -189,6 +190,12 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		}
 		for metricName, metrics := range currentReadyInstancesMetrics {
 			readyInstancesMetrics[metricName] = append(readyInstancesMetrics[metricName], metrics...)
+		}
+		for metricName, count := range currentServingGroups {
+			total := servingGroups[metricName]
+			total.ready += count.ready
+			total.all += count.all
+			servingGroups[metricName] = total
 		}
 		for metricName, metricValue := range currentExternalMetrics {
 			externalSamples[metricName] = append(externalSamples[metricName], backendExternalSample{
@@ -215,6 +222,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 		UnreadyInstancesCountByMetric: unreadyInstancesCountByMetric,
 		ReadyInstancesMetrics:         readyInstancesMetrics,
 		ExternalMetrics:               externalMetrics,
+		ReplicasByMetric:              servingGroupReplicaCounts(servingGroups),
 	}
 	recommendedInstances, skip := instancesAlgorithm.GetRecommendedInstances()
 	if skip {
