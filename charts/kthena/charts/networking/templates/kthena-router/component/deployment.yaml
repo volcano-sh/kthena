@@ -8,6 +8,10 @@ metadata:
     {{- include "kthena.labels" . | nindent 4 }}
 spec:
   replicas: {{.Values.kthenaRouter.replicas}}
+  {{- with .Values.kthenaRouter.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/component: kthena-router
@@ -136,6 +140,16 @@ spec:
 
             - name: DRAIN_TIMEOUT
               value: {{ .Values.kthenaRouter.drainTimeout | quote }}
+            {{- with .Values.kthenaRouter.batch }}
+            {{- if .enabled }}
+            - name: BATCH_ENABLED
+              value: "true"
+            - name: BATCH_STORAGE_PATH
+              value: {{ .storage.mountPath | quote }}
+            - name: BATCH_MAX_FILE_BYTES
+              value: {{ int64 .limits.maxFileBytes | quote }}
+            {{- end }}
+            {{- end }}
           resources: {{- toYaml .Values.kthenaRouter.resource | nindent 12 }}
           livenessProbe:
             httpGet:
@@ -168,6 +182,12 @@ spec:
           - name: webhook-certs
             mountPath: /etc/tls
             readOnly: true
+          {{- end }}
+          {{- with .Values.kthenaRouter.batch }}
+          {{- if .enabled }}
+          - name: batch-storage
+            mountPath: {{ .storage.mountPath }}
+          {{- end }}
           {{- end }}
         {{- with .Values.kthenaRouter.tokenizerService }}
         {{- if and .enabled (eq .mode "sidecar") }}
@@ -220,7 +240,21 @@ spec:
             secretName: {{ .Values.kthenaRouter.webhook.tls.secretName }}
             optional: true
         {{- end }}
+        {{- with .Values.kthenaRouter.batch }}
+        {{- if .enabled }}
+        - name: batch-storage
+          persistentVolumeClaim:
+            claimName: {{ required "kthenaRouter.batch.storage.claimName is required when batch is enabled" .storage.claimName }}
+        {{- end }}
+        {{- end }}
       serviceAccountName: kthena-router
+      {{- with .Values.kthenaRouter.batch }}
+      {{- if and .enabled .storage.fsGroup }}
+      securityContext:
+        fsGroup: {{ .storage.fsGroup }}
+        fsGroupChangePolicy: OnRootMismatch
+      {{- end }}
+      {{- end }}
       terminationGracePeriodSeconds: {{ .Values.kthenaRouter.terminationGracePeriodSeconds }}
       {{- with .Values.kthenaRouter.tolerations }}
       tolerations:
