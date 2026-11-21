@@ -96,7 +96,13 @@ func (s *RedisStore) CreateFile(ctx context.Context, file *File) error {
 	file.IndexedAt = s.indexTime(file.CreatedAt)
 	keys := []string{s.fileKey(file.ID), s.fileIndexKey(file.Tenant)}
 	args := append([]any{indexMember(file)}, file.toHash()...)
-	return createFileScript.Run(ctx, s.client, keys, args...).Err()
+	err := createFileScript.Run(ctx, s.client, keys, args...).Err()
+	// An error reply means no record was stored; a missing reply leaves the write uncertain.
+	var reply redis.Error
+	if errors.As(err, &reply) {
+		return fmt.Errorf("%w: %w", ErrRefused, err)
+	}
+	return err
 }
 
 // GetFile returns one file record.

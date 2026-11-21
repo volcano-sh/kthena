@@ -230,26 +230,30 @@ func (s *Service) uploadFile(c *gin.Context) {
 	c.JSON(http.StatusOK, fileObject(file))
 }
 
-// recordFile stores the record; after a failure the bytes go only when a lookup shows no record points at them.
+// recordFile stores the record; the bytes go only when no record can exist: the client left or the store refused.
 func (s *Service) recordFile(ctx context.Context, file *File) error {
+	detached := context.WithoutCancel(ctx)
+	// A client that already left gets no record at all, so its bytes can go.
+	if err := ctx.Err(); err != nil {
+		_ = s.files.Remove(detached, file.Tenant, file.ID)
+		return err
+	}
 	err := s.store.CreateFile(ctx, file)
 	if err == nil {
 		return nil
 	}
-	detached := context.WithoutCancel(ctx)
-	settle, cancel := context.WithTimeout(detached, settleTimeout)
-	defer cancel()
-	_, lookupErr := s.store.GetFile(settle, file.ID)
-	switch {
-	case lookupErr == nil:
-		// The record is there, so only the reply to the write was lost.
-		return nil
-	case errors.Is(lookupErr, ErrNotFound):
+	if errors.Is(err, ErrRefused) {
 		_ = s.files.Remove(detached, file.Tenant, file.ID)
 		return err
-	default:
-		return fmt.Errorf("%w; the record may exist, so the bytes of %s are kept", err, file.ID)
 	}
+	settle, cancel := context.WithTimeout(detached, settleTimeout)
+	defer cancel()
+	if _, lookupErr := s.store.GetFile(settle, file.ID); lookupErr == nil {
+		// The record is there, so only the reply to the write was lost.
+		return nil
+	}
+	// A write without a reply may still land after the lookup, so its bytes are kept.
+	return fmt.Errorf("%w; the record may still be written, so the bytes of %s are kept", err, file.ID)
 }
 
 // checkUpload validates the form and returns how long the file lives.

@@ -808,16 +808,20 @@ func TestUploadRejectsAFormThatWasCutOff(t *testing.T) {
 	}
 }
 
-// brokenStore fails every record write, stored or not, and can go silent after it.
+// brokenStore fails every record write, stored or not, and can go silent after it or refuse it outright.
 type brokenStore struct {
 	Store
 	stores  bool
 	answers bool
+	refuses bool
 	wrote   bool
 }
 
 func (s *brokenStore) CreateFile(ctx context.Context, file *File) error {
 	s.wrote = true
+	if s.refuses {
+		return fmt.Errorf("%w: OOM command not allowed", ErrRefused)
+	}
 	if s.stores {
 		if err := s.Store.CreateFile(ctx, file); err != nil {
 			return err
@@ -838,17 +842,19 @@ func TestUploadWhenTheStoreFailsToAnswer(t *testing.T) {
 		name    string
 		stores  bool
 		answers bool
+		refuses bool
 		status  int
 		kept    int
 	}{
 		{name: "the record was stored and only the reply was lost", stores: true, answers: true, status: http.StatusOK, kept: 1},
-		{name: "the record was not stored", answers: true, status: http.StatusServiceUnavailable, kept: 0},
+		{name: "a write without a reply may still land after the lookup, so the bytes stay", answers: true, status: http.StatusServiceUnavailable, kept: 1},
 		{name: "the store went silent, so the bytes stay", stores: true, status: http.StatusServiceUnavailable, kept: 1},
+		{name: "the store refused the write, so the bytes go", refuses: true, answers: true, status: http.StatusServiceUnavailable, kept: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			api := newTestAPI(t)
-			api.service.store = &brokenStore{Store: api.store, stores: tt.stores, answers: tt.answers}
+			api.service.store = &brokenStore{Store: api.store, stores: tt.stores, answers: tt.answers, refuses: tt.refuses}
 			rec := api.call(t, "alice", uploadRequest(t, "line\n", true, map[string]string{"purpose": PurposeBatch}))
 			assert.Equal(t, tt.status, rec.Code, rec.Body.String())
 			assert.Len(t, storedFiles(t, api.root), tt.kept, "bytes go only when no record can point at them")

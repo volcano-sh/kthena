@@ -18,7 +18,9 @@ package batch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -242,6 +244,50 @@ func TestStoreErrorsAreNotNotFound(t *testing.T) {
 	_, err := store.GetFile(context.Background(), "file-1")
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrNotFound, "Redis being down must not look like a missing file")
+}
+
+func TestCreateFileTellsARefusalFromNoAnswer(t *testing.T) {
+	file := func() *File { return &File{ID: "file-1", Tenant: "alice"} }
+	t.Run("an error reply means nothing was written", func(t *testing.T) {
+		mini, store := newTestStore(t)
+		mini.SetError("OOM command not allowed when used memory > 'maxmemory'")
+		err := store.CreateFile(context.Background(), file())
+		assert.ErrorIs(t, err, ErrRefused)
+		var reply redis.Error
+		assert.True(t, errors.As(err, &reply), "the Redis error stays in the chain: %v", err)
+	})
+	t.Run("a script that fails part way leaves no record", func(t *testing.T) {
+		mini, store := newTestStore(t)
+		require.NoError(t, mini.Set(store.fileIndexKey("alice"), "not a sorted set"))
+		assert.ErrorIs(t, store.CreateFile(context.Background(), file()), ErrRefused)
+		_, err := store.GetFile(context.Background(), "file-1")
+		assert.ErrorIs(t, err, ErrNotFound, "a refused write must not leave a record pointing at bytes about to be removed")
+	})
+	t.Run("no reply means the write may still land", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		accepted := make(chan net.Conn, 8)
+		go func() {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				accepted <- conn
+			}
+		}()
+		t.Cleanup(func() {
+			_ = listener.Close()
+			for len(accepted) > 0 {
+				_ = (<-accepted).Close()
+			}
+		})
+		client := redis.NewClient(&redis.Options{Addr: listener.Addr().String(), ReadTimeout: 100 * time.Millisecond, MaxRetries: -1})
+		t.Cleanup(func() { _ = client.Close() })
+		err = NewRedisStore(client, "").CreateFile(context.Background(), file())
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrRefused)
+	})
 }
 
 func TestListingKeepsUploadOrderAcrossASecondBoundary(t *testing.T) {
