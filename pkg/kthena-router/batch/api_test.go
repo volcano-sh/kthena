@@ -33,6 +33,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -481,10 +482,23 @@ func TestTwoIssuersWithOneSubjectAreTwoTenants(t *testing.T) {
 	assert.NotEqual(t, tenantID("a", "bc"), tenantID("ab", "c"), "the separator keeps issuer and subject apart")
 }
 
+// countedCreates counts how often the API asks the volume to store a file.
+type countedCreates struct {
+	FileStore
+	creates *atomic.Int32
+}
+
+func (v countedCreates) Create(ctx context.Context, tenant, id string, r io.Reader, limit int64) (int64, error) {
+	v.creates.Add(1)
+	return v.FileStore.Create(ctx, tenant, id, r, limit)
+}
+
 func TestStoreDownIsServiceUnavailableNotNotFound(t *testing.T) {
 	api := newTestAPI(t)
 	id := mustUpload(t, api, "alice", "line\n")
 	api.mini.Close()
+	creates := &atomic.Int32{}
+	api.service.files = countedCreates{FileStore: api.files, creates: creates}
 
 	tests := []struct {
 		name string
@@ -504,6 +518,7 @@ func TestStoreDownIsServiceUnavailableNotNotFound(t *testing.T) {
 		})
 	}
 	assert.Len(t, storedFiles(t, api.root), 1, "an upload whose record cannot be written leaves no bytes behind")
+	assert.Equal(t, int32(0), creates.Load(), "the upload is refused before any byte reaches the volume")
 }
 
 func TestUploadRules(t *testing.T) {

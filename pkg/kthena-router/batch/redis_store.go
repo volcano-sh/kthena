@@ -21,6 +21,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +55,7 @@ func mustLoadScript(name string) *redis.Script {
 // RedisStore is the Redis implementation of Store.
 type RedisStore struct {
 	client *redis.Client
-	// once sends a record write a single time, so its error reply proves that nothing was stored.
+	// once sends a record write a single time, so a refusal from Redis proves that no record was stored.
 	once   *redis.Client
 	prefix string
 	now    func() time.Time
@@ -125,12 +126,28 @@ func (s *RedisStore) CreateFile(ctx context.Context, file *File) error {
 	keys := []string{s.fileKey(file.ID), s.fileIndexKey(file.Tenant)}
 	args := append([]any{indexMember(file)}, file.toHash()...)
 	err := createFileScript.Run(ctx, s.once, keys, args...).Err()
-	// An error reply means no record was stored; a missing reply leaves the write uncertain.
-	var reply redis.Error
-	if errors.As(err, &reply) {
+	if refused(err) {
 		return fmt.Errorf("%w: %w", ErrRefused, err)
 	}
 	return err
+}
+
+// refusedReplies begin the errors Redis gives before it runs a command; a proxy can answer ERR after passing a write on.
+var refusedReplies = []string{"OOM ", "READONLY ", "LOADING ", "BUSY ", "MISCONF ", "NOAUTH ", "NOPERM ", "WRONGTYPE ", "MASTERDOWN ", "CLUSTERDOWN ", "TRYAGAIN "}
+
+// refused reports whether a write sent at most once surely stored no record: Redis turned it down, or it never left.
+func refused(err error) bool {
+	var reply redis.Error
+	if errors.As(err, &reply) {
+		for _, prefix := range refusedReplies {
+			if strings.HasPrefix(reply.Error(), prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	var dial *net.OpError
+	return errors.Is(err, redis.ErrPoolTimeout) || errors.Is(err, redis.ErrClosed) || (errors.As(err, &dial) && dial.Op == "dial")
 }
 
 // GetFile returns one file record.

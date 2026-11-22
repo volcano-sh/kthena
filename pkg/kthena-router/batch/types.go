@@ -25,7 +25,7 @@ const recordVersion = "1"
 // ErrNotFound means the file or its record does not exist.
 var ErrNotFound = errors.New("batch: not found")
 
-// ErrRefused means the store answered a write with an error, so nothing was written.
+// ErrRefused means a write surely stored nothing: the store turned it down, or it never left this pod.
 var ErrRefused = errors.New("batch: the store refused the write")
 
 // File purposes and statuses from the OpenAI files API.

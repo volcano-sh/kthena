@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -262,9 +263,26 @@ func TestCreateFileTellsARefusalFromNoAnswer(t *testing.T) {
 	t.Run("a script that fails part way leaves no record", func(t *testing.T) {
 		mini, store := newTestStore(t)
 		require.NoError(t, mini.Set(store.fileIndexKey("alice"), "not a sorted set"))
-		assert.ErrorIs(t, store.CreateFile(context.Background(), file()), ErrRefused)
+		// miniredis words this error unlike Redis, so how it is classified is checked in TestRefusedIsOnlySureRefusals.
+		require.Error(t, store.CreateFile(context.Background(), file()))
 		_, err := store.GetFile(context.Background(), "file-1")
 		assert.ErrorIs(t, err, ErrNotFound, "a refused write must not leave a record pointing at bytes about to be removed")
+	})
+	t.Run("an error a proxy can give after passing the write on is no proof", func(t *testing.T) {
+		mini, store := newTestStore(t)
+		mini.SetError("ERR upstream failure")
+		err := store.CreateFile(context.Background(), file())
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrRefused)
+	})
+	t.Run("a write that could not even connect was never sent", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		addr := listener.Addr().String()
+		require.NoError(t, listener.Close())
+		client := redis.NewClient(&redis.Options{Addr: addr})
+		t.Cleanup(func() { _ = client.Close() })
+		assert.ErrorIs(t, NewRedisStore(client, "").CreateFile(context.Background(), file()), ErrRefused)
 	})
 	t.Run("no reply means the write may still land", func(t *testing.T) {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -315,6 +333,37 @@ func readCommand(r *bufio.Reader) ([]string, error) {
 		parts = append(parts, strings.TrimRight(value, "\r\n"))
 	}
 	return parts, nil
+}
+
+// replyError is an error reply as go-redis reports one.
+type replyError string
+
+func (e replyError) Error() string { return string(e) }
+func (replyError) RedisError()     {}
+
+func TestRefusedIsOnlySureRefusals(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		refused bool
+	}{
+		{name: "out of memory", err: replyError("OOM command not allowed when used memory > 'maxmemory'."), refused: true},
+		{name: "a replica after a failover", err: replyError("READONLY You can't write against a read only replica."), refused: true},
+		// Redis 7.4's own wording when the script fails at its first write; only the first word decides.
+		{name: "wrong type inside the script", err: replyError("WRONGTYPE Operation against a key holding the wrong kind of value script: 7fd656b400d55a95b52aca3caef6d8cc7e116789, on @user_script:7."), refused: true},
+		{name: "a proxy timing out after passing the write on", err: replyError("ERR upstream failure"), refused: false},
+		{name: "a generic script error", err: replyError("ERR Error running script"), refused: false},
+		{name: "no reply in time", err: &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}, refused: false},
+		{name: "could not connect", err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}, refused: true},
+		{name: "no free connection", err: redis.ErrPoolTimeout, refused: true},
+		{name: "client closed", err: redis.ErrClosed, refused: true},
+		{name: "the request was cancelled", err: context.Canceled, refused: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.refused, refused(tt.err))
+		})
+	}
 }
 
 // The write-once client keeps every timeout the caller chose, including the special "no timeout" values.
