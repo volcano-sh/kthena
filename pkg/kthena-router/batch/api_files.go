@@ -169,8 +169,9 @@ func (s *Service) uploadFile(c *gin.Context) {
 	}
 	limited := http.MaxBytesReader(c.Writer, c.Request.Body, s.config.MaxFileBytes+multipartSlack)
 	// The guard goes on a copy: net/http before Go 1.27 half-closes cleanly only if the request keeps its own body.
+	guard := &stallGuard{ReadCloser: limited, rc: http.NewResponseController(c.Writer), idle: s.uploadIdle}
 	guarded := c.Request.WithContext(ctx)
-	guarded.Body = &stallGuard{ReadCloser: limited, rc: http.NewResponseController(c.Writer), idle: s.uploadIdle}
+	guarded.Body = guard
 	reader, err := guarded.MultipartReader()
 	if err != nil {
 		fail(c, http.StatusBadRequest, errInvalidRequest, "file", "expected a multipart upload")
@@ -220,8 +221,8 @@ func (s *Service) uploadFile(c *gin.Context) {
 			form.seconds, err = readFormValue(part)
 		}
 		if err != nil {
-			// A client that left cancels the request, and its failed read is not the volume's failure.
-			s.uploadFailed(reject, err, storing && !errors.Is(ctx.Err(), context.Canceled))
+			// A body that failed to arrive, or a client that left, is not the volume's failure.
+			s.uploadFailed(reject, err, storing && !guard.failed && !errors.Is(ctx.Err(), context.Canceled))
 			return
 		}
 	}
@@ -324,6 +325,8 @@ type stallGuard struct {
 	rc   *http.ResponseController
 	idle time.Duration
 	done bool
+	// failed reports that reading the body itself failed, which is the client's side and never the volume's.
+	failed bool
 }
 
 func (g *stallGuard) Read(p []byte) (int, error) {
@@ -337,6 +340,7 @@ func (g *stallGuard) Read(p []byte) (int, error) {
 	// Over HTTP/2 the deadline is a timer, so it is stopped while the server works between reads.
 	_ = g.rc.SetReadDeadline(time.Time{})
 	g.done = err != nil
+	g.failed = err != nil && err != io.EOF
 	return n, err
 }
 

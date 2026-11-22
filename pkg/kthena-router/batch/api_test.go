@@ -1018,6 +1018,20 @@ func TestAnUploadOverHTTP2IsNotCutOffWhileTheVolumeIsSlow(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode, string(answer))
 }
 
+// A body that breaks the HTTP framing is the client's fault, so it is a 400 and not blamed on the volume.
+func TestABrokenChunkedBodyIsTheClientsFault(t *testing.T) {
+	api := newTestAPI(t)
+	conn := dialService(t, api)
+	contentType, form := uploadForm(t, "line\n")
+	// The form is cut inside the file part and followed by a chunk size that is not a number.
+	cut := bytes.Index(form, []byte("line\n")) + 2
+	_, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: test\r\nContent-Type: %s\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\nzz\r\n", filesPath, contentType, cut, form[:cut])
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusBadRequest, readStatus(t, conn, 3*time.Second))
+	assert.Empty(t, storedFiles(t, api.root))
+}
+
 // A refused upload with its body unread must end with a half-close, so a client still sending reads the answer, not a reset.
 func TestARefusedUploadClosesWithoutAReset(t *testing.T) {
 	api := newTestAPI(t)
