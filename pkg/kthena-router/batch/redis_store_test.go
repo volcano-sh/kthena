@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -203,6 +204,24 @@ func TestListFiles(t *testing.T) {
 
 	_, _, err := store.ListFiles(ctx, FileQuery{Tenant: "alice", Limit: 2, After: "file-unknown"})
 	assert.ErrorIs(t, err, ErrNotFound, "an unknown cursor is an error, not an empty page")
+}
+
+// A limit of any size is one page; counting one more than it must not wrap around.
+func TestListFilesTakesAnyLimit(t *testing.T) {
+	_, store := newTestStore(t)
+	ctx := context.Background()
+	files, more, err := store.ListFiles(ctx, FileQuery{Tenant: "nobody", Limit: math.MaxInt})
+	require.NoError(t, err)
+	assert.Empty(t, files)
+	assert.False(t, more)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, store.CreateFile(ctx, &File{ID: fmt.Sprintf("file-%d", i), Tenant: "alice", Purpose: PurposeBatch, CreatedAt: int64(1000 + i)}))
+	}
+	files, more, err = store.ListFiles(ctx, FileQuery{Tenant: "alice", Limit: math.MaxInt})
+	require.NoError(t, err)
+	assert.Len(t, files, 3)
+	assert.False(t, more)
 }
 
 func TestListFilesFillsThePagePastFilteredFiles(t *testing.T) {

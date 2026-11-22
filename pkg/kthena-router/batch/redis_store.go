@@ -179,7 +179,7 @@ func (s *RedisStore) DeleteFile(ctx context.Context, id string) (bool, error) {
 	return res == "REMOVABLE", nil
 }
 
-// ListFiles returns one full page, reading on past deleted, expired and filtered-out files.
+// ListFiles returns one full page of at most maxPageSize files, reading on past deleted, expired and filtered-out files.
 func (s *RedisStore) ListFiles(ctx context.Context, query FileQuery) ([]*File, bool, error) {
 	index := s.fileIndexKey(query.Tenant)
 	after := ""
@@ -193,7 +193,7 @@ func (s *RedisStore) ListFiles(ctx context.Context, query FileQuery) ([]*File, b
 		}
 		after = indexMember(cursor)
 	}
-	limit := max(query.Limit, 1)
+	limit := min(max(query.Limit, 1), maxPageSize)
 	files := make([]*File, 0, min(limit, listScan))
 	// One more than the page tells whether more files follow.
 	want := limit + 1
