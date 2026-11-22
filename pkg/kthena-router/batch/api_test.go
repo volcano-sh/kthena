@@ -1337,6 +1337,34 @@ func TestUploadRefusesABodyOverTheCap(t *testing.T) {
 	assert.Empty(t, storedFiles(t, api.root), "the file stored before the cap was hit is removed")
 }
 
+// A limit too large to read as a number is a large page, like any limit over the maximum.
+func TestAListLimitTooLargeForAnIntIsTheLargestPage(t *testing.T) {
+	api := newTestAPI(t)
+	mustUpload(t, api, "alice", "line\n")
+	rec := api.call(t, "alice", httptest.NewRequest(http.MethodGet, filesPath+"?limit=99999999999999999999", nil))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Len(t, decode(t, rec)["data"], 1)
+	negative := api.call(t, "alice", httptest.NewRequest(http.MethodGet, filesPath+"?limit=-99999999999999999999", nil))
+	assert.Equal(t, http.StatusBadRequest, negative.Code, "a negative limit stays refused, however large")
+}
+
+// Uploads only take purpose batch, so a listing for any other purpose must not walk a tenant's whole index.
+func TestListingAPurposeThatIsNeverStoredReadsNothing(t *testing.T) {
+	api := newTestAPI(t)
+	for i := 0; i < 3; i++ {
+		mustUpload(t, api, "alice", "line\n")
+	}
+	trips := &roundTrips{}
+	api.store.client.AddHook(trips)
+
+	for _, purpose := range []string{"assistants", PurposeBatchOutput} {
+		rec := api.call(t, "alice", httptest.NewRequest(http.MethodGet, filesPath+"?purpose="+purpose, nil))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Empty(t, decode(t, rec)["data"], purpose)
+		assert.Equal(t, int64(0), trips.n.Load(), "nothing to read for %s, which no file has yet", purpose)
+	}
+}
+
 func TestListFilesPageSizes(t *testing.T) {
 	api := newTestAPI(t)
 	addFiles(t, api.store, tenantID("", "alice"), PurposeBatch, maxPageSize+5)

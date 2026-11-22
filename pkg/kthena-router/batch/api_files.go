@@ -446,6 +446,10 @@ func (s *Service) listFiles(c *gin.Context) {
 	query := FileQuery{Tenant: tenantOf(c), Purpose: c.Query("purpose"), After: c.Query("after"), Limit: defaultPageSize, Now: s.now().Unix()}
 	if raw := c.Query("limit"); raw != "" {
 		limit, err := strconv.Atoi(raw)
+		// A positive number too large for an int is just a large page.
+		if errors.Is(err, strconv.ErrRange) && !strings.HasPrefix(raw, "-") {
+			limit, err = maxPageSize, nil
+		}
 		if err != nil || limit < 1 {
 			fail(c, http.StatusBadRequest, errInvalidRequest, "limit", "limit must be a positive number")
 			return
@@ -460,14 +464,20 @@ func (s *Service) listFiles(c *gin.Context) {
 		fail(c, http.StatusBadRequest, errInvalidRequest, "order", "order must be asc or desc")
 		return
 	}
-	files, more, err := s.store.ListFiles(c.Request.Context(), query)
-	if errors.Is(err, ErrNotFound) {
-		fail(c, http.StatusBadRequest, errInvalidRequest, "after", "unknown cursor")
-		return
-	}
-	if err != nil {
-		unavailable(c, "cannot list files right now", err)
-		return
+	var files []*File
+	var more bool
+	// Uploads only take purpose batch, so any other purpose lists nothing without reading the store.
+	if query.Purpose == "" || query.Purpose == PurposeBatch {
+		var err error
+		files, more, err = s.store.ListFiles(c.Request.Context(), query)
+		if errors.Is(err, ErrNotFound) {
+			fail(c, http.StatusBadRequest, errInvalidRequest, "after", "unknown cursor")
+			return
+		}
+		if err != nil {
+			unavailable(c, "cannot list files right now", err)
+			return
+		}
 	}
 	data := make([]gin.H, 0, len(files))
 	for _, file := range files {
