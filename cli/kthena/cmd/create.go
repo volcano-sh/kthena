@@ -98,7 +98,7 @@ func init() {
 
 func runCreateManifest(cmd *cobra.Command, args []string) error {
 	// Load template values
-	values, err := loadTemplateValues()
+	values, err := loadTemplateValues(cmd.Flags().Changed("namespace"))
 	if err != nil {
 		return fmt.Errorf("failed to load template values: %v", err)
 	}
@@ -130,7 +130,10 @@ func runCreateManifest(cmd *cobra.Command, args []string) error {
 	return applyResources(renderedYAML)
 }
 
-func loadTemplateValues() (map[string]interface{}, error) {
+// loadTemplateValues merges the values file, --set and --name. An explicit
+// -n/--namespace (namespaceSet) overrides both, like --name does; otherwise the
+// flag default is used only when no namespace was given.
+func loadTemplateValues(namespaceSet bool) (map[string]interface{}, error) {
 	values := make(map[string]interface{})
 
 	// Load from values file if specified
@@ -155,8 +158,7 @@ func loadTemplateValues() (map[string]interface{}, error) {
 		values["name"] = name
 	}
 
-	// Set default namespace if not specified
-	if values["namespace"] == nil {
+	if namespaceSet || values["namespace"] == nil {
 		values["namespace"] = namespace
 	}
 
