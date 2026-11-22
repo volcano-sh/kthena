@@ -202,7 +202,10 @@ func (s *FSStore) Remove(_ context.Context, tenant, id string) error {
 		}
 		return err
 	}
-	return syncDir(filepath.Dir(path))
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("batch: %s is removed, but syncing its directory failed: %w", path, err)
+	}
+	return nil
 }
 
 // Probe writes, syncs, renames and removes a file of its own, so replicas never collide.

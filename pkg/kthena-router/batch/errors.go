@@ -17,6 +17,8 @@ limitations under the License.
 package batch
 
 import (
+	"context"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -44,6 +46,11 @@ func fail(c *gin.Context, status int, kind, param, message string) {
 
 // unavailable answers a failure of the store or the volume, which is never a 404, and logs its cause.
 func unavailable(c *gin.Context, message string, cause error) {
-	klog.Errorf("batch: %s: %v", message, cause)
+	// A client that left is no outage, so it stays out of the error log.
+	if errors.Is(cause, context.Canceled) {
+		klog.V(2).Infof("batch: %s: %v", message, cause)
+	} else {
+		klog.Errorf("batch: %s: %v", message, cause)
+	}
 	fail(c, http.StatusServiceUnavailable, errAPI, "", message)
 }

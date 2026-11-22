@@ -186,7 +186,7 @@ func (s *Service) uploadFile(c *gin.Context) {
 	// reject removes the bytes already written and answers the error.
 	reject := func(status int, kind, param, message string) {
 		if form.gotFile {
-			_ = s.files.Remove(cleanup, tenant, id)
+			s.discard(cleanup, tenant, id)
 		}
 		fail(c, status, kind, param, message)
 	}
@@ -255,7 +255,7 @@ func (s *Service) recordFile(ctx context.Context, file *File) error {
 	detached := context.WithoutCancel(ctx)
 	// A client that already left gets no record at all, so its bytes can go.
 	if err := ctx.Err(); err != nil {
-		_ = s.files.Remove(detached, file.Tenant, file.ID)
+		s.discard(detached, file.Tenant, file.ID)
 		return err
 	}
 	err := s.store.CreateFile(ctx, file)
@@ -263,7 +263,7 @@ func (s *Service) recordFile(ctx context.Context, file *File) error {
 		return nil
 	}
 	if errors.Is(err, ErrRefused) {
-		_ = s.files.Remove(detached, file.Tenant, file.ID)
+		s.discard(detached, file.Tenant, file.ID)
 		return err
 	}
 	settle, cancel := context.WithTimeout(detached, settleTimeout)
@@ -433,13 +433,17 @@ func (s *Service) deleteFile(c *gin.Context, id string) {
 		return
 	}
 	if removable {
-		// The record is already deleted, so the bytes go even if the client left; leftovers are only logged.
-		err := s.files.Remove(context.WithoutCancel(c.Request.Context()), file.Tenant, file.ID)
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			klog.Errorf("batch: bytes of deleted file %s were not removed: %v", file.ID, err)
-		}
+		// The record is already deleted, so the bytes go even if the client left.
+		s.discard(context.WithoutCancel(c.Request.Context()), file.Tenant, file.ID)
 	}
 	c.JSON(http.StatusOK, gin.H{"id": file.ID, "object": "file", "deleted": true})
+}
+
+// discard removes bytes that no record points at any more; a failure leaves them for the cleanup and is logged.
+func (s *Service) discard(ctx context.Context, tenant, id string) {
+	if err := s.files.Remove(ctx, tenant, id); err != nil && !errors.Is(err, ErrNotFound) {
+		klog.Errorf("batch: removing the bytes of %s: %v", id, err)
+	}
 }
 
 func (s *Service) listFiles(c *gin.Context) {
