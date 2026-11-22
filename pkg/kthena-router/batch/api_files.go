@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,8 @@ const (
 	maxPageSize     = 100
 	// settleTimeout bounds the lookup that settles an upload whose record write failed.
 	settleTimeout = 5 * time.Second
+	// defaultUploadIdle is how long an upload may send nothing before it is cut off.
+	defaultUploadIdle = time.Minute
 )
 
 // errFieldTooLong means a form field other than the file went over maxFormValue.
@@ -68,6 +71,7 @@ type Service struct {
 	readyWait    time.Duration
 	retryEvery   time.Duration
 	recheckEvery time.Duration
+	uploadIdle   time.Duration
 }
 
 // NewService builds the API on a record store and a file store.
@@ -75,7 +79,7 @@ func NewService(store Store, files FileStore, config Config) *Service {
 	if config.MaxFileBytes <= 0 {
 		config.MaxFileBytes = defaultMaxBytes
 	}
-	s := &Service{store: store, files: files, config: config, now: time.Now, newID: newID, readyWait: defaultReadyWait, retryEvery: defaultRetryEvery, recheckEvery: defaultRecheckEvery}
+	s := &Service{store: store, files: files, config: config, now: time.Now, newID: newID, readyWait: defaultReadyWait, retryEvery: defaultRetryEvery, recheckEvery: defaultRecheckEvery, uploadIdle: defaultUploadIdle}
 	s.gate = &readiness{check: s.checkStorage}
 	return s
 }
@@ -159,8 +163,11 @@ func (s *Service) uploadFile(c *gin.Context) {
 		fail(c, http.StatusRequestEntityTooLarge, errInvalidRequest, "file", s.tooLarge())
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, s.config.MaxFileBytes+multipartSlack)
-	reader, err := c.Request.MultipartReader()
+	limited := http.MaxBytesReader(c.Writer, c.Request.Body, s.config.MaxFileBytes+multipartSlack)
+	// The guard goes on a copy: net/http before Go 1.27 half-closes cleanly only if the request keeps its own body.
+	guarded := c.Request.WithContext(ctx)
+	guarded.Body = &stallGuard{ReadCloser: limited, rc: http.NewResponseController(c.Writer), idle: s.uploadIdle}
+	reader, err := guarded.MultipartReader()
 	if err != nil {
 		fail(c, http.StatusBadRequest, errInvalidRequest, "file", "expected a multipart upload")
 		return
@@ -289,10 +296,12 @@ func (s *Service) checkUpload(form *upload) (time.Duration, string, string) {
 	return time.Duration(seconds) * time.Second, "", ""
 }
 
-// uploadFailed answers a failed upload: too large is 413, a broken form 400, the volume 503.
+// uploadFailed answers a failed upload: a stalled one is 408, too large 413, a broken form 400, the volume 503.
 func (s *Service) uploadFailed(reject func(int, string, string, string), err error, volume bool) {
 	var tooBig *http.MaxBytesError
 	switch {
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		reject(http.StatusRequestTimeout, errInvalidRequest, "file", "the upload stopped sending data")
 	case errors.Is(err, ErrTooLarge) || errors.As(err, &tooBig):
 		reject(http.StatusRequestEntityTooLarge, errInvalidRequest, "file", s.tooLarge())
 	case errors.Is(err, errFieldTooLong):
@@ -303,6 +312,28 @@ func (s *Service) uploadFailed(reject func(int, string, string, string), err err
 	default:
 		reject(http.StatusBadRequest, errInvalidRequest, "file", "malformed multipart upload")
 	}
+}
+
+// stallGuard sets a read deadline for each read only, so only an upload that sends nothing is cut off.
+type stallGuard struct {
+	io.ReadCloser
+	rc   *http.ResponseController
+	idle time.Duration
+	done bool
+}
+
+func (g *stallGuard) Read(p []byte) (int, error) {
+	// After the body ends the server reads the connection itself and clears the deadline, so it is left alone.
+	if g.done {
+		return g.ReadCloser.Read(p)
+	}
+	// A writer without deadlines, such as a test recorder, simply has none.
+	_ = g.rc.SetReadDeadline(time.Now().Add(g.idle))
+	n, err := g.ReadCloser.Read(p)
+	// Over HTTP/2 the deadline is a timer, so it is stopped while the server works between reads.
+	_ = g.rc.SetReadDeadline(time.Time{})
+	g.done = err != nil
+	return n, err
 }
 
 func (s *Service) tooLarge() string {

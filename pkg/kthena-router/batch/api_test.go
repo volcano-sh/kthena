@@ -773,6 +773,214 @@ func TestRefusedUploadDoesNotWaitForTheRestOfTheBody(t *testing.T) {
 	assert.True(t, resp.Close, "the connection is closed instead of read to the end")
 }
 
+// dialService serves the API on a real HTTP/1.1 server and returns a raw connection to it.
+func dialService(t *testing.T, api *testAPI) net.Conn {
+	t.Helper()
+	engine := gin.New()
+	engine.Any("/v1/*path", func(c *gin.Context) {
+		c.Set(common.UserIdKey, "alice")
+		api.service.Serve(c)
+	})
+	server := httptest.NewServer(engine)
+	t.Cleanup(server.Close)
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// readStatus reads the response on conn and fails the test if none comes within wait.
+func readStatus(t *testing.T, conn net.Conn, wait time.Duration) int {
+	t.Helper()
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(wait)))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err, "the upload must be answered, not held open")
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+// uploadForm is a whole multipart upload of content with purpose batch.
+func uploadForm(t *testing.T, content string) (string, []byte) {
+	t.Helper()
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	require.NoError(t, form.WriteField("purpose", PurposeBatch))
+	part, err := form.CreateFormFile("file", "a.jsonl")
+	require.NoError(t, err)
+	_, err = io.WriteString(part, content)
+	require.NoError(t, err)
+	require.NoError(t, form.Close())
+	return form.FormDataContentType(), body.Bytes()
+}
+
+// A client that starts an upload and then sends nothing must not hold a handler, a file and a connection forever.
+func TestAStalledUploadIsCutOff(t *testing.T) {
+	api := newTestAPI(t)
+	api.service.uploadIdle = 200 * time.Millisecond
+	conn := dialService(t, api)
+	start := "--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.jsonl\"\r\n\r\nline\n"
+	_, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: kthena\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: 100000\r\n\r\n%s", filesPath, start)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusRequestTimeout, readStatus(t, conn, 3*time.Second))
+	assert.Empty(t, storedFiles(t, api.root), "the stalled upload leaves no bytes, not even its temporary file")
+}
+
+// The limit is on silence, not on the whole upload: pauses shorter than it never add up to a cut-off.
+func TestASlowUploadThatKeepsSendingIsNotCutOff(t *testing.T) {
+	api := newTestAPI(t)
+	api.service.uploadIdle = 400 * time.Millisecond
+	conn := dialService(t, api)
+	contentType, body := uploadForm(t, strings.Repeat("line\n", 120))
+	_, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: kthena\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", filesPath, contentType, len(body))
+	require.NoError(t, err)
+	// Eight pieces 100 ms apart take twice the limit, with every pause a quarter of it.
+	for piece := 0; piece < 8; piece++ {
+		from, to := len(body)*piece/8, len(body)*(piece+1)/8
+		_, err = conn.Write(body[from:to])
+		require.NoError(t, err)
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	assert.Equal(t, http.StatusOK, readStatus(t, conn, 3*time.Second))
+}
+
+// slowStore takes its time to store a record, like a Redis under load.
+type slowStore struct {
+	Store
+	delay time.Duration
+}
+
+func (s slowStore) CreateFile(ctx context.Context, file *File) error {
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.Store.CreateFile(ctx, file)
+}
+
+// Once the body has arrived the limit no longer applies, however long the record takes.
+func TestAnUploadThatIsSlowToRecordIsNotCutOff(t *testing.T) {
+	api := newTestAPI(t)
+	api.service.uploadIdle = 200 * time.Millisecond
+	api.service.store = slowStore{Store: api.store, delay: 600 * time.Millisecond}
+	conn := dialService(t, api)
+	contentType, body := uploadForm(t, "line\n")
+	_, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: kthena\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n%s", filesPath, contentType, len(body), body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, readStatus(t, conn, 3*time.Second))
+}
+
+// pausingVolume stops reading after the first chunk for a while, like a volume that hangs during a write.
+type pausingVolume struct {
+	FileStore
+	pause time.Duration
+}
+
+func (v pausingVolume) Create(ctx context.Context, tenant, id string, r io.Reader, limit int64) (int64, error) {
+	return v.FileStore.Create(ctx, tenant, id, &pausingReader{Reader: r, pause: v.pause}, limit)
+}
+
+type pausingReader struct {
+	io.Reader
+	pause  time.Duration
+	paused bool
+}
+
+func (p *pausingReader) Read(b []byte) (int, error) {
+	n, err := p.Reader.Read(b)
+	if !p.paused {
+		p.paused = true
+		time.Sleep(p.pause)
+	}
+	return n, err
+}
+
+// http2Service serves the API over TLS with HTTP/2 on, as any TLS client of the router can negotiate.
+func http2Service(t *testing.T, api *testAPI) *httptest.Server {
+	t.Helper()
+	engine := gin.New()
+	engine.Any("/v1/*path", func(c *gin.Context) {
+		c.Set(common.UserIdKey, "alice")
+		api.service.Serve(c)
+	})
+	server := httptest.NewUnstartedServer(engine)
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return server
+}
+
+// Over HTTP/2 too, an upload that stops sending is cut off and leaves nothing behind.
+func TestAStalledUploadOverHTTP2IsCutOff(t *testing.T) {
+	api := newTestAPI(t)
+	api.service.uploadIdle = 200 * time.Millisecond
+	server := http2Service(t, api)
+	body, sender := io.Pipe()
+	t.Cleanup(func() { _ = sender.Close() })
+	form := multipart.NewWriter(sender)
+	// The start of a form, and then nothing more.
+	go func() {
+		_ = form.WriteField("purpose", PurposeBatch)
+		part, _ := form.CreateFormFile("file", "a.jsonl")
+		_, _ = io.WriteString(part, "line\n")
+	}()
+	req, err := http.NewRequest(http.MethodPost, server.URL+filesPath, body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	client := server.Client()
+	client.Timeout = 5 * time.Second
+
+	resp, err := client.Do(req)
+	require.NoError(t, err, "the stalled upload must be answered")
+	defer resp.Body.Close()
+	require.Equal(t, "HTTP/2.0", resp.Proto)
+	assert.Equal(t, http.StatusRequestTimeout, resp.StatusCode)
+	assert.Empty(t, storedFiles(t, api.root), "the stalled upload leaves no bytes, not even its temporary file")
+}
+
+// Over HTTP/2 the read deadline is a timer, so time the server spends between reads must not count as the client going quiet.
+func TestAnUploadOverHTTP2IsNotCutOffWhileTheVolumeIsSlow(t *testing.T) {
+	api := newTestAPI(t)
+	api.service.config.MaxFileBytes = 8 << 20
+	api.service.uploadIdle = 200 * time.Millisecond
+	api.service.files = pausingVolume{FileStore: api.files, pause: 600 * time.Millisecond}
+	server := http2Service(t, api)
+	// More than the flow-control window, so the client is still sending while the volume pauses.
+	contentType, body := uploadForm(t, strings.Repeat("x", 4<<20))
+
+	resp, err := server.Client().Post(server.URL+filesPath, contentType, bytes.NewReader(body))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, "HTTP/2.0", resp.Proto)
+	answer, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, string(answer))
+}
+
+// A refused upload with its body unread must end with a half-close, so a client still sending reads the answer, not a reset.
+func TestARefusedUploadClosesWithoutAReset(t *testing.T) {
+	api := newTestAPI(t)
+	mustUpload(t, api, "alice", "line\n")
+	api.mini.Close()
+	conn := dialService(t, api)
+	// The early store check refuses the upload with almost all of this body unread.
+	contentType, form := uploadForm(t, strings.Repeat("x", 900<<10))
+	head := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: test\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n", filesPath, contentType, len(form))
+	go func() { _, _ = conn.Write(append([]byte(head), form...)) }()
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, nil)
+	require.NoError(t, err)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	_, err = reader.ReadByte()
+	assert.ErrorIs(t, err, io.EOF, "net/http half-closes a connection whose body it stopped reading")
+}
+
 func TestOnlyARefusedPostClosesTheConnection(t *testing.T) {
 	api := newTestAPI(t)
 	id := mustUpload(t, api, "alice", "line\n")

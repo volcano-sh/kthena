@@ -23,7 +23,7 @@ later closes it again until a check passes.
 
 | File | What it does |
 | --- | --- |
-| `api_files.go` | HTTP handlers for `/v1/files`: upload, list, get, download and delete, and the routing between them. |
+| `api_files.go` | HTTP handlers for `/v1/files`: upload, list, get, download and delete, and the routing between them. An upload that sends nothing for a minute is cut off with 408. |
 | `tenant.go` | Works out who owns a request from the verified token's issuer and subject. A verified token without a subject is refused, since all such tokens would share one owner. Without authentication every caller is `anonymous`. |
 | `errors.go` | Writes errors in the OpenAI error shape. |
 | `types.go` | The file record and the constants for purposes and statuses. |
