@@ -389,3 +389,20 @@ func TestSignedCallersOnlyReachTheirOwnFiles(t *testing.T) {
 	assert.Equal(t, http.StatusOK, kept.Code, "a stranger's delete did not touch the file")
 	assert.Equal(t, "line\n", kept.Body.String())
 }
+
+// Every signed token without a subject would land in one tenant, so such a caller owns no files at all.
+func TestSignedTokenWithoutASubjectIsRefused(t *testing.T) {
+	enableBatch(t)
+	issuer := newTokenIssuer(t)
+	handler := defaultListener(t, newBatchRouter(t, issuer.routerConfig(t)))
+	first := issuer.token(t, "https://issuer.example", "")
+	second := issuer.token(t, "https://issuer.example", "")
+
+	for name, recorder := range map[string]*httptest.ResponseRecorder{
+		"upload": serve(handler, uploadRequest(t, "line\n", first)),
+		"list":   serve(handler, request(http.MethodGet, "/v1/files", second)),
+	} {
+		assert.Equal(t, http.StatusForbidden, recorder.Code, "%s: %s", name, recorder.Body.String())
+		assert.Equal(t, "invalid_request_error", errorType(t, recorder), name)
+	}
+}

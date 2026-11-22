@@ -678,19 +678,20 @@ func TestDeleteSucceedsWhenTheBytesCannotBeRemoved(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestTokenWithoutASubjectIsNotAnonymous(t *testing.T) {
+// All verified tokens without a subject would share one tenant, so they are refused instead.
+func TestTokenWithoutASubjectIsRefused(t *testing.T) {
 	api := newTestAPI(t)
-	rec := api.callAs(t, "https://issuer-a", "", uploadRequest(t, "line\n", true,
-		map[string]string{"purpose": PurposeBatch, "filename": "a.jsonl"}))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	id := decode(t, rec)["id"].(string)
-
-	rec = api.call(t, "", httptest.NewRequest(http.MethodGet, filesPath+"/"+id, nil))
-	assert.Equal(t, http.StatusNotFound, rec.Code, "a caller with no token must not read a file owned by a verified token")
-	rec = api.callAs(t, "https://issuer-b", "", httptest.NewRequest(http.MethodGet, filesPath+"/"+id, nil))
-	assert.Equal(t, http.StatusNotFound, rec.Code, "another issuer must not read it either")
-	rec = api.callAs(t, "https://issuer-a", "", httptest.NewRequest(http.MethodGet, filesPath+"/"+id, nil))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	id := mustUpload(t, api, "alice", "line\n")
+	for name, req := range map[string]*http.Request{
+		"upload": uploadRequest(t, "line\n", true, map[string]string{"purpose": PurposeBatch}),
+		"list":   httptest.NewRequest(http.MethodGet, filesPath, nil),
+		"get":    httptest.NewRequest(http.MethodGet, filesPath+"/"+id, nil),
+	} {
+		rec := api.callAs(t, "https://issuer-a", "", req)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", name, rec.Body.String())
+		assert.Equal(t, "invalid_request_error", errorOf(t, rec)["type"], name)
+	}
+	assert.Len(t, storedFiles(t, api.root), 1, "the refused upload stored nothing")
 }
 
 // serveHanging sends the start of a form and then nothing, like a client that stopped sending.

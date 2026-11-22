@@ -96,6 +96,11 @@ func (s *Service) Handles(_, path string) bool {
 // Serve answers one request that Handles accepted.
 func (s *Service) Serve(c *gin.Context) {
 	method := c.Request.Method
+	// Every verified token without a subject would share one tenant, so such a caller is refused.
+	if !namesOwner(c) {
+		fail(c, http.StatusForbidden, errInvalidRequest, "", "the token has no subject, so it cannot own files")
+		return
+	}
 	if !s.gate.await(c.Request.Context(), s.readyWait) {
 		fail(c, http.StatusServiceUnavailable, errAPI, "", "batch storage is not ready")
 		return

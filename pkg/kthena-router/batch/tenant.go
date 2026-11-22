@@ -30,6 +30,13 @@ import (
 // anonymousTenant is the one tenant every caller shares when authentication is off.
 const anonymousTenant = "anonymous"
 
+// namesOwner reports whether the caller can own files: a verified token without a subject names nobody.
+func namesOwner(c *gin.Context) bool {
+	value, _ := c.Get(common.JWTTokenKey)
+	_, verified := value.(jwt.Token)
+	return !verified || c.GetString(common.UserIdKey) != ""
+}
+
 // tenantOf derives the owner from the verified token; only a caller with no token is anonymous.
 func tenantOf(c *gin.Context) string {
 	subject := c.GetString(common.UserIdKey)
