@@ -1,6 +1,4 @@
--- KEYS: file, index. ARGV: index member, then the record as field and value pairs.
--- Stores a new file and indexes it in one step; a record that already exists is left as it is.
--- The record is written last, so an error reply always means no record was stored.
+-- Indexes ARGV[1] in KEYS[2] and then writes the record KEYS[1] from ARGV[2..], so an error leaves no record; an existing one stays.
 if redis.call('EXISTS', KEYS[1]) == 1 then
   return 0
 end

@@ -1,4 +1,3 @@
--- KEYS: volume. ARGV: the volume ID of the caller.
--- Records the first volume these records belong to, and returns the one recorded.
+-- Records ARGV[1] as the volume of these records in KEYS[1] unless one is there, and returns the recorded one.
 redis.call('SET', KEYS[1], ARGV[1], 'NX')
 return redis.call('GET', KEYS[1])
