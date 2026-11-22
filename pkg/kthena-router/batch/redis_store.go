@@ -54,6 +54,8 @@ func mustLoadScript(name string) *redis.Script {
 // RedisStore is the Redis implementation of Store.
 type RedisStore struct {
 	client *redis.Client
+	// once sends a record write a single time, so its error reply proves that nothing was stored.
+	once   *redis.Client
 	prefix string
 	now    func() time.Time
 }
@@ -65,7 +67,26 @@ func NewRedisStore(client *redis.Client, prefix string) *RedisStore {
 	if prefix == "" {
 		prefix = DefaultKeyPrefix
 	}
-	return &RedisStore{client: client, prefix: prefix, now: time.Now}
+	options := *client.Options()
+	options.MaxRetries = -1
+	// The copied options are normalized already, and NewClient normalizes them again.
+	options.ReadTimeout = unnormalized(options.ReadTimeout)
+	options.WriteTimeout = unnormalized(options.WriteTimeout)
+	return &RedisStore{client: client, once: redis.NewClient(&options), prefix: prefix, now: time.Now}
+}
+
+// unnormalized turns a normalized go-redis timeout back into the value that normalizes to it.
+func unnormalized(timeout time.Duration) time.Duration {
+	switch timeout {
+	case 0:
+		// No timeout was asked for with -1.
+		return -1
+	case -1:
+		// No deadline at all was asked for with -2.
+		return -2
+	default:
+		return timeout
+	}
 }
 
 func (s *RedisStore) fileKey(id string) string          { return s.prefix + "file:" + id }
@@ -103,7 +124,7 @@ func (s *RedisStore) CreateFile(ctx context.Context, file *File) error {
 	file.IndexedAt = s.indexTime(file.CreatedAt)
 	keys := []string{s.fileKey(file.ID), s.fileIndexKey(file.Tenant)}
 	args := append([]any{indexMember(file)}, file.toHash()...)
-	err := createFileScript.Run(ctx, s.client, keys, args...).Err()
+	err := createFileScript.Run(ctx, s.once, keys, args...).Err()
 	// An error reply means no record was stored; a missing reply leaves the write uncertain.
 	var reply redis.Error
 	if errors.As(err, &reply) {

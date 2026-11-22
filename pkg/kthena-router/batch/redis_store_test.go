@@ -17,10 +17,13 @@ limitations under the License.
 package batch
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -290,6 +293,99 @@ func TestCreateFileTellsARefusalFromNoAnswer(t *testing.T) {
 	})
 }
 
+// readCommand reads one RESP array of bulk strings, the form every client command takes.
+func readCommand(r *bufio.Reader) ([]string, error) {
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "*")))
+	if err != nil {
+		return nil, err
+	}
+	parts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		if _, err := r.ReadString('\n'); err != nil {
+			return nil, err
+		}
+		value, err := r.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, strings.TrimRight(value, "\r\n"))
+	}
+	return parts, nil
+}
+
+// The write-once client keeps every timeout the caller chose, including the special "no timeout" values.
+func TestTheWriteOnceClientKeepsTheCallersTimeouts(t *testing.T) {
+	tests := []struct {
+		name          string
+		read, written time.Duration
+	}{
+		{name: "defaults", read: 0, written: 0},
+		{name: "no read timeout", read: -1, written: -1},
+		{name: "no deadlines at all", read: -2, written: -2},
+		{name: "set values", read: 7 * time.Second, written: 9 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", ReadTimeout: tt.read, WriteTimeout: tt.written})
+			t.Cleanup(func() { _ = client.Close() })
+			store := NewRedisStore(client, "")
+			assert.Equal(t, client.Options().ReadTimeout, store.once.Options().ReadTimeout)
+			assert.Equal(t, client.Options().WriteTimeout, store.once.Options().WriteTimeout)
+			assert.Equal(t, 0, store.once.Options().MaxRetries, "the write is never retried")
+		})
+	}
+}
+
+// A retried write can be stored by one attempt and refused by the next, so the record write goes out once.
+func TestCreateFileIsSentOnceEvenWithRetriesOn(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var writes atomic.Int32
+	conns := make(chan net.Conn, 16)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			conns <- conn
+			// The handshake gets an error reply, which go-redis accepts; the record write gets no reply at all.
+			go func() {
+				r := bufio.NewReader(conn)
+				for {
+					cmd, err := readCommand(r)
+					if err != nil {
+						return
+					}
+					switch strings.ToUpper(cmd[0]) {
+					case "HELLO":
+						_, _ = conn.Write([]byte("-ERR unknown command 'HELLO'\r\n"))
+					case "EVALSHA", "EVAL":
+						writes.Add(1)
+					}
+				}
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		for len(conns) > 0 {
+			_ = (<-conns).Close()
+		}
+	})
+	// Retries stay at the go-redis default of three.
+	client := redis.NewClient(&redis.Options{Addr: listener.Addr().String(), ReadTimeout: 100 * time.Millisecond, Protocol: 2, DisableIdentity: true})
+	t.Cleanup(func() { _ = client.Close() })
+
+	err = NewRedisStore(client, "").CreateFile(context.Background(), &File{ID: "file-1", Tenant: "alice"})
+	require.Error(t, err)
+	assert.Equal(t, int32(1), writes.Load(), "the record write must reach Redis exactly once")
+}
+
 func TestListingKeepsUploadOrderAcrossASecondBoundary(t *testing.T) {
 	_, store := newTestStore(t)
 	ctx := context.Background()
@@ -385,6 +481,8 @@ func (r *roundTrips) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.P
 func TestListingReadsAPageInTwoRoundTrips(t *testing.T) {
 	_, store := newTestStore(t)
 	addFiles(t, store, "alice", PurposeBatch, 60)
+	// A connection that is already open keeps the handshake of a new one out of the count.
+	require.NoError(t, store.client.Ping(context.Background()).Err())
 	trips := &roundTrips{}
 	store.client.AddHook(trips)
 
