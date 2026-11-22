@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -47,6 +48,8 @@ const (
 	settleTimeout = 5 * time.Second
 	// defaultUploadIdle is how long an upload may send nothing before it is cut off.
 	defaultUploadIdle = time.Minute
+	// largestFileLimit leaves room to add the multipart slack and one more byte without overflowing.
+	largestFileLimit = math.MaxInt64 - multipartSlack - 1
 )
 
 // errFieldTooLong means a form field other than the file went over maxFormValue.
@@ -79,6 +82,7 @@ func NewService(store Store, files FileStore, config Config) *Service {
 	if config.MaxFileBytes <= 0 {
 		config.MaxFileBytes = defaultMaxBytes
 	}
+	config.MaxFileBytes = min(config.MaxFileBytes, largestFileLimit)
 	s := &Service{store: store, files: files, config: config, now: time.Now, newID: newID, readyWait: defaultReadyWait, retryEvery: defaultRetryEvery, recheckEvery: defaultRecheckEvery, uploadIdle: defaultUploadIdle}
 	s.gate = &readiness{check: s.checkStorage}
 	return s

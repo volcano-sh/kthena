@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -182,6 +183,14 @@ func TestUploadRejectsMissingParts(t *testing.T) {
 	plain.Header.Set("Content-Type", "application/json")
 	rec = api.call(t, "alice", plain)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// An operator who sets the largest possible limit means "no limit", not "refuse everything".
+func TestTheLargestUploadLimitStillAcceptsFiles(t *testing.T) {
+	api := newTestAPI(t)
+	api.service = NewService(api.store, api.files, Config{MaxFileBytes: math.MaxInt64})
+	rec := api.call(t, "alice", uploadRequest(t, "line\n", true, map[string]string{"purpose": PurposeBatch}))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
 func TestUploadRefusesOversizedFiles(t *testing.T) {
