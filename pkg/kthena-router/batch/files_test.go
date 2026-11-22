@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -178,6 +179,9 @@ func TestFileStoreMissingFile(t *testing.T) {
 func TestFileStoreWritesGroupReadableFiles(t *testing.T) {
 	store, _ := newTestFileStore(t)
 	ctx := context.Background()
+	// The modes must not depend on the umask the router happens to run with.
+	previous := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(previous) })
 
 	_, err := store.Create(ctx, "alice", "file-1", strings.NewReader("data"), 1024)
 	require.NoError(t, err)

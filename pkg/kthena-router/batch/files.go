@@ -85,7 +85,14 @@ func (s *FSStore) path(tenant, id string) (string, error) {
 
 // ensureDir creates dir and syncs its parent every time, as another caller may have just created it.
 func ensureDir(dir string) error {
-	if err := os.MkdirAll(dir, dirMode); err != nil {
+	err := os.Mkdir(dir, dirMode)
+	if err == nil {
+		// The umask can take away bits that the volume's group needs, so a new directory gets them back.
+		err = os.Chmod(dir, dirMode)
+	} else if errors.Is(err, os.ErrExist) {
+		err = nil
+	}
+	if err != nil {
 		return err
 	}
 	return syncDir(filepath.Dir(dir))
