@@ -35,7 +35,6 @@ const (
 
 	FileUploaded  = "uploaded"
 	FileProcessed = "processed"
-	FileError     = "error"
 )
 
 // File is the record for an uploaded input file or a produced result file.

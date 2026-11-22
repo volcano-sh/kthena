@@ -43,16 +43,8 @@ var namePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 // ReadFile is a stored file opened for reading.
 type ReadFile interface {
 	io.Reader
-	io.ReaderAt
 	io.Seeker
 	io.Closer
-}
-
-// SegmentWriter appends to a file; Sync returns once the bytes written so far are durable.
-type SegmentWriter interface {
-	io.Writer
-	Sync() error
-	Close() error
 }
 
 // FileStore keeps file bytes; it is an interface so object storage can be added later.
@@ -61,8 +53,6 @@ type FileStore interface {
 	Create(ctx context.Context, tenant, id string, r io.Reader, limit int64) (int64, error)
 	// Open returns the file for reading, or ErrNotFound.
 	Open(ctx context.Context, tenant, id string) (ReadFile, error)
-	// Append opens a file for appending, creating it durably when it is new.
-	Append(ctx context.Context, tenant, id string) (SegmentWriter, error)
 	// Remove deletes the bytes, or returns ErrNotFound.
 	Remove(ctx context.Context, tenant, id string) error
 	// Probe checks that this pod can write, sync and rename on the volume.
@@ -164,27 +154,6 @@ func (s *FSStore) Open(_ context.Context, tenant, id string) (ReadFile, error) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-
-// Append opens a file for appending and syncs the directory so a new file survives a crash.
-func (s *FSStore) Append(_ context.Context, tenant, id string) (SegmentWriter, error) {
-	path, err := s.path(tenant, id)
-	if err != nil {
-		return nil, err
-	}
-	dir := filepath.Dir(path)
-	if err := ensureDir(dir); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, fileMode)
-	if err != nil {
-		return nil, err
-	}
-	if err := syncDir(dir); err != nil {
-		_ = f.Close()
 		return nil, err
 	}
 	return f, nil

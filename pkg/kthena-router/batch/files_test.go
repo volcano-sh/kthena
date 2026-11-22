@@ -287,46 +287,16 @@ func TestFileStoreProbesDoNotCollide(t *testing.T) {
 	assert.Empty(t, entries)
 }
 
-func TestFileStoreAppend(t *testing.T) {
-	store, _ := newTestFileStore(t)
-	ctx := context.Background()
-	for _, chunk := range []string{"one\n", "two\n"} {
-		w, err := store.Append(ctx, "alice", "segment-1")
-		require.NoError(t, err)
-		_, err = w.Write([]byte(chunk))
-		require.NoError(t, err)
-		require.NoError(t, w.Sync())
-		require.NoError(t, w.Close())
-	}
-	assert.Equal(t, "one\ntwo\n", readAll(t, store, "alice", "segment-1"), "a reopened segment keeps what it had")
-}
-
 func TestFileStoreRejectsUnsafeNames(t *testing.T) {
 	store, root := newTestFileStore(t)
 	ctx := context.Background()
 	for _, tenant := range []string{"", "..", "a/b", reservedDir, "a b"} {
 		_, err := store.Create(ctx, tenant, "file-1", strings.NewReader("x"), 0)
 		assert.Error(t, err, "tenant %q", tenant)
-		_, err = store.Append(ctx, tenant, "file-1")
-		assert.Error(t, err, "tenant %q", tenant)
 	}
 	entries, err := os.ReadDir(root)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "nothing is created for a name that is refused")
-}
-
-func TestFileStoreReadsAtAnOffset(t *testing.T) {
-	store, _ := newTestFileStore(t)
-	ctx := context.Background()
-	_, err := store.Create(ctx, "alice", "file-1", strings.NewReader("0123456789"), 0)
-	require.NoError(t, err)
-	f, err := store.Open(ctx, "alice", "file-1")
-	require.NoError(t, err)
-	defer f.Close()
-	buf := make([]byte, 3)
-	_, err = f.ReadAt(buf, 4)
-	require.NoError(t, err)
-	assert.Equal(t, "456", string(buf))
 }
 
 func TestFileStoreLeavesNothingBehindWhenTheDirectoryCannotBeSynced(t *testing.T) {
