@@ -36,6 +36,9 @@ later closes it again until a check passes.
 ## Where the data lives
 
 - Records are in Redis under the prefix `kthena:batch:{b}:`. Each tenant has an index used for listing.
+  The records cannot be rebuilt from the volume, so Redis must keep its data, with AOF and
+  `maxmemory-policy noeviction` as the proposal says. A Redis that loses them lists no files, while
+  the bytes stay on the volume until the cleanup.
 - Bytes are on the volume at `<storage path>/<tenant>/<file id>`. The directory `.kthena` is
   reserved for the store's own files.
 - The volume has an ID in `.kthena/volume-id`, written once and published with a hard link, so the
