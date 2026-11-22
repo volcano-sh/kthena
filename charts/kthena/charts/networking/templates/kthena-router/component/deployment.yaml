@@ -251,7 +251,7 @@ spec:
       {{- with .Values.kthenaRouter.batch }}
       {{- if and .enabled .storage.fsGroup }}
       securityContext:
-        fsGroup: {{ .storage.fsGroup }}
+        fsGroup: {{ int64 .storage.fsGroup }}
         fsGroupChangePolicy: OnRootMismatch
       {{- end }}
       {{- end }}
