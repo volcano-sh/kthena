@@ -11,7 +11,8 @@ The router sends everything under `/v1` to one catch-all handler. That handler a
 `APIExtension` first (see `pkg/kthena-router/router`), and `Service` in this package is that
 extension: `Handles` claims the paths under `/v1/files` and `Serve` answers them. Every other
 path stays a model request. The access log and authentication run before it, as for any `/v1`
-request.
+request. Like `/v1/models`, it answers on every listener and host the router serves, before any
+route matching, so with authentication off every Gateway shares the one `anonymous` tenant.
 
 `cmd/kthena-router/app/batch.go` builds the `Service` when `BATCH_ENABLED` is true. The Helm
 chart sets that from `kthenaRouter.batch.enabled`. `Start` checks the storage in the
