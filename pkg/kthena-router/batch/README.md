@@ -15,8 +15,9 @@ request.
 
 `cmd/kthena-router/app/batch.go` builds the `Service` when `BATCH_ENABLED` is true. The Helm
 chart sets that from `kthenaRouter.batch.enabled`. `Start` checks the storage in the
-background and keeps trying until a check passes, so the router's listeners never wait for the
-volume or Redis, and the API comes back by itself.
+background, every 5 seconds while it is not ready and every minute while it is. The router's
+listeners never wait for the volume or Redis, the API comes back by itself, and a check that fails
+later closes it again until a check passes.
 
 ## Files
 
@@ -30,14 +31,15 @@ volume or Redis, and the API comes back by itself.
 | `redis_store.go` | `RedisStore`, the Redis implementation of `Store`. |
 | `scripts/` | Lua scripts for the Redis steps that must happen at once: creating a file record, deleting one, and claiming the volume. |
 | `files.go` | `FileStore`, the interface for file bytes, and `FSStore`, which keeps them on a mounted volume. |
-| `ready.go` | The readiness gate: every files request answers 503 until the volume works and is the one the Redis records belong to. Also the volume ID. |
+| `ready.go` | The readiness gate: every files request answers 503 while the volume does not work or is not the one the Redis records belong to. Also the volume ID. |
 
 ## Where the data lives
 
 - Records are in Redis under the prefix `kthena:batch:{b}:`. Each tenant has an index used for listing.
 - Bytes are on the volume at `<storage path>/<tenant>/<file id>`. The directory `.kthena` is
   reserved for the store's own files.
-- The volume has an ID in `.kthena/volume-id`, written once. The first router to start records it
+- The volume has an ID in `.kthena/volume-id`, written once and published with a hard link, so the
+  volume must support rename and hard links. The first router to start records it
   in Redis under `kthena:batch:{b}:volume`. A router whose volume has another ID answers 503 and
   logs both IDs, because the records point at bytes that are not on its volume. To start over on a
   new volume on purpose, delete the records under the prefix, including that key.

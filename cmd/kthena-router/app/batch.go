@@ -66,16 +66,17 @@ func batchOptionsFromEnv() batchOptions {
 	return options
 }
 
-// startBatch makes the router serve the batch API when BATCH_ENABLED is set.
-func startBatch(ctx context.Context, r *router.Router) {
+// startBatch makes the router serve the batch API when BATCH_ENABLED is set; the channel closes once its checks stop.
+func startBatch(ctx context.Context, r *router.Router) <-chan struct{} {
 	options := batchOptionsFromEnv()
 	if !options.enabled {
-		return
+		return nil
 	}
 	store := batch.NewRedisStore(utils.NewRedisClient(), "")
 	service := batch.NewService(store, batch.NewFSStore(options.storagePath), batch.Config{MaxFileBytes: options.maxFileBytes, FileExpiration: batchFileExpiration})
 	// The storage check runs in the background: requests answer 503 until it passes, and the listeners never wait for it.
-	service.Start(ctx)
+	done := service.Start(ctx)
 	r.SetAPIExtension(service)
 	klog.Infof("Batch API enabled, files under %s", options.storagePath)
+	return done
 }

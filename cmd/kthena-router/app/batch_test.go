@@ -18,7 +18,6 @@ package app
 
 import (
 	"bytes"
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -66,7 +65,16 @@ func newBatchRouter(t *testing.T, configFile string) *routerpkg.Router {
 	t.Helper()
 	t.Setenv("ACCESS_LOG_ENABLED", "false")
 	r := NewRouter(datastore.New(), configFile, common.NewTransportRegistry())
-	startBatch(context.Background(), r)
+	// The storage checks end with the test, before its temporary volume is removed.
+	if done := startBatch(t.Context(), r); done != nil {
+		t.Cleanup(func() {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("the batch storage checks did not stop")
+			}
+		})
+	}
 	return r
 }
 

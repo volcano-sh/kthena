@@ -59,14 +59,15 @@ type Config struct {
 
 // Service serves the OpenAI-compatible files API.
 type Service struct {
-	store      Store
-	files      FileStore
-	config     Config
-	now        func() time.Time
-	newID      func(prefix string) string
-	gate       *readiness
-	readyWait  time.Duration
-	retryEvery time.Duration
+	store        Store
+	files        FileStore
+	config       Config
+	now          func() time.Time
+	newID        func(prefix string) string
+	gate         *readiness
+	readyWait    time.Duration
+	retryEvery   time.Duration
+	recheckEvery time.Duration
 }
 
 // NewService builds the API on a record store and a file store.
@@ -74,7 +75,7 @@ func NewService(store Store, files FileStore, config Config) *Service {
 	if config.MaxFileBytes <= 0 {
 		config.MaxFileBytes = defaultMaxBytes
 	}
-	s := &Service{store: store, files: files, config: config, now: time.Now, newID: newID, readyWait: defaultReadyWait, retryEvery: defaultRetryEvery}
+	s := &Service{store: store, files: files, config: config, now: time.Now, newID: newID, readyWait: defaultReadyWait, retryEvery: defaultRetryEvery, recheckEvery: defaultRecheckEvery}
 	s.gate = &readiness{check: s.checkStorage}
 	return s
 }

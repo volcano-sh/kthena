@@ -35,15 +35,17 @@ import (
 const (
 	// defaultReadyWait bounds how long a request waits for a storage check before it answers 503.
 	defaultReadyWait = 2 * time.Second
-	// defaultRetryEvery is the pause between background checks until one passes.
+	// defaultRetryEvery is the pause between background checks while the storage is not ready.
 	defaultRetryEvery = 5 * time.Second
+	// defaultRecheckEvery is the pause between background checks while the storage is ready.
+	defaultRecheckEvery = time.Minute
 	// volumeIDFile names the volume, so records are never served from a volume they do not belong to.
 	volumeIDFile = "volume-id"
 )
 
 var volumeIDPattern = regexp.MustCompile(`^volume-[0-9a-f]{24}$`)
 
-// readiness opens once a storage check passes; until then each request starts a check or joins the one running.
+// readiness is open while the last storage check passed; while closed each request starts a check or joins the one running.
 type readiness struct {
 	check   func(context.Context) error
 	ready   atomic.Bool
@@ -68,10 +70,13 @@ func (r *readiness) start(ctx context.Context) <-chan struct{} {
 		defer r.mu.Unlock()
 		r.running = nil
 		if err == nil {
-			r.ready.Store(true)
-			klog.Info("batch: storage is ready")
+			r.lastErr = ""
+			if !r.ready.Swap(true) {
+				klog.Info("batch: storage is ready")
+			}
 			return
 		}
+		r.ready.Store(false)
 		// One line per new cause keeps a long outage from flooding the log.
 		if msg := err.Error(); msg != r.lastErr {
 			r.lastErr = msg
@@ -96,24 +101,30 @@ func (r *readiness) await(ctx context.Context, wait time.Duration) bool {
 	return r.ready.Load()
 }
 
-// keepTrying runs checks until one passes, so the storage comes back by itself even without requests.
-func (r *readiness) keepTrying(ctx context.Context, every time.Duration) {
+// keepChecking checks until ctx ends, so the storage comes back by itself and a later outage or mismatch closes the gate.
+func (r *readiness) keepChecking(ctx context.Context, retry, recheck time.Duration) {
 	for {
 		<-r.start(ctx)
+		pause := retry
 		if r.ready.Load() {
-			return
+			pause = recheck
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(every):
+		case <-time.After(pause):
 		}
 	}
 }
 
-// Start checks the storage in the background until a check passes, so a slow volume or Redis never holds up the caller.
-func (s *Service) Start(ctx context.Context) {
-	go s.gate.keepTrying(ctx, s.retryEvery)
+// Start checks the storage in the background for as long as ctx lives; the channel closes once the checks have stopped.
+func (s *Service) Start(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.gate.keepChecking(ctx, s.retryEvery, s.recheckEvery)
+	}()
+	return done
 }
 
 // checkStorage passes when this pod can use the volume and the records in Redis belong to that volume.
@@ -146,36 +157,39 @@ func (s *FSStore) VolumeID(_ context.Context) (string, error) {
 	if err := ensureDir(dir); err != nil {
 		return "", err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fileMode)
-	if errors.Is(err, fs.ErrExist) {
-		// Another replica created it first.
-		return readVolumeID(path)
-	}
+	// The ID is written and synced under a temporary name first, so a crash never leaves a cut marker.
+	temp, err := os.CreateTemp(dir, "."+volumeIDFile+"-*")
 	if err != nil {
 		return "", err
 	}
+	defer os.Remove(temp.Name())
 	id = newID("volume-")
-	// A failed write leaves a cut ID that no replica accepts, so only then can the file go and be written again.
-	if _, err := f.WriteString(id); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return "", fmt.Errorf("batch: cannot write the volume ID: %w", err)
-	}
-	// Once the whole ID is in the file another replica may already use it, so the file stays even if syncing fails.
-	err = f.Sync()
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
+	if err = temp.Chmod(fileMode); err == nil {
+		_, err = temp.WriteString(id)
 	}
 	if err == nil {
-		err = syncDir(dir)
+		err = temp.Sync()
+	}
+	if closeErr := temp.Close(); err == nil {
+		err = closeErr
 	}
 	if err != nil {
+		return "", fmt.Errorf("batch: cannot write the volume ID: %w", err)
+	}
+	// A hard link publishes the whole ID at once, and fails when another replica published one first.
+	if err := os.Link(temp.Name(), path); errors.Is(err, fs.ErrExist) {
+		return readVolumeID(path)
+	} else if err != nil {
+		return "", fmt.Errorf("batch: cannot publish the volume ID, the volume must support hard links: %w", err)
+	}
+	// Once published another replica may already use the ID, so it stays even if syncing the directory fails.
+	if err := syncDir(dir); err != nil {
 		return "", fmt.Errorf("batch: cannot make the volume ID durable: %w", err)
 	}
 	return id, nil
 }
 
-// readVolumeID reads the ID; one that is empty or cut short is still being written by another replica.
+// readVolumeID reads the ID; it is only ever published whole, so one that does not match is damaged.
 func readVolumeID(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -183,7 +197,7 @@ func readVolumeID(path string) (string, error) {
 	}
 	id := strings.TrimSpace(string(raw))
 	if !volumeIDPattern.MatchString(id) {
-		return "", fmt.Errorf("batch: the volume ID in %s is incomplete or damaged", path)
+		return "", fmt.Errorf("batch: the volume ID in %s is damaged", path)
 	}
 	return id, nil
 }
