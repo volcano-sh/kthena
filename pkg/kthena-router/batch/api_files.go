@@ -356,7 +356,7 @@ func (s *Service) lookup(c *gin.Context, id string) (*File, bool) {
 		unavailable(c, "cannot read the file record", err)
 		return nil, false
 	}
-	if err != nil || file.Deleted || file.Tenant != tenantOf(c) {
+	if err != nil || file.Deleted || file.Tenant != tenantOf(c) || file.expired(s.now().Unix()) {
 		fail(c, http.StatusNotFound, errInvalidRequest, "id", "no such file: "+id)
 		return nil, false
 	}
@@ -439,7 +439,7 @@ func (s *Service) deleteFile(c *gin.Context, id string) {
 }
 
 func (s *Service) listFiles(c *gin.Context) {
-	query := FileQuery{Tenant: tenantOf(c), Purpose: c.Query("purpose"), After: c.Query("after"), Limit: defaultPageSize}
+	query := FileQuery{Tenant: tenantOf(c), Purpose: c.Query("purpose"), After: c.Query("after"), Limit: defaultPageSize, Now: s.now().Unix()}
 	if raw := c.Query("limit"); raw != "" {
 		limit, err := strconv.Atoi(raw)
 		if err != nil || limit < 1 {

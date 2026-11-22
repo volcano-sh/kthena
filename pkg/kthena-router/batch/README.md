@@ -44,5 +44,6 @@ later closes it again until a check passes.
   logs both IDs, because the records point at bytes that are not on its volume. To start over on a
   new volume on purpose, delete the records under the prefix, including that key.
 
-Another tenant's file answers 404, the same as a missing one. Redis or the volume being down
-answers 503.
+Another tenant's file answers 404, the same as a missing one, and so does a file past its
+`expires_at`, which is no longer listed either; removing its record and bytes comes with the
+cleanup in a later PR. Redis or the volume being down answers 503.

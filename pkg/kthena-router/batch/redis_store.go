@@ -162,7 +162,7 @@ func (s *RedisStore) DeleteFile(ctx context.Context, id string) (bool, error) {
 	return res == "REMOVABLE", nil
 }
 
-// ListFiles returns one full page, reading on past files the purpose filter drops.
+// ListFiles returns one full page, reading on past deleted, expired and filtered-out files.
 func (s *RedisStore) ListFiles(ctx context.Context, query FileQuery) ([]*File, bool, error) {
 	index := s.fileIndexKey(query.Tenant)
 	after := ""
@@ -190,7 +190,7 @@ func (s *RedisStore) ListFiles(ctx context.Context, query FileQuery) ([]*File, b
 			return nil, false, err
 		}
 		for _, file := range found {
-			if file.Deleted || (query.Purpose != "" && file.Purpose != query.Purpose) {
+			if file.Deleted || file.expired(query.Now) || (query.Purpose != "" && file.Purpose != query.Purpose) {
 				continue
 			}
 			if len(files) == limit {

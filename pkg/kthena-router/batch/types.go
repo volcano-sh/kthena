@@ -52,3 +52,8 @@ type File struct {
 	IndexedAt int64
 	Deleted   bool
 }
+
+// expired reports whether the file is past its expires_at, given now in Unix seconds; it is gone from then on.
+func (f *File) expired(now int64) bool {
+	return f.ExpiresAt != 0 && now >= f.ExpiresAt
+}

@@ -39,4 +39,6 @@ type FileQuery struct {
 	After     string
 	Limit     int
 	Ascending bool
+	// Now is when the listing is made, in Unix seconds; files past their expires_at are left out, and zero keeps them all.
+	Now int64
 }

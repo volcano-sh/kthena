@@ -607,6 +607,41 @@ func TestFileWithoutExpiryReportsNull(t *testing.T) {
 	assert.Nil(t, body["expires_at"])
 }
 
+// A file is gone at the expires_at the API reported for it, even before its bytes are cleaned up.
+func TestAFileIsGoneAtItsExpiry(t *testing.T) {
+	api := newTestAPI(t)
+	created := time.Unix(1800000000, 0)
+	at := func(now time.Time) { api.service.now = func() time.Time { return now } }
+	at(created)
+	rec := api.call(t, "alice", uploadRequest(t, "line\n", true,
+		map[string]string{"purpose": PurposeBatch, "expires_after[anchor]": "created_at", "expires_after[seconds]": "3600"}))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	id := decode(t, rec)["id"].(string)
+	routes := func() map[string]*http.Request {
+		return map[string]*http.Request{
+			"get":     httptest.NewRequest(http.MethodGet, filesPath+"/"+id, nil),
+			"content": httptest.NewRequest(http.MethodGet, filesPath+"/"+id+"/content", nil),
+		}
+	}
+	listed := func() []any {
+		return decode(t, api.call(t, "alice", httptest.NewRequest(http.MethodGet, filesPath, nil)))["data"].([]any)
+	}
+
+	at(created.Add(3599 * time.Second))
+	for name, req := range routes() {
+		assert.Equal(t, http.StatusOK, api.call(t, "alice", req).Code, "%s a second before expiry", name)
+	}
+	assert.Len(t, listed(), 1, "listed a second before expiry")
+
+	at(created.Add(3600 * time.Second))
+	for name, req := range routes() {
+		assert.Equal(t, http.StatusNotFound, api.call(t, "alice", req).Code, "%s at expiry", name)
+	}
+	assert.Empty(t, listed(), "not listed at expiry")
+	deleted := api.call(t, "alice", httptest.NewRequest(http.MethodDelete, filesPath+"/"+id, nil))
+	assert.Equal(t, http.StatusNotFound, deleted.Code, "an expired file cannot be deleted either")
+}
+
 func TestListFilesParameters(t *testing.T) {
 	api := newTestAPI(t)
 	var ids []string
