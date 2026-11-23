@@ -281,7 +281,9 @@ identifiers, so it asks the engine instead of guessing:
    the service, the router renders on a vLLM pod of the model. Prompts with
    media passed by URL are always rendered on a vLLM pod, since rendering
    fetches the media and the tokenizer service may run in the router pod,
-   where a client-provided URL could reach pod-local endpoints. A message
+   where a client-provided URL could reach pod-local endpoints. The router
+   checks every content part of the request as sent for a media URL, including
+   parts without a `type`, from which vLLM also reads media URLs. A message
    without `ContentParts` holding media makes the prompt unrenderable, and the
    plugin does not score the request. The result is kept for the whole
    scheduling of the request, so with Prefill-Decode Disaggregation the decode

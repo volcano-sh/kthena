@@ -215,27 +215,65 @@ func (m *TokenizerManager) RenderPrompt(
 	return m.renderWith(endpoint, request)
 }
 
-// referencesRemoteMedia reports whether a prompt holds media passed by URL
-// rather than inline in a data URL.
+// mediaURLFields are the content part fields vLLM fetches media from. vLLM
+// reads them from parts without a type, and from typed parts that carry a
+// uuid, so they are checked whatever the type of a part says.
+var mediaURLFields = []string{"image_url", "audio_url", "video_url"}
+
+// referencesRemoteMedia reports whether the render request of a prompt holds
+// media passed by URL rather than inline in a data URL. A Chat Completions
+// request is rendered as sent, so its own messages are checked: they may hold
+// parts that the router does not parse, such as media parts without a type.
 func referencesRemoteMedia(prompt *common.ChatMessage) bool {
+	if prompt.ChatRequest != nil {
+		messages, _ := prompt.ChatRequest["messages"].([]interface{})
+		for _, message := range messages {
+			msg, _ := message.(map[string]interface{})
+			parts, _ := msg["content"].([]interface{})
+			for _, part := range parts {
+				if part, ok := part.(map[string]interface{}); ok && partReferencesRemoteMedia(part) {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	for _, msg := range prompt.Messages {
 		for _, part := range msg.ContentParts {
-			partType, _ := part["type"].(string)
-			switch partType {
-			case "text", "input_audio":
-				// input_audio always carries its data inline.
-				continue
-			}
-			// image_url, audio_url and video_url hold the URL either directly
-			// or in the url field of an object.
-			url, _ := part[partType].(string)
-			if source, ok := part[partType].(map[string]interface{}); ok {
-				url, _ = source["url"].(string)
-			}
-			if len(url) < len("data:") || !strings.EqualFold(url[:len("data:")], "data:") {
+			if partReferencesRemoteMedia(part) {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// partReferencesRemoteMedia reports whether a content part holds media passed
+// by URL. A media part whose URL cannot be read counts as remote.
+func partReferencesRemoteMedia(part map[string]interface{}) bool {
+	hasURLField := false
+	for _, field := range mediaURLFields {
+		value, ok := part[field]
+		if !ok {
+			continue
+		}
+		hasURLField = true
+		// The URL is held either directly or in the url field of an object.
+		url, _ := value.(string)
+		if source, ok := value.(map[string]interface{}); ok {
+			url, _ = source["url"].(string)
+		}
+		if len(url) < len("data:") || !strings.EqualFold(url[:len("data:")], "data:") {
+			return true
+		}
+	}
+	if hasURLField {
+		return false
+	}
+	partType, _ := part["type"].(string)
+	switch partType {
+	case "image_url", "audio_url", "video_url", "input_image":
+		return true
 	}
 	return false
 }

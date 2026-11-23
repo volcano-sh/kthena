@@ -124,10 +124,99 @@ func TestReferencesRemoteMedia(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			prompt := &common.ChatMessage{Messages: []common.Message{{
+			parsed := &common.ChatMessage{Messages: []common.Message{{
 				Role:         "user",
 				ContentParts: []map[string]interface{}{{"type": "text", "text": "hi"}, tt.part},
 			}}}
+			assert.Equal(t, tt.want, referencesRemoteMedia(parsed), "parsed content parts")
+			raw := &common.ChatMessage{ChatRequest: map[string]interface{}{"messages": []interface{}{
+				map[string]interface{}{"role": "user", "content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "hi"},
+					tt.part,
+				}},
+			}}}
+			assert.Equal(t, tt.want, referencesRemoteMedia(raw), "chat request")
+		})
+	}
+}
+
+func TestReferencesRemoteMediaChatRequest(t *testing.T) {
+	inline := map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "data:image/png;base64,AAAA"}}
+	tests := []struct {
+		name     string
+		messages []interface{}
+		want     bool
+	}{
+		{
+			// The router only parses typed parts, while vLLM also fetches the
+			// URL of a media part without a type.
+			name: "typed inline image and typeless remote image",
+			messages: []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+				inline,
+				map[string]interface{}{"image_url": "http://127.0.0.1:15000/debug/pprof/"},
+			}}},
+			want: true,
+		},
+		{
+			name: "typeless remote audio in an object",
+			messages: []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+				inline,
+				map[string]interface{}{"audio_url": map[string]interface{}{"url": "https://example.com/a.wav"}},
+			}}},
+			want: true,
+		},
+		{
+			name: "remote URL next to the field of another type",
+			messages: []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+				map[string]interface{}{"type": "text", "text": "hi", "uuid": "u", "video_url": "https://example.com/v.mp4"},
+			}}},
+			want: true,
+		},
+		{
+			name: "responses-style input image by URL",
+			messages: []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+				map[string]interface{}{"type": "input_image", "image_url": "https://example.com/i.png"},
+			}}},
+			want: true,
+		},
+		{
+			name: "remote media in an earlier message",
+			messages: []interface{}{
+				map[string]interface{}{"role": "user", "content": []interface{}{
+					map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "https://example.com/i.png"}},
+				}},
+				map[string]interface{}{"role": "assistant", "content": "a cat"},
+				map[string]interface{}{"role": "user", "content": []interface{}{inline}},
+			},
+			want: true,
+		},
+		{
+			name: "typeless inline image",
+			messages: []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+				inline,
+				map[string]interface{}{"image_url": "data:image/png;base64,BBBB"},
+			}}},
+			want: false,
+		},
+		{
+			name: "string content and parts without media",
+			messages: []interface{}{
+				map[string]interface{}{"role": "system", "content": "be brief"},
+				map[string]interface{}{"role": "user", "content": []interface{}{
+					inline,
+					map[string]interface{}{"type": "image_embeds", "image_embeds": "AAAA"},
+				}},
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prompt := &common.ChatMessage{
+				// The parsed parts only hold the typed inline image.
+				Messages:    []common.Message{{Role: "user", ContentParts: []map[string]interface{}{inline}}},
+				ChatRequest: map[string]interface{}{"model": "m", "messages": tt.messages},
+			}
 			assert.Equal(t, tt.want, referencesRemoteMedia(prompt))
 		})
 	}
