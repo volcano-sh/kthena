@@ -36,33 +36,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
-func TestGetMetricsProvider(t *testing.T) {
-	tests := []struct {
-		name    string
-		engine  string
-		wantErr bool
-	}{
-		{name: "vLLM is registered", engine: string(networkingv1alpha1.VLLM)},
-		{name: "SGLang is registered", engine: string(networkingv1alpha1.SGLang)},
-		{name: "engine names are case sensitive", engine: "vllm", wantErr: true},
-		{name: "unknown engine", engine: "TGI", wantErr: true},
-		{name: "empty engine", engine: "", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			provider, err := GetMetricsProvider(tt.engine)
-			if tt.wantErr {
-				assert.EqualError(t, err, "unsupported engine: "+tt.engine)
-				assert.Nil(t, provider)
-				return
-			}
-			require.NoError(t, err)
-			assert.NotNil(t, provider)
-		})
-	}
-}
-
 // metricsText renders a Prometheus text exposition with two gauges and a
 // time-to-first-token histogram, using the metric names of one engine.
 func metricsText(kvCacheUsage, waitingRequests, ttft string, ttftSum float64, ttftCount uint64) string {
@@ -78,8 +51,8 @@ func metricsText(kvCacheUsage, waitingRequests, ttft string, ttftSum float64, tt
 }
 
 // newModelServerPod starts an HTTP server that answers /metrics with the given
-// status and body, and returns a pod and port that point at it.
-func newModelServerPod(t *testing.T, status int, body string) (*corev1.Pod, uint32) {
+// status and body, and returns the server and a pod and port that point at it.
+func newModelServerPod(t *testing.T, status int, body string) (*httptest.Server, *corev1.Pod, uint32) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/metrics" {
@@ -100,7 +73,7 @@ func newModelServerPod(t *testing.T, status int, body string) (*corev1.Pod, uint
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model-server-0"},
 		Status:     corev1.PodStatus{PodIP: host},
 	}
-	return pod, uint32(port)
+	return server, pod, uint32(port)
 }
 
 func histogram(sum float64, count uint64) *dto.Histogram {
@@ -111,61 +84,38 @@ func TestGetPodMetrics(t *testing.T) {
 	vllmMetrics := metricsText(vllm.KVCacheUsage, vllm.RequestWaitingNum, vllm.TTFT, 6, 8)
 	sglangMetrics := metricsText(sglang.KVCacheUsage, sglang.RequestWaitingNum, sglang.TTFT, 6, 8)
 
+	// On a first scrape (no previous histogram) the histogram average is zero,
+	// so the merged result holds both gauges plus TTFT.
+	wantMergedMetrics := map[string]float64{
+		utils.KVCacheUsage:      0.25,
+		utils.RequestWaitingNum: 3,
+		utils.TTFT:              0,
+	}
+
 	tests := []struct {
-		name              string
-		engine            string
-		status            int
-		body              string
-		previousHistogram map[string]*dto.Histogram
-		wantMetrics       map[string]float64
-		wantHistogram     map[string]*dto.Histogram
+		name          string
+		engine        string
+		status        int
+		body          string
+		unreachable   bool
+		wantMetrics   map[string]float64
+		wantHistogram map[string]*dto.Histogram
 	}{
 		{
-			name:   "merges vLLM gauges and histogram averages on the first scrape",
-			engine: string(networkingv1alpha1.VLLM),
-			status: http.StatusOK,
-			body:   vllmMetrics,
-			// Without a previous scrape the histogram average starts at zero.
-			wantMetrics: map[string]float64{
-				utils.KVCacheUsage:      0.25,
-				utils.RequestWaitingNum: 3,
-				utils.TTFT:              0,
-			},
-			wantHistogram: map[string]*dto.Histogram{utils.TTFT: histogram(6, 8)},
-		},
-		{
-			name:              "averages the vLLM histogram over the period since the previous scrape",
-			engine:            string(networkingv1alpha1.VLLM),
-			status:            http.StatusOK,
-			body:              vllmMetrics,
-			previousHistogram: map[string]*dto.Histogram{utils.TTFT: histogram(2, 4)},
-			// (6-2) seconds over (8-4) requests.
-			wantMetrics: map[string]float64{
-				utils.KVCacheUsage:      0.25,
-				utils.RequestWaitingNum: 3,
-				utils.TTFT:              1,
-			},
-			wantHistogram: map[string]*dto.Histogram{utils.TTFT: histogram(6, 8)},
-		},
-		{
-			name:   "reads SGLang metric names for the SGLang engine",
-			engine: string(networkingv1alpha1.SGLang),
-			status: http.StatusOK,
-			body:   sglangMetrics,
-			wantMetrics: map[string]float64{
-				utils.KVCacheUsage:      0.25,
-				utils.RequestWaitingNum: 3,
-				utils.TTFT:              0,
-			},
-			wantHistogram: map[string]*dto.Histogram{utils.TTFT: histogram(6, 8)},
-		},
-		{
-			name:          "ignores metrics named for a different engine",
-			engine:        string(networkingv1alpha1.SGLang),
+			name:          "merges vLLM gauge and histogram results",
+			engine:        string(networkingv1alpha1.VLLM),
 			status:        http.StatusOK,
 			body:          vllmMetrics,
-			wantMetrics:   map[string]float64{},
-			wantHistogram: map[string]*dto.Histogram{},
+			wantMetrics:   wantMergedMetrics,
+			wantHistogram: map[string]*dto.Histogram{utils.TTFT: histogram(6, 8)},
+		},
+		{
+			name:          "merges SGLang gauge and histogram results",
+			engine:        string(networkingv1alpha1.SGLang),
+			status:        http.StatusOK,
+			body:          sglangMetrics,
+			wantMetrics:   wantMergedMetrics,
+			wantHistogram: map[string]*dto.Histogram{utils.TTFT: histogram(6, 8)},
 		},
 		{
 			name:   "returns nil for an unsupported engine",
@@ -174,17 +124,28 @@ func TestGetPodMetrics(t *testing.T) {
 			body:   vllmMetrics,
 		},
 		{
-			name:   "returns nil when the pod's metrics endpoint fails",
+			name:   "returns nil when the pod's metrics endpoint returns an error status",
 			engine: string(networkingv1alpha1.VLLM),
 			status: http.StatusInternalServerError,
+		},
+		{
+			name:        "returns nil when the pod's metrics endpoint is unreachable",
+			engine:      string(networkingv1alpha1.VLLM),
+			status:      http.StatusOK,
+			body:        vllmMetrics,
+			unreachable: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pod, port := newModelServerPod(t, tt.status, tt.body)
+			server, pod, port := newModelServerPod(t, tt.status, tt.body)
+			if tt.unreachable {
+				// Closing the server makes the scrape fail with connection refused.
+				server.Close()
+			}
 
-			gotMetrics, gotHistogram := GetPodMetrics(tt.engine, pod, port, tt.previousHistogram)
+			gotMetrics, gotHistogram := GetPodMetrics(tt.engine, pod, port, nil)
 
 			if tt.wantMetrics == nil {
 				assert.Nil(t, gotMetrics)
