@@ -18056,6 +18056,18 @@ spec:
                   ModelServing's generation, which is updated on mutation by the API Server.
                 format: int64
                 type: integer
+              pendingReplicas:
+                description: |-
+                  PendingReplicas is the number of ServingGroup that wait for a node: the scheduler reported
+                  at least one of their Pods as unschedulable. They are never counted in AvailableReplicas.
+                format: int32
+                type: integer
+              pendingSince:
+                description: |-
+                  PendingSince is the time since which the oldest ServingGroup counted in PendingReplicas
+                  has been pending. It is recomputed on every sync and is unset when PendingReplicas is 0.
+                format: date-time
+                type: string
               replicas:
                 description: Replicas track the total number of ServingGroup that
                   have been created (updated or not, ready or not)

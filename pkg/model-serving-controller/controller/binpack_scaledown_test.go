@@ -38,22 +38,22 @@ func TestGetServingGroupStatusPriority(t *testing.T) {
 			expected: PriorityServingGroupRunning,
 		},
 		{
-			name:     "Creating has highest deletion priority",
+			name:     "Creating has medium deletion priority",
 			status:   datastore.ServingGroupCreating,
 			expected: PriorityServingGroupCreating,
 		},
 		{
-			name:     "Deleting has highest deletion priority",
+			name:     "Deleting has medium deletion priority",
 			status:   datastore.ServingGroupDeleting,
 			expected: PriorityServingGroupDeleting,
 		},
 		{
-			name:     "Scaling has highest deletion priority",
+			name:     "Scaling has medium deletion priority",
 			status:   datastore.ServingGroupScaling,
 			expected: PriorityServingGroupScaling,
 		},
 		{
-			name:     "NotFound has highest deletion priority",
+			name:     "NotFound has medium deletion priority",
 			status:   datastore.ServingGroupNotFound,
 			expected: PriorityServingGroupNotFound,
 		},
@@ -201,6 +201,8 @@ func TestRunningStatusHasLowerDeletionPriorityThanOthers(t *testing.T) {
 		priority := getServingGroupStatusPriority(status)
 		assert.Greater(t, runningPriority, priority,
 			"Running (%d) should have higher priority value than %s (%d)", runningPriority, status, priority)
+		assert.Greater(t, priority, PriorityServingGroupPending,
+			"%s (%d) should have higher priority value than Pending (%d)", status, priority, PriorityServingGroupPending)
 	}
 }
 

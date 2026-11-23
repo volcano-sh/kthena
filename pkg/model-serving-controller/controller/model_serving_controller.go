@@ -344,7 +344,7 @@ func (c *ModelServingController) addPod(obj interface{}) {
 	c.updatePod(nil, obj)
 }
 
-func (c *ModelServingController) updatePod(_, newObj interface{}) {
+func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 	newPod, ok := newObj.(*corev1.Pod)
 	if !ok {
 		klog.Error("failed to parse newPod type when updatePod")
@@ -379,6 +379,13 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 
 	if c.shouldSkipHandling(ms, servingGroupName, newPod) {
 		return
+	}
+
+	// A Pending Pod changes nothing in the store, but status reports the
+	// ServingGroups the scheduler cannot place and since when.
+	oldPod, _ := oldObj.(*corev1.Pod)
+	if !utils.PodUnschedulableSince(oldPod).Equal(utils.PodUnschedulableSince(newPod)) {
+		c.enqueueModelServing(ms)
 	}
 
 	inPlaceState := inplace.StateOf(newPod)
@@ -2691,6 +2698,8 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 					currentRevision = copy.Status.CurrentRevision
 				}
 				needsUpdate := copy.Status.CurrentRevision != currentRevision || copy.Status.UpdateRevision != revision || copy.Status.LabelSelector != selector || conditionChanged
+				// If previously there were pending replicas or pending since timestamp, we need to update the status accordingly.
+				needsUpdate = needsUpdate || copy.Status.PendingReplicas != 0 || copy.Status.PendingSince != nil
 				if roleCoordination(latestMS) != nil && modelServingReplicas(latestMS) == 0 {
 					needsUpdate = needsUpdate || copy.Status.Replicas != 0 || copy.Status.AvailableReplicas != 0 || copy.Status.CurrentReplicas != 0 || copy.Status.UpdatedReplicas != 0 || copy.Status.ObservedGeneration != latestMS.Generation
 					copy.Status.Replicas, copy.Status.AvailableReplicas = 0, 0
@@ -2701,6 +2710,8 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 					needsUpdate = true
 				}
 				if needsUpdate {
+					copy.Status.PendingReplicas = 0
+					copy.Status.PendingSince = nil
 					copy.Status.CurrentRevision = currentRevision
 					copy.Status.UpdateRevision = revision
 					copy.Status.LabelSelector = selector
@@ -2718,6 +2729,9 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			return fmt.Errorf("failed to resolve rollout partition: %v", partitionErr)
 		}
 		available, updated := 0, 0
+		pending := 0
+		// The time since which the oldest pending group has been pending.
+		var oldestPending *metav1.Time
 		progressingGroups, updatedGroups, currentGroups := []int{}, []int{}, []int{}
 		// Track revision counts to determine the most common non-updated revision (CurrentRevision)
 		revisionCount := make(map[string]int)
@@ -2779,6 +2793,16 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 					}
 				}
 				progressingGroups = append(progressingGroups, ordinal)
+				since, err := c.servingGroupPendingSince(latestMS, group.Name)
+				if err != nil {
+					return fmt.Errorf("failed to check whether servingGroup %s is pending: %v", group.Name, err)
+				}
+				if since != nil {
+					pending++
+					if oldestPending == nil || since.Before(oldestPending) {
+						oldestPending = since
+					}
+				}
 			}
 
 			if c.compareServingGroupTemplate(ctx, latestMS, group, revision) == templateEquivalent {
@@ -2848,6 +2872,11 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			copy.Status.AvailableReplicas = int32(available)
 			copy.Status.UpdatedReplicas = int32(updated)
 			copy.Status.CurrentReplicas = int32(current)
+		}
+		if copy.Status.PendingReplicas != int32(pending) || !oldestPending.Equal(copy.Status.PendingSince) {
+			shouldUpdate = true
+			copy.Status.PendingReplicas = int32(pending)
+			copy.Status.PendingSince = oldestPending
 		}
 
 		revisionUpdated := false
@@ -3013,7 +3042,7 @@ func forEachMissingOrdinal(expectedCount int, existingOrdinals []int, limit int,
 }
 
 // scaleDownServingGroups scales down the ServingGroups to the expected count with two-level priority-based selection:
-// 1. Primary: Not-ready groups (Creating, NotFound) are deleted first
+// 1. Primary: Pending groups are deleted first, then the other not-ready groups (Creating, NotFound)
 // 2. Secondary: Among groups with same status, lower deletion cost = delete first
 // Partition protects templates, not explicit replica-count decreases.
 func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {

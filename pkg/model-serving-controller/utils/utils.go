@@ -359,6 +359,25 @@ func IsPodFailed(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodFailed
 }
 
+// PodUnschedulableSince returns the time since which the scheduler has reported
+// the pod as unschedulable, or nil if it has not.
+func PodUnschedulableSince(pod *corev1.Pod) *metav1.Time {
+	if pod == nil {
+		return nil
+	}
+	for i := range pod.Status.Conditions {
+		condition := pod.Status.Conditions[i]
+		if condition.Type != corev1.PodScheduled {
+			continue
+		}
+		if condition.Status == corev1.ConditionFalse && condition.Reason == corev1.PodReasonUnschedulable {
+			return &condition.LastTransitionTime
+		}
+		return nil
+	}
+	return nil
+}
+
 func ExpectedPodNum(ms *workloadv1alpha1.ModelServing) int {
 	num := 0
 	for _, role := range ms.Spec.Template.Roles {

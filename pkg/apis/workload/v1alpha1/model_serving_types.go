@@ -454,6 +454,16 @@ type ModelServingStatus struct {
 	// AvailableReplicas track the number of ServingGroup that are in ready state (updated or not).
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 
+	// PendingReplicas is the number of ServingGroup that wait for a node: the scheduler reported
+	// at least one of their Pods as unschedulable. They are never counted in AvailableReplicas.
+	// +optional
+	PendingReplicas int32 `json:"pendingReplicas,omitempty"`
+
+	// PendingSince is the time since which the oldest ServingGroup counted in PendingReplicas
+	// has been pending. It is recomputed on every sync and is unset when PendingReplicas is 0.
+	// +optional
+	PendingSince *metav1.Time `json:"pendingSince,omitempty"`
+
 	// CurrentRevision, if not empty, indicates the ControllerRevision version preserved by
 	// ServingGroups that have not been updated.
 	// +optional
