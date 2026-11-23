@@ -147,3 +147,60 @@ def test_process_metrics_exposes_documented_counter_series():
     standard = MetricStandard("vllm")
     output = asyncio.run(process_metrics(VLLM_COUNTER_METRICS, standard))
     assert b'kthena:generation_tokens_total{model_name="m"} 42.0' in output
+
+
+def _vllm_histogram(name):
+    return f"""
+# HELP {name} Histogram of time per output token in seconds.
+# TYPE {name} histogram
+{name}_bucket{{le="0.01",model_name="m"}} 3.0
+{name}_bucket{{le="+Inf",model_name="m"}} 5.0
+{name}_count{{model_name="m"}} 5.0
+{name}_sum{{model_name="m"}} 0.25
+""".strip()
+
+
+# vLLM up to 0.10.1 has only this name. 0.12 hid it and 0.15 removed it.
+VLLM_OLD_TPOT_METRICS = _vllm_histogram("vllm:time_per_output_token_seconds")
+# vLLM 0.10.2 and later.
+VLLM_NEW_TPOT_METRICS = _vllm_histogram("vllm:inter_token_latency_seconds")
+
+
+@pytest.mark.parametrize(
+    "metric_text",
+    [
+        VLLM_OLD_TPOT_METRICS,
+        VLLM_NEW_TPOT_METRICS,
+        # vLLM 0.10.2 to 0.11 expose both names, with the same observations.
+        VLLM_OLD_TPOT_METRICS + "\n" + VLLM_NEW_TPOT_METRICS,
+    ],
+    ids=["old-name", "new-name", "both-names"],
+)
+def test_vllm_time_per_output_token_is_standardized_once(metric_text):
+    adapter = MetricAdapter(metric_text, MetricStandard("vllm"))
+
+    twins = _standardized(adapter, "kthena:time_per_output_token_seconds")
+    assert len(twins) == 1, [m.name for m in adapter.metrics]
+    twin = twins[0]
+    assert twin.type == "histogram"
+    values = {
+        (s.name, s.labels.get("le")): s.value for s in twin.samples
+    }
+    assert values == {
+        ("kthena:time_per_output_token_seconds_bucket", "0.01"): 3.0,
+        ("kthena:time_per_output_token_seconds_bucket", "+Inf"): 5.0,
+        ("kthena:time_per_output_token_seconds_count", None): 5.0,
+        ("kthena:time_per_output_token_seconds_sum", None): 0.25,
+    }
+
+
+def test_process_metrics_exposes_time_per_output_token_for_current_vllm():
+    import asyncio
+
+    from kthena.runtime.collect import process_metrics
+
+    standard = MetricStandard("vllm")
+    output = asyncio.run(process_metrics(VLLM_NEW_TPOT_METRICS, standard))
+    assert b'kthena:time_per_output_token_seconds_count{model_name="m"} 5.0' in output
+    # The engine's own series is still passed through.
+    assert b'vllm:inter_token_latency_seconds_count{model_name="m"} 5.0' in output
