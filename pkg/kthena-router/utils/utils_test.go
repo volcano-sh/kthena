@@ -17,6 +17,8 @@ limitations under the License.
 package utils
 
 import (
+	"encoding/json"
+	"math"
 	"os"
 	"reflect"
 	"testing"
@@ -66,6 +68,80 @@ func TestParsePrompt(t *testing.T) {
 				"prompt": 123,
 			},
 			want:    nil,
+			wantErr: true,
+		},
+		{
+			name:    "prompt as a list of strings",
+			body:    map[string]interface{}{"prompt": []interface{}{"hello", "world"}},
+			want:    &common.ChatMessage{Text: "hello\nworld"},
+			wantErr: false,
+		},
+		{
+			name:    "prompt as token IDs",
+			body:    map[string]interface{}{"prompt": []interface{}{json.Number("15339"), json.Number("1917")}},
+			want:    &common.ChatMessage{Text: "15339 1917"},
+			wantErr: false,
+		},
+		{
+			name: "prompt as a list of token-ID lists",
+			body: map[string]interface{}{"prompt": []interface{}{
+				[]interface{}{json.Number("15339"), json.Number("1917")},
+				[]interface{}{float64(42)},
+			}},
+			want:    &common.ChatMessage{Text: "15339 1917\n42"},
+			wantErr: false,
+		},
+		{
+			name:    "prompt as an empty list",
+			body:    map[string]interface{}{"prompt": []interface{}{}},
+			wantErr: true,
+		},
+		{
+			name:    "prompt list mixing strings and numbers",
+			body:    map[string]interface{}{"prompt": []interface{}{"hello", json.Number("1")}},
+			wantErr: true,
+		},
+		{
+			name:    "prompt token ID that is not an integer",
+			body:    map[string]interface{}{"prompt": []interface{}{json.Number("1.5")}},
+			wantErr: true,
+		},
+		{
+			name:    "prompt with a negative token ID",
+			body:    map[string]interface{}{"prompt": []interface{}{json.Number("-1")}},
+			wantErr: true,
+		},
+		{
+			name:    "prompt with a negative float token ID",
+			body:    map[string]interface{}{"prompt": []interface{}{float64(-1)}},
+			wantErr: true,
+		},
+		{
+			name:    "prompt with an infinite token ID",
+			body:    map[string]interface{}{"prompt": []interface{}{math.Inf(1)}},
+			wantErr: true,
+		},
+		{
+			name:    "prompt with a NaN token ID",
+			body:    map[string]interface{}{"prompt": []interface{}{math.NaN()}},
+			wantErr: true,
+		},
+		{
+			name:    "prompt with a float token ID outside int64",
+			body:    map[string]interface{}{"prompt": []interface{}{math.Ldexp(1, 63)}},
+			wantErr: true,
+		},
+		{
+			name: "prompt batch with an empty token-ID list",
+			body: map[string]interface{}{"prompt": []interface{}{
+				[]interface{}{json.Number("15339")},
+				[]interface{}{},
+			}},
+			wantErr: true,
+		},
+		{
+			name:    "prompt batch mixing a string and a list",
+			body:    map[string]interface{}{"prompt": []interface{}{"hello", []interface{}{"world"}}},
 			wantErr: true,
 		},
 		{

@@ -17,8 +17,11 @@ limitations under the License.
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
@@ -44,9 +47,9 @@ func GetNamespaceName(obj metav1.Object) types.NamespacedName {
 
 func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 	if prompt, ok := body["prompt"]; ok {
-		promptStr, ok := prompt.(string)
-		if !ok {
-			return nil, fmt.Errorf("prompt is not a string")
+		promptStr, err := parseCompletionPrompt(prompt)
+		if err != nil {
+			return nil, err
 		}
 		return &common.ChatMessage{
 			Text: promptStr,
@@ -98,6 +101,76 @@ func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 	}
 
 	return nil, fmt.Errorf("prompt or messages not found in request body")
+}
+
+// parseCompletionPrompt returns the text the router uses for token estimation and
+// prefix hashing of a Completions prompt. The Completions API accepts a string, a
+// list of strings, a list of token IDs or a list of token-ID lists. A batch is
+// joined with newlines, and token IDs are written as space-separated numbers so
+// that identical token prefixes hash identically. The request body itself is
+// forwarded unchanged.
+func parseCompletionPrompt(prompt any) (string, error) {
+	switch p := prompt.(type) {
+	case string:
+		return p, nil
+	case []interface{}:
+		if len(p) == 0 {
+			return "", fmt.Errorf("prompt is an empty list")
+		}
+		if ids, ok := tokenIDsText(p); ok {
+			return ids, nil
+		}
+		parts := make([]string, 0, len(p))
+		_, stringBatch := p[0].(string)
+		for _, item := range p {
+			if stringBatch {
+				text, ok := item.(string)
+				if !ok {
+					return "", fmt.Errorf("prompt list mixes strings with other values")
+				}
+				parts = append(parts, text)
+				continue
+			}
+			ids, ok := item.([]interface{})
+			if !ok || len(ids) == 0 {
+				return "", fmt.Errorf("prompt list item is neither a string nor a list of token IDs")
+			}
+			text, ok := tokenIDsText(ids)
+			if !ok {
+				return "", fmt.Errorf("prompt list item is neither a string nor a list of token IDs")
+			}
+			parts = append(parts, text)
+		}
+		return strings.Join(parts, "\n"), nil
+	default:
+		return "", fmt.Errorf("prompt is neither a string nor a list")
+	}
+}
+
+// tokenIDsText formats a list of token IDs as space-separated numbers. It reports
+// false if any item is not a non-negative integer that fits in an int64.
+func tokenIDsText(items []interface{}) (string, bool) {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		switch v := item.(type) {
+		case json.Number:
+			id, err := v.Int64()
+			if err != nil || id < 0 {
+				return "", false
+			}
+			ids = append(ids, strconv.FormatInt(id, 10))
+		case float64:
+			// float64(math.MaxInt64) rounds up to 2^63, so ">=" keeps 2^63 out
+			// of the int64 conversion below.
+			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v >= math.MaxInt64 || v != math.Trunc(v) {
+				return "", false
+			}
+			ids = append(ids, strconv.FormatInt(int64(v), 10))
+		default:
+			return "", false
+		}
+	}
+	return strings.Join(ids, " "), true
 }
 
 func parseResponsesPrompt(instructions, input any) (*common.ChatMessage, error) {
