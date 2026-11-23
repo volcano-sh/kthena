@@ -726,3 +726,32 @@ func assertCondition(t *testing.T, conditions []metav1.Condition, conditionType 
 	}
 	t.Fatalf("condition %q not found", conditionType)
 }
+
+func TestConstructModelServingRecoveryPolicy(t *testing.T) {
+	tests := []struct {
+		restartPolicy lwsv1.RestartPolicyType
+		want          workloadv1alpha1.RecoveryPolicy
+	}{
+		{restartPolicy: "", want: ""},
+		{restartPolicy: lwsv1.RecreateGroupOnPodRestart, want: ""},
+		{restartPolicy: lwsv1.NoneRestartPolicy, want: workloadv1alpha1.NoneRestartPolicy},
+		{restartPolicy: lwsv1.DeprecatedDefaultRestartPolicy, want: workloadv1alpha1.NoneRestartPolicy},
+	}
+	c := &LWSController{}
+	for _, tt := range tests {
+		t.Run(string(tt.restartPolicy), func(t *testing.T) {
+			lws := &lwsv1.LeaderWorkerSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "lws", Namespace: "default"},
+				Spec: lwsv1.LeaderWorkerSetSpec{
+					LeaderWorkerTemplate: lwsv1.LeaderWorkerTemplate{
+						RestartPolicy: tt.restartPolicy,
+						WorkerTemplate: corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "nginx"}}},
+						},
+					},
+				},
+			}
+			assert.Equal(t, tt.want, c.constructModelServing(lws).Spec.RecoveryPolicy)
+		})
+	}
+}

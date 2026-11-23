@@ -401,6 +401,10 @@ func (c *LWSController) constructModelServing(lws *lwsv1.LeaderWorkerSet) *workl
 			},
 		},
 	}
+	switch lws.Spec.LeaderWorkerTemplate.RestartPolicy {
+	case lwsv1.NoneRestartPolicy, lwsv1.DeprecatedDefaultRestartPolicy:
+		ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+	}
 	// Keep the plugin chain stable through size=1 transitions. LWS retains a
 	// worker template at size=1, so discovery also applies to its single Pod.
 	return ms
