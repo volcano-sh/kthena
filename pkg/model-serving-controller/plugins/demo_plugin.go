@@ -36,6 +36,7 @@ type DemoConfig struct {
 
 // DemoPlugin is a sample built-in plugin that tweaks runtimeClass, annotations, and env vars.
 type DemoPlugin struct {
+	BasePlugin
 	name string
 	cfg  DemoConfig
 }
@@ -79,18 +80,5 @@ func (p *DemoPlugin) OnPodCreate(_ context.Context, req *HookRequest) error {
 			req.Pod.Spec.InitContainers[i].Env = append(req.Pod.Spec.InitContainers[i].Env, p.cfg.Env...)
 		}
 	}
-	return nil
-}
-
-// OnPodReady is a no-op for the demo plugin.
-func (p *DemoPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
-	return nil
-}
-
-func (p *DemoPlugin) OnRoleSync(_ context.Context, _ *HookRequest) error {
-	return nil
-}
-
-func (p *DemoPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error {
 	return nil
 }

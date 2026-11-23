@@ -18,8 +18,10 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -27,12 +29,25 @@ import (
 )
 
 type testPlugin struct {
-	name  string
-	calls *[]string
-	errOn string
+	name       string
+	calls      *[]string
+	errOn      string
+	syncResult HookResult
 }
 
 func (t *testPlugin) Name() string { return t.name }
+
+func (t *testPlugin) OnModelServingSync(_ context.Context, _ *HookRequest) HookResult {
+	*t.calls = append(*t.calls, "ms-sync-"+t.name)
+	if t.errOn == "ms-sync" {
+		res := t.syncResult
+		if res.Err == nil {
+			res.Err = assertError
+		}
+		return res
+	}
+	return t.syncResult
+}
 
 func (t *testPlugin) OnPodCreate(_ context.Context, _ *HookRequest) error {
 	*t.calls = append(*t.calls, "create-"+t.name)
@@ -219,6 +234,173 @@ func TestChainPluginWithoutInPlaceUpdate(t *testing.T) {
 			got, ok := tt.chain.PluginWithoutInPlaceUpdate()
 			if got != tt.want || ok != tt.wantAny {
 				t.Fatalf("PluginWithoutInPlaceUpdate() = %q, %v, want %q, %v", got, ok, tt.want, tt.wantAny)
+			}
+		})
+	}
+}
+
+func TestChainOnModelServingSync(t *testing.T) {
+	errFirst := pluginError("first failed")
+	errSecond := pluginError("second failed")
+
+	tests := []struct {
+		name             string
+		nilChain         bool
+		req              *HookRequest
+		plugins          []func(calls *[]string) entry
+		wantCalls        string
+		wantRequeueAfter time.Duration
+		wantContinue     bool
+		wantErrs         []error
+	}{
+		{
+			name:     "nil chain",
+			nilChain: true,
+			req:      &HookRequest{},
+		},
+		{
+			name: "nil request",
+			plugins: []func(calls *[]string) entry{
+				func(calls *[]string) entry {
+					return entry{plugin: &testPlugin{name: "p1", calls: calls}, spec: workloadv1alpha1.PluginSpec{Name: "p1"}}
+				},
+			},
+		},
+		{
+			name: "runs all plugins in order ignoring role and target scope and picks shortest positive requeue",
+			req:  &HookRequest{ModelServing: &workloadv1alpha1.ModelServing{}},
+			plugins: []func(calls *[]string) entry{
+				func(calls *[]string) entry {
+					return entry{
+						plugin: &testPlugin{name: "p1", calls: calls, syncResult: HookResult{RequeueAfter: 10 * time.Second}},
+						spec:   workloadv1alpha1.PluginSpec{Name: "p1", Scope: &workloadv1alpha1.PluginScope{Roles: []string{"prefill"}, Target: workloadv1alpha1.PluginTargetWorker}},
+					}
+				},
+				func(calls *[]string) entry {
+					return entry{
+						plugin: &testPlugin{name: "p2", calls: calls, syncResult: HookResult{RequeueAfter: 3 * time.Second}},
+						spec:   workloadv1alpha1.PluginSpec{Name: "p2"},
+					}
+				},
+				func(calls *[]string) entry {
+					return entry{
+						plugin: &testPlugin{name: "p3", calls: calls},
+						spec:   workloadv1alpha1.PluginSpec{Name: "p3"},
+					}
+				},
+			},
+			wantCalls:        "ms-sync-p1,ms-sync-p2,ms-sync-p3",
+			wantRequeueAfter: 3 * time.Second,
+		},
+		{
+			name: "blocking error stops remaining plugins",
+			req:  &HookRequest{ModelServing: &workloadv1alpha1.ModelServing{}},
+			plugins: []func(calls *[]string) entry{
+				func(calls *[]string) entry {
+					return entry{
+						plugin: &testPlugin{name: "p1", calls: calls, errOn: "ms-sync", syncResult: HookResult{Err: errFirst, Continue: false, RequeueAfter: 5 * time.Second}},
+						spec:   workloadv1alpha1.PluginSpec{Name: "p1"},
+					}
+				},
+				func(calls *[]string) entry {
+					return entry{
+						plugin: &testPlugin{name: "p2", calls: calls},
+						spec:   workloadv1alpha1.PluginSpec{Name: "p2"},
+					}
+				},
+			},
+			wantCalls:        "ms-sync-p1",
+			wantRequeueAfter: 5 * time.Second,
+			wantContinue:     false,
+			wantErrs:         []error{errFirst},
+		},
+		{
+			name: "continuable error runs remaining plugins and preserves requeue",
+			req:  &HookRequest{ModelServing: &workloadv1alpha1.ModelServing{}},
+			plugins: []func(calls *[]string) entry{
+				func(calls *[]string) entry {
+					return entry{
+						plugin: &testPlugin{name: "p1", calls: calls, errOn: "ms-sync", syncResult: HookResult{Err: errFirst, Continue: true, RequeueAfter: 8 * time.Second}},
+						spec:   workloadv1alpha1.PluginSpec{Name: "p1"},
+					}
+				},
+				func(calls *[]string) entry {
+					return entry{
+						plugin: &testPlugin{name: "p2", calls: calls, syncResult: HookResult{RequeueAfter: 2 * time.Second}},
+						spec:   workloadv1alpha1.PluginSpec{Name: "p2"},
+					}
+				},
+			},
+			wantCalls:        "ms-sync-p1,ms-sync-p2",
+			wantRequeueAfter: 2 * time.Second,
+			wantContinue:     true,
+			wantErrs:         []error{errFirst},
+		},
+		{
+			name: "continuable error followed by blocking error stops and joins both errors",
+			req:  &HookRequest{ModelServing: &workloadv1alpha1.ModelServing{}},
+			plugins: []func(calls *[]string) entry{
+				func(calls *[]string) entry {
+					return entry{
+						plugin: &testPlugin{name: "p1", calls: calls, errOn: "ms-sync", syncResult: HookResult{Err: errFirst, Continue: true, RequeueAfter: 4 * time.Second}},
+						spec:   workloadv1alpha1.PluginSpec{Name: "p1"},
+					}
+				},
+				func(calls *[]string) entry {
+					return entry{
+						plugin: &testPlugin{name: "p2", calls: calls, errOn: "ms-sync", syncResult: HookResult{Err: errSecond, Continue: false}},
+						spec:   workloadv1alpha1.PluginSpec{Name: "p2"},
+					}
+				},
+				func(calls *[]string) entry {
+					return entry{
+						plugin: &testPlugin{name: "p3", calls: calls},
+						spec:   workloadv1alpha1.PluginSpec{Name: "p3"},
+					}
+				},
+			},
+			wantCalls:        "ms-sync-p1,ms-sync-p2",
+			wantRequeueAfter: 4 * time.Second,
+			wantContinue:     false,
+			wantErrs:         []error{errFirst, errSecond},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := []string{}
+			var chain *Chain
+			if !tt.nilChain {
+				entries := make([]entry, 0, len(tt.plugins))
+				for _, build := range tt.plugins {
+					entries = append(entries, build(&calls))
+				}
+				chain = &Chain{entries: entries}
+			}
+
+			res := chain.OnModelServingSync(context.Background(), tt.req)
+			if got := strings.Join(calls, ","); got != tt.wantCalls {
+				t.Fatalf("calls = %q, want %q", got, tt.wantCalls)
+			}
+			if res.RequeueAfter != tt.wantRequeueAfter {
+				t.Fatalf("RequeueAfter = %v, want %v", res.RequeueAfter, tt.wantRequeueAfter)
+			}
+			if res.Continue != tt.wantContinue {
+				t.Fatalf("Continue = %v, want %v", res.Continue, tt.wantContinue)
+			}
+			if len(tt.wantErrs) == 0 {
+				if res.Err != nil {
+					t.Fatalf("unexpected error: %v", res.Err)
+				}
+			} else {
+				if res.Err == nil {
+					t.Fatalf("expected error containing %v, got nil", tt.wantErrs)
+				}
+				for _, wantErr := range tt.wantErrs {
+					if !errors.Is(res.Err, wantErr) {
+						t.Fatalf("expected error %v in %v", wantErr, res.Err)
+					}
+				}
 			}
 		})
 	}

@@ -69,11 +69,18 @@ The substantive plugin chain is immutable after creation. Adding the first plugi
 
 Built-in plugins live in `pkg/model-serving-controller/plugins/`. To add a custom plugin:
 
-1. **Implement the Plugin interface** and its Pod and Role lifecycle hooks:
+1. **Implement the Plugin interface** (embedding `BasePlugin` to inherit no-op defaults for unused hooks):
 
 ```go
+type HookResult struct {
+    RequeueAfter time.Duration
+    Err          error
+    Continue     bool
+}
+
 type Plugin interface {
     Name() string
+    OnModelServingSync(ctx context.Context, req *HookRequest) HookResult
     OnPodCreate(ctx context.Context, req *HookRequest) error
     OnPodReady(ctx context.Context, req *HookRequest) error
     OnRoleSync(ctx context.Context, req *HookRequest) error
@@ -81,7 +88,7 @@ type Plugin interface {
 }
 ```
 
-All hooks receive the same request type. Fields that do not apply to a hook may be nil or zero-valued; for example, `Pod` is nil for Role hooks. Runtime resources such as `KubeClient` and cache-backed listers are carried by `HookRequest`, following the same pattern as lifecycle context. `OnRoleSync` must be idempotent. `OnRoleDelete` must retain a retry path for failed cleanup requests, but a successfully requested auxiliary-resource deletion does not make core Role deletion wait for that resource's finalizers. Cleanup must check ownership and protect replacement UIDs. Implement unused hooks as no-ops.
+All hooks receive the same request type. Fields that do not apply to a hook may be nil or zero-valued; for example, `Pod` is nil for ModelServing and Role hooks. Runtime resources such as `KubeClient` and cache-backed listers are carried by `HookRequest`, following the same pattern as lifecycle context. `OnModelServingSync` runs near the start of each ModelServing reconcile before ServingGroups and Roles are synced; returning `Continue: true` with an error logs the error without blocking the rest of the reconcile, and a positive `RequeueAfter` schedules a delayed requeue. `OnRoleSync` must be idempotent. `OnRoleDelete` must retain a retry path for failed cleanup requests, but a successfully requested auxiliary-resource deletion does not make core Role deletion wait for that resource's finalizers. Cleanup must check ownership and protect replacement UIDs. Embed `BasePlugin` so you only need to implement `Name()` and the hooks your plugin uses.
 
 2. **Define a config struct** for your plugin and decode it from `spec.Config` using `DecodeJSON()`:
 

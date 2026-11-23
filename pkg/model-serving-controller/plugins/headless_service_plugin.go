@@ -47,7 +47,10 @@ type RoleCleanup struct {
 	done    map[string]bool
 }
 
-type HeadlessServicePlugin struct{ name string }
+type HeadlessServicePlugin struct {
+	BasePlugin
+	name string
+}
 
 func init() {
 	DefaultRegistry.Register(HeadlessServicePluginName, NewHeadlessServicePlugin)
@@ -89,7 +92,6 @@ func (p *HeadlessServicePlugin) OnPodCreate(ctx context.Context, req *HookReques
 	return nil
 }
 
-func (p *HeadlessServicePlugin) OnPodReady(_ context.Context, _ *HookRequest) error { return nil }
 func (p *HeadlessServicePlugin) OnRoleSync(ctx context.Context, req *HookRequest) error {
 	if req == nil || !requiresHeadlessService(req.Role) {
 		return nil
