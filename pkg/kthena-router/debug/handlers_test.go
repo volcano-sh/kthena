@@ -670,6 +670,7 @@ func TestListPods(t *testing.T) {
 				assert.Equal(t, "pod-1", pods[0].Name)
 				assert.Equal(t, "default", pods[0].Namespace)
 				require.NotNil(t, pods[0].Metrics)
+				assert.Equal(t, 0.75, pods[0].Metrics.KVCacheUsage)
 				assert.Equal(t, 0.75, pods[0].Metrics.GPUCacheUsage)
 				assert.Equal(t, float64(3), pods[0].Metrics.RequestWaitingNum)
 				assert.Equal(t, float64(2), pods[0].Metrics.RequestRunningNum)
@@ -728,6 +729,7 @@ func TestGetPod(t *testing.T) {
 				assert.Equal(t, "Running", response.PodInfo.Phase)
 				assert.Equal(t, map[string]string{"app": "llm"}, response.PodInfo.Labels)
 				assert.Equal(t, "2026-01-02T03:04:05Z", response.PodInfo.StartTime)
+				assert.Equal(t, 0.5, response.Metrics.KVCacheUsage)
 				assert.Equal(t, 0.5, response.Metrics.GPUCacheUsage)
 				assert.Equal(t, []string{"default/llama2-server"}, response.ModelServers)
 			},

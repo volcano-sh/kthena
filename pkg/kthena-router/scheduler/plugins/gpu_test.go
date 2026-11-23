@@ -27,20 +27,38 @@ func TestGPUCacheUsageName(t *testing.T) {
 	if plugin.Name() != GPUCacheUsagePluginName {
 		t.Fatalf("expected plugin name %q, got %q", GPUCacheUsagePluginName, plugin.Name())
 	}
+
+	kvPlugin := NewKVCacheUsage()
+	if kvPlugin.Name() != KVCacheUsagePluginName {
+		t.Fatalf("expected plugin name %q, got %q", KVCacheUsagePluginName, kvPlugin.Name())
+	}
 }
 
 func TestGPUCacheUsageScore(t *testing.T) {
 	tests := []struct {
 		name           string
+		plugin         *GPUCacheUsage
 		pods           []*datastore.PodInfo
 		expectedScores map[string]int
 	}{
 		{
-			name: "empty pod list",
-			pods: []*datastore.PodInfo{},
+			name:   "empty pod list",
+			plugin: NewGPUCacheUsage(),
+			pods:   []*datastore.PodInfo{},
 		},
 		{
-			name: "scores inverse gpu cache usage",
+			name:   "scores inverse gpu cache usage",
+			plugin: NewGPUCacheUsage(),
+			pods: []*datastore.PodInfo{
+				{Pod: schedulerTestPod("idle").Pod, GPUCacheUsage: 0.0},
+				{Pod: schedulerTestPod("half").Pod, GPUCacheUsage: 0.5},
+				{Pod: schedulerTestPod("full").Pod, GPUCacheUsage: 1.0},
+			},
+			expectedScores: map[string]int{"idle": 100, "half": 50, "full": 0},
+		},
+		{
+			name:   "kv-cache-usage scores identically to gpu-usage alias",
+			plugin: NewKVCacheUsage(),
 			pods: []*datastore.PodInfo{
 				{Pod: schedulerTestPod("idle").Pod, GPUCacheUsage: 0.0},
 				{Pod: schedulerTestPod("half").Pod, GPUCacheUsage: 0.5},
@@ -52,8 +70,7 @@ func TestGPUCacheUsageScore(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plugin := NewGPUCacheUsage()
-			scores := plugin.Score(nil, tt.pods)
+			scores := tt.plugin.Score(nil, tt.pods)
 			if len(scores) != len(tt.pods) {
 				t.Fatalf("expected %d scores, got %d", len(tt.pods), len(scores))
 			}
