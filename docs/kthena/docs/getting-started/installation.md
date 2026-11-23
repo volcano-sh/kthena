@@ -25,25 +25,18 @@ Before installing Kthena, ensure you have the following:
 
 ### Method 1: Helm Installation (Recommended)
 
-Kthena Helm charts are published to the [volcano-sh Helm repository](https://github.com/volcano-sh/helm-charts).
+Kthena Helm charts are published to the GitHub Container Registry (GHCR).
 
-1. **Add the volcano-sh Helm repository:**
-
-   ```bash
-   helm repo add volcano-sh https://volcano-sh.github.io/helm-charts
-   helm repo update
-   ```
-
-2. **Install Kthena:**
+1. **Install Kthena:**
 
    ```bash
-   helm install kthena volcano-sh/kthena --namespace kthena-system --create-namespace
+   helm install kthena oci://ghcr.io/volcano-sh/charts/kthena --version v1.1.0 --namespace kthena-system --create-namespace
    ```
 
-   Chart versions in this repository have no `v` prefix (for example, `--version 1.2.0`). Run `helm search repo volcano-sh/kthena --versions` to list them, and add `--devel` to include pre-releases.
+   Chart versions on GHCR have a `v` prefix (for example, `--version v1.1.0`), and `--version` is required.
 
 :::note
-Charts for v1.0.0 and earlier releases were published to `oci://ghcr.io/volcano-sh/charts/kthena`, and they remain available there. Newer releases are published only to the volcano-sh Helm repository.
+Starting with v1.2.0, charts will be published to the [volcano-sh Helm repository](https://github.com/volcano-sh/helm-charts) in addition to GHCR.
 :::
 
 ### Method 2: Manual Installation with GitHub Release Manifests
@@ -98,7 +91,7 @@ Kthena is modular: the **workload** controllers and the **networking** router ar
 **Workload controllers only** — manage model workloads with Kthena while keeping your existing gateway for traffic:
 
 ```bash
-helm install kthena volcano-sh/kthena \
+helm install kthena oci://ghcr.io/volcano-sh/charts/kthena --version v1.1.0 \
   --namespace kthena-system --create-namespace \
   --set networking.enabled=false
 ```
@@ -106,7 +99,7 @@ helm install kthena volcano-sh/kthena \
 **Router only** — use Kthena Router as a standalone, model-aware LLM gateway in front of pods managed by Deployments, StatefulSets, another operator, or external providers:
 
 ```bash
-helm install kthena volcano-sh/kthena \
+helm install kthena oci://ghcr.io/volcano-sh/charts/kthena --version v1.1.0 \
   --namespace kthena-system --create-namespace \
   --set workload.enabled=false
 ```
@@ -120,7 +113,7 @@ You can enable the other component later with `helm upgrade --set <subchart>.ena
 ```bash
 # 1. Fetch and unpack the chart. Replace <chart-version> with the chart version
 #    you have installed — `helm list -n kthena-system` shows it.
-helm pull volcano-sh/kthena --version <chart-version> --untar
+helm pull oci://ghcr.io/volcano-sh/charts/kthena --version <chart-version> --untar
 
 # 2. Apply the CRDs of the subchart you are enabling: use `networking` for the
 #    router, or `workload` for the controllers.
@@ -128,7 +121,7 @@ kubectl apply --server-side -f kthena/charts/<subchart>/crds/
 
 # 3. Enable the subchart. This example turns on the router; use
 #    `--set workload.enabled=true` to turn on the controllers instead.
-helm upgrade kthena volcano-sh/kthena \
+helm upgrade kthena oci://ghcr.io/volcano-sh/charts/kthena --version v1.1.0 \
   --namespace kthena-system --reuse-values \
   --set networking.enabled=true
 ```
@@ -138,7 +131,7 @@ helm upgrade kthena volcano-sh/kthena \
 You can customize the installation by providing values:
 
 ```bash
-helm install kthena volcano-sh/kthena \
+helm install kthena oci://ghcr.io/volcano-sh/charts/kthena --version v1.1.0 \
   --namespace kthena-system \
   --create-namespace \
   --set workload.controllerManager.replicas=2 \
@@ -165,12 +158,12 @@ For a complete list of all configurable Helm values, see the [Helm Chart Values 
 Helm installs CRDs from a chart during the first installation, but `helm upgrade` does not update them. Apply the CRDs from the target Kthena version before upgrading the release:
 
 ```bash
-helm show crds volcano-sh/kthena \
-  --version X.Y.Z \
+helm show crds oci://ghcr.io/volcano-sh/charts/kthena \
+  --version vX.Y.Z \
   | kubectl apply --server-side -f -
 
-helm upgrade kthena volcano-sh/kthena \
-  --version X.Y.Z \
+helm upgrade kthena oci://ghcr.io/volcano-sh/charts/kthena \
+  --version vX.Y.Z \
   --namespace kthena-system
 ```
 

@@ -77,11 +77,9 @@ When deploying Kthena Router, enable Gateway API support by setting the `--enabl
 
 ```bash
 # Configure during Helm installation
-helm repo add volcano-sh https://volcano-sh.github.io/helm-charts
-helm repo update
 helm install kthena \
   --set networking.kthenaRouter.gatewayAPI.enabled=true \
-  volcano-sh/kthena
+  oci://ghcr.io/volcano-sh/charts/kthena --version v1.1.0
 ```
 
 Or modify the configuration in an already deployed Kthena Router:
