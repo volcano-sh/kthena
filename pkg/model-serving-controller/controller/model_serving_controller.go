@@ -3095,14 +3095,16 @@ func (c *ModelServingController) runModelServingSyncPlugins(ctx context.Context,
 		KubeClient:    c.kubeClientSet,
 		ServiceLister: c.servicesLister,
 	})
-	if res.RequeueAfter > 0 {
-		c.enqueueModelServingAfter(ms, res.RequeueAfter)
-	}
+
 	if res.Err != nil {
 		if !res.Continue {
 			return fmt.Errorf("run OnModelServingSync for ModelServing %s/%s: %w", ms.Namespace, ms.Name, res.Err)
 		}
 		klog.Errorf("ModelServing %s/%s OnModelServingSync failed (continuing reconcile): %v", ms.Namespace, ms.Name, res.Err)
+	}
+
+	if res.RequeueAfter > 0 {
+		c.enqueueModelServingAfter(ms, res.RequeueAfter)
 	}
 	return nil
 }
