@@ -24,16 +24,21 @@ import (
 	"k8s.io/klog/v2"
 )
 
-func TryGetRedisClient() *redis.Client {
+// NewRedisClient builds a client from REDIS_HOST, REDIS_PORT and REDIS_PASSWORD without connecting.
+func NewRedisClient() *redis.Client {
 	redisHost := LoadEnv("REDIS_HOST", "redis-server")
 	redisPort := LoadEnv("REDIS_PORT", "6379")
 	redisPassword := LoadEnv("REDIS_PASSWORD", "")
 
-	client := redis.NewClient(&redis.Options{
+	return redis.NewClient(&redis.Options{
 		Addr:     redisHost + ":" + redisPort,
 		Password: redisPassword,
 		DB:       0,
 	})
+}
+
+func TryGetRedisClient() *redis.Client {
+	client := NewRedisClient()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
