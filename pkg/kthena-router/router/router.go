@@ -1003,9 +1003,7 @@ func (r *Router) applyURLRewrite(c *gin.Context, urlRewrite *gatewayv1.HTTPURLRe
 					klog.Errorf("matchedPrefix is not a valid string in context")
 					break
 				}
-				// Replace the matched prefix
-				replacement := *urlRewrite.Path.ReplacePrefixMatch
-				newPath = replacement + strings.TrimPrefix(originalPath, matchedPrefix)
+				newPath = replacePrefixMatchPath(originalPath, matchedPrefix, *urlRewrite.Path.ReplacePrefixMatch)
 				klog.V(4).Infof("Rewrote path prefix from %s to %s (matched prefix: %s)", originalPath, newPath, matchedPrefix)
 			}
 		}
@@ -1015,6 +1013,29 @@ func (r *Router) applyURLRewrite(c *gin.Context, urlRewrite *gatewayv1.HTTPURLRe
 		// Also update the raw path to maintain consistency
 		c.Request.URL.RawPath = ""
 	}
+}
+
+// replacePrefixMatchPath applies HTTPPathModifier.ReplacePrefixMatch the way the
+// Gateway API defines it: the prefix is replaced on a path-element boundary. The
+// separator before the remainder is added only when the path does not already
+// have one, a trailing "/" on the replacement never produces "//" and is kept on
+// an exact match, and the result is never empty. matchedPrefix comes from
+// matchHTTPPathPrefix, which strips trailing slashes except for "/".
+func replacePrefixMatchPath(path, matchedPrefix, replacement string) string {
+	remainder := strings.TrimPrefix(path, matchedPrefix)
+	if matchedPrefix == "/" && remainder != "" && !strings.HasPrefix(remainder, "/") {
+		remainder = "/" + remainder
+	}
+	if strings.HasPrefix(remainder, "/") {
+		// The remainder brings its own separator; a replacement's trailing "/"
+		// is kept only when nothing follows it.
+		replacement = strings.TrimRight(replacement, "/")
+	}
+	newPath := replacement + remainder
+	if newPath == "" {
+		return "/"
+	}
+	return newPath
 }
 
 func (r *Router) proxy(
