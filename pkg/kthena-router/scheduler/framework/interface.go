@@ -57,6 +57,31 @@ type Context struct {
 
 	// MetricsRecorder for recording scheduler plugin metrics
 	MetricsRecorder *metrics.RequestMetricsRecorder
+
+	// ScheduleChain is the plugin chain this scheduling round uses; the
+	// router resolves it (profile chain or global chain) before Schedule
+	// and RunPostHooks reads it back. Must not be nil when Schedule runs.
+	ScheduleChain ScheduleChain
+}
+
+// WeightedScorePlugin pairs a score plugin with the weight its chain
+// configuration assigns it for aggregation.
+type WeightedScorePlugin struct {
+	Plugin ScorePlugin
+	Weight int
+}
+
+// ScheduleChain is the request-scoped handle to the plugin chain in use.
+type ScheduleChain interface {
+	// NeedsOnFlightSync reports whether on-flight request counts must be
+	// synced from Redis before this chain's scoring round.
+	NeedsOnFlightSync() bool
+	// Filters returns the chain's filter plugins.
+	Filters() []FilterPlugin
+	// Scores returns the chain's score plugins with their weights.
+	Scores() []WeightedScorePlugin
+	// PostScheduleHooks returns the chain's post-schedule hooks.
+	PostScheduleHooks() []PostScheduleHook
 }
 
 type ScorePlugin interface {
@@ -76,4 +101,11 @@ type FilterPlugin interface {
 type PostScheduleHook interface {
 	Name() string
 	PostSchedule(ctx *Context, index int)
+}
+
+// PluginCloser is implemented by plugins that hold per-chain resources
+// (background workers, store callbacks). The PluginChainManager closes the plugins
+// of replaced or deleted chains. Close must be idempotent.
+type PluginCloser interface {
+	Close() error
 }

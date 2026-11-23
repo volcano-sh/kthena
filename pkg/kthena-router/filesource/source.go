@@ -63,11 +63,12 @@ type resources struct {
 	// modelRoutes is keyed by "namespace/name" of the ModelRoute, matching the
 	// key format of the datastore ModelRoute APIs.
 	modelRoutes map[string]*aiv1alpha1.ModelRoute
-	// modelServers, providers and secrets are keyed by the namespaced name of
-	// the resource; the value is the parsed and validated manifest.
+	// modelServers, providers, secrets and profiles are keyed by the namespaced
+	// name of the resource; the value is the parsed and validated manifest.
 	modelServers map[types.NamespacedName]*aiv1alpha1.ModelServer
 	providers    map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider
 	secrets      map[types.NamespacedName]*corev1.Secret
+	profiles     map[types.NamespacedName]*aiv1alpha1.SchedulerProfile
 }
 
 func newResources() *resources {
@@ -76,6 +77,7 @@ func newResources() *resources {
 		modelServers: make(map[types.NamespacedName]*aiv1alpha1.ModelServer),
 		providers:    make(map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider),
 		secrets:      make(map[types.NamespacedName]*corev1.Secret),
+		profiles:     make(map[types.NamespacedName]*aiv1alpha1.SchedulerProfile),
 	}
 }
 
@@ -165,6 +167,9 @@ func (s *Source) sync() error {
 			return err
 		}
 	}
+	if err := next.validateReferences(); err != nil {
+		return err
+	}
 
 	s.apply(next)
 	s.digest = digest
@@ -231,6 +236,33 @@ func readAll(files []string) (string, []fileContent, error) {
 	return hex.EncodeToString(hash.Sum(nil)), contents, nil
 }
 
+// validateReferences rejects cross-resource references the snapshot does not
+// resolve (a ModelServer referencing a SchedulerProfile that is not loaded).
+// Future reference checks for other resource pairs belong here too.
+func (res *resources) validateReferences() error {
+	for name, ms := range res.modelServers {
+		ref := profileRef(ms)
+		if ref == nil {
+			continue
+		}
+		key := types.NamespacedName{Namespace: ms.Namespace, Name: *ref}
+		if _, ok := res.profiles[key]; !ok {
+			return fmt.Errorf("ModelServer %s references SchedulerProfile %q which is not loaded", name, *ref)
+		}
+	}
+	return nil
+}
+
+// profileRef returns the referenced SchedulerProfile, nil for the global chain.
+func profileRef(ms *aiv1alpha1.ModelServer) *string {
+	if ms == nil || ms.Spec.TrafficPolicy == nil ||
+		ms.Spec.TrafficPolicy.LoadBalancer == nil ||
+		ms.Spec.TrafficPolicy.LoadBalancer.SchedulerProfile == nil {
+		return nil
+	}
+	return ms.Spec.TrafficPolicy.LoadBalancer.SchedulerProfile
+}
+
 // decodeInto parses every document of a manifest file into res.
 func decodeInto(path string, data []byte, res *resources) error {
 	decoder := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(data), 4096)
@@ -291,6 +323,15 @@ func decodeObject(raw json.RawMessage, typeMeta metav1.TypeMeta, res *resources)
 			return fmt.Errorf("invalid ExternalModelProvider %s/%s: %s", obj.Namespace, obj.Name, reason)
 		}
 		res.providers[utils.GetNamespaceName(obj)] = obj
+	case typeMeta.APIVersion == aiv1alpha1.SchemeGroupVersion.String() && typeMeta.Kind == aiv1alpha1.SchedulerProfileKind:
+		obj := &aiv1alpha1.SchedulerProfile{}
+		if err := unmarshal(raw, obj, &obj.ObjectMeta); err != nil {
+			return err
+		}
+		if ok, reason := webhook.ValidateSchedulerProfile(obj); !ok {
+			return fmt.Errorf("invalid SchedulerProfile %s/%s: %s", obj.Namespace, obj.Name, reason)
+		}
+		res.profiles[utils.GetNamespaceName(obj)] = obj
 	case typeMeta.APIVersion == "v1" && typeMeta.Kind == "Secret":
 		obj := &corev1.Secret{}
 		if err := unmarshal(raw, obj, &obj.ObjectMeta); err != nil {
@@ -371,6 +412,17 @@ func (s *Source) apply(next *resources) {
 		if err := s.store.DeleteExternalModelProvider(name); err != nil {
 			klog.Errorf("failed to delete external model provider %s: %v", name, err)
 		}
+	}
+
+	// Profiles first: a ModelServer in the same batch may reference one.
+	for _, profile := range next.profiles {
+		s.store.AddOrUpdateSchedulerProfile(profile)
+	}
+	for name := range s.applied.profiles {
+		if _, ok := next.profiles[name]; ok {
+			continue
+		}
+		s.store.DeleteSchedulerProfile(name)
 	}
 
 	for name, ms := range next.modelServers {

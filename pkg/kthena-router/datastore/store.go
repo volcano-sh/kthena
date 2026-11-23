@@ -25,6 +25,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -164,10 +165,27 @@ type EventData struct {
 
 	ModelName  string
 	ModelRoute *aiv1alpha1.ModelRoute
+
+	SchedulerProfileKey types.NamespacedName
+}
+
+// schedulerProfileInfo stores a profile and the ModelServers that reference it.
+// Keep references even when the profile is absent so a later profile add can
+// build the chain for existing ModelServers.
+type schedulerProfileInfo struct {
+	profile      *aiv1alpha1.SchedulerProfile
+	modelServers sets.Set[types.NamespacedName]
 }
 
 // CallbackFunc is the type of function that can be registered as a callback
 type CallbackFunc func(data EventData)
+
+// callbackEntry pairs a registered callback with an id, so it can be
+// unregistered (Go function values are not comparable).
+type callbackEntry struct {
+	id uint64
+	fn CallbackFunc
+}
 
 // PodRuntimeInspector fetches runtime metrics and loaded models for a pod.
 type PodRuntimeInspector interface {
@@ -212,6 +230,17 @@ type Store interface {
 	DeleteModelServer(name types.NamespacedName) error
 	// Get modelServer
 	GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServer
+	// Add or update a SchedulerProfile and trigger SchedulerProfile callbacks.
+	AddOrUpdateSchedulerProfile(profile *aiv1alpha1.SchedulerProfile)
+	// Delete a SchedulerProfile and trigger SchedulerProfile callbacks.
+	DeleteSchedulerProfile(name types.NamespacedName)
+	// Get a SchedulerProfile, or nil when absent.
+	GetSchedulerProfile(name types.NamespacedName) *aiv1alpha1.SchedulerProfile
+	// GetAllSchedulerProfiles returns all SchedulerProfiles.
+	GetAllSchedulerProfiles() map[types.NamespacedName]*aiv1alpha1.SchedulerProfile
+	// GetModelServerCountForSchedulerProfile returns the number of ModelServers
+	// that currently reference the SchedulerProfile.
+	GetModelServerCountForSchedulerProfile(name types.NamespacedName) int
 	GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, error)
 
 	// Refresh Store and ModelServer when add a new pod or update a pod
@@ -245,7 +274,7 @@ type Store interface {
 	GetPrefillPodsForDecodeGroup(modelServerName types.NamespacedName, decodePodName types.NamespacedName) ([]*PodInfo, error)
 
 	// New methods for callback management
-	RegisterCallback(kind string, callback CallbackFunc)
+	RegisterCallback(kind string, callback CallbackFunc) (unregister func())
 	// Run to update pod info periodically
 	Run(context.Context)
 
@@ -389,7 +418,14 @@ type ModelTarget struct {
 }
 
 type store struct {
-	modelServer            sync.Map // map[types.NamespacedName]*modelServer
+	modelServer sync.Map // map[types.NamespacedName]*modelServer
+
+	// schedulerProfilesMu guards profiles and their reverse ModelServer index.
+	// Lock order: modelServerObj.mutex → schedulerProfilesMu, never the
+	// reverse.
+	schedulerProfilesMu sync.RWMutex
+	schedulerProfiles   map[types.NamespacedName]*schedulerProfileInfo
+
 	externalModelProviders sync.Map // map[types.NamespacedName]*aiv1alpha1.ExternalModelProvider
 	pods                   sync.Map // map[types.NamespacedName]*PodInfo
 	secrets                sync.Map // map[types.NamespacedName]*corev1.Secret
@@ -425,8 +461,9 @@ type store struct {
 	httpRoutes     map[string]*gatewayv1.HTTPRoute // key: namespace/name, value: *gatewayv1.HTTPRoute
 	gatewayRoutes  map[string]sets.Set[string]     // key: gateway key (namespace/name), value: set of HTTPRoute keys
 	// New fields for callback management
-	callbacksMu sync.RWMutex
-	callbacks   map[string][]CallbackFunc
+	callbacksMu    sync.RWMutex
+	callbacks      map[string][]callbackEntry
+	nextCallbackID atomic.Uint64
 
 	// initialSynced is used to indicate whether all the resources has been processed and storred into this store.
 	initialSynced *atomic.Bool
@@ -442,6 +479,7 @@ type store struct {
 func New(opts ...Option) Store {
 	s := &store{
 		modelServer:         sync.Map{},
+		schedulerProfiles:   make(map[types.NamespacedName]*schedulerProfileInfo),
 		pods:                sync.Map{},
 		routeInfo:           make(map[string]*modelRouteInfo),
 		routes:              make(map[string][]*aiv1alpha1.ModelRoute),
@@ -451,7 +489,7 @@ func New(opts ...Option) Store {
 		inferencePools:      make(map[string]*inferencev1.InferencePool),
 		httpRoutes:          make(map[string]*gatewayv1.HTTPRoute),
 		gatewayRoutes:       make(map[string]sets.Set[string]),
-		callbacks:           make(map[string][]CallbackFunc),
+		callbacks:           make(map[string][]callbackEntry),
 		initialSynced:       &atomic.Bool{},
 		requestWaitingQueue: sync.Map{},
 		// Create token tracker with environment-based configuration
@@ -919,7 +957,9 @@ func (s *store) DecrPodOnFlightRequests(podName types.NamespacedName) {
 func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set[types.NamespacedName]) error {
 	name := utils.GetNamespaceName(ms)
 	var modelServerObj *modelServer
+	created := false
 	if value, ok := s.modelServer.Load(name); !ok {
+		created = true
 		modelServerObj = newModelServer(ms)
 		// New object — no concurrent access yet, safe to write without lock
 		if pods != nil {
@@ -940,6 +980,7 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 		// Existing object — concurrent readers may access modelServer and pods,
 		// so we must hold the lock to prevent data races.
 		modelServerObj.mutex.Lock()
+		oldProfileRef, hasOldProfileRef := schedulerProfileReference(modelServerObj.modelServer)
 		selectorChanged := !reflect.DeepEqual(modelServerObj.modelServer.Spec.WorkloadSelector, ms.Spec.WorkloadSelector)
 		modelServerObj.modelServer = ms
 		if pods != nil {
@@ -960,9 +1001,19 @@ func (s *store) AddOrUpdateModelServer(ms *aiv1alpha1.ModelServer, pods sets.Set
 				}
 			}
 		}
+
+		newProfileRef, hasNewProfileRef := schedulerProfileReference(ms)
+		s.updateSchedulerProfileReferences(name,
+			optionalProfileRef(oldProfileRef, hasOldProfileRef),
+			optionalProfileRef(newProfileRef, hasNewProfileRef))
 		modelServerObj.mutex.Unlock()
 	}
 	s.modelServer.Store(name, modelServerObj)
+	if created {
+		newProfileRef, hasNewProfileRef := schedulerProfileReference(ms)
+		s.updateSchedulerProfileReferences(name, nil,
+			optionalProfileRef(newProfileRef, hasNewProfileRef))
+	}
 	return nil
 }
 
@@ -972,6 +1023,11 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 		return nil
 	}
 	modelServerObj := value.(*modelServer)
+	modelServerObj.mutex.Lock()
+	if key, hasRef := schedulerProfileReference(modelServerObj.modelServer); hasRef {
+		s.updateSchedulerProfileReferences(ms, &key, nil)
+	}
+	modelServerObj.mutex.Unlock()
 	podNames := modelServerObj.getPods()
 	podRemoved := false
 	// then delete the model server from all pod info
@@ -1001,11 +1057,174 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 	return nil
 }
 
+// schedulerProfileReference extracts a ModelServer's optional profile key.
+func schedulerProfileReference(ms *aiv1alpha1.ModelServer) (types.NamespacedName, bool) {
+	if ms == nil || ms.Spec.TrafficPolicy == nil ||
+		ms.Spec.TrafficPolicy.LoadBalancer == nil ||
+		ms.Spec.TrafficPolicy.LoadBalancer.SchedulerProfile == nil {
+		return types.NamespacedName{}, false
+	}
+	return types.NamespacedName{
+		Namespace: ms.Namespace,
+		Name:      *ms.Spec.TrafficPolicy.LoadBalancer.SchedulerProfile,
+	}, true
+}
+
+func optionalProfileRef(key types.NamespacedName, ok bool) *types.NamespacedName {
+	if !ok {
+		return nil
+	}
+	return &key
+}
+
+func sameProfileRef(a, b *types.NamespacedName) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// updateSchedulerProfileReferences changes only the reverse Profile-to-MS
+// index. The caller supplies the old and new references from the ModelServer
+// values it is reconciling.
+func (s *store) updateSchedulerProfileReferences(
+	modelServerName types.NamespacedName,
+	oldProfile, newProfile *types.NamespacedName,
+) {
+	if sameProfileRef(oldProfile, newProfile) {
+		return
+	}
+	affectedProfiles := make([]types.NamespacedName, 0, 2)
+	if oldProfile != nil {
+		affectedProfiles = append(affectedProfiles, *oldProfile)
+	}
+	if newProfile != nil && (oldProfile == nil || *newProfile != *oldProfile) {
+		affectedProfiles = append(affectedProfiles, *newProfile)
+	}
+	s.schedulerProfilesMu.Lock()
+	if s.schedulerProfiles == nil {
+		s.schedulerProfiles = make(map[types.NamespacedName]*schedulerProfileInfo)
+	}
+	if oldProfile != nil {
+		if info := s.schedulerProfiles[*oldProfile]; info != nil {
+			info.modelServers.Delete(modelServerName)
+			if info.profile == nil && info.modelServers.Len() == 0 {
+				delete(s.schedulerProfiles, *oldProfile)
+			}
+		}
+	}
+	if newProfile != nil {
+		info := s.schedulerProfiles[*newProfile]
+		if info == nil {
+			info = &schedulerProfileInfo{modelServers: sets.New[types.NamespacedName]()}
+			s.schedulerProfiles[*newProfile] = info
+		}
+		info.modelServers.Insert(modelServerName)
+	}
+	s.schedulerProfilesMu.Unlock()
+
+	// Notify for each affected profile key. The payload is a bare key on
+	// purpose: by the time the async callback runs, the store already holds
+	// the current object, so carrying one would only invite stale reads.
+	for _, key := range affectedProfiles {
+		s.triggerCallbacks("SchedulerProfileReference", EventData{
+			EventType:           EventUpdate,
+			SchedulerProfileKey: key,
+		})
+	}
+}
+
 func (s *store) GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServer {
 	if value, ok := s.modelServer.Load(name); ok {
 		return value.(*modelServer).getModelServer()
 	}
 	return nil
+}
+
+// AddOrUpdateSchedulerProfile stores the given SchedulerProfile and triggers
+// "SchedulerProfile" callbacks with the profile object.
+func (s *store) AddOrUpdateSchedulerProfile(profile *aiv1alpha1.SchedulerProfile) {
+	if profile == nil {
+		return
+	}
+	key := types.NamespacedName{Namespace: profile.Namespace, Name: profile.Name}
+	s.schedulerProfilesMu.Lock()
+	if s.schedulerProfiles == nil {
+		s.schedulerProfiles = make(map[types.NamespacedName]*schedulerProfileInfo)
+	}
+	info := s.schedulerProfiles[key]
+	eventType := EventAdd
+	if info == nil {
+		info = &schedulerProfileInfo{modelServers: sets.New[types.NamespacedName]()}
+		s.schedulerProfiles[key] = info
+	} else if info.profile != nil {
+		if reflect.DeepEqual(info.profile.Spec, profile.Spec) {
+			info.profile = profile
+			s.schedulerProfilesMu.Unlock()
+			return
+		}
+		eventType = EventUpdate
+	}
+	info.profile = profile
+	s.schedulerProfilesMu.Unlock()
+	s.triggerCallbacks("SchedulerProfile", EventData{
+		EventType:           eventType,
+		SchedulerProfileKey: key,
+	})
+}
+
+// DeleteSchedulerProfile removes the SchedulerProfile and triggers
+// "SchedulerProfile" callbacks for its key.
+func (s *store) DeleteSchedulerProfile(name types.NamespacedName) {
+	s.schedulerProfilesMu.Lock()
+	info := s.schedulerProfiles[name]
+	if info == nil || info.profile == nil {
+		s.schedulerProfilesMu.Unlock()
+		return
+	}
+	info.profile = nil
+	if info.modelServers.Len() == 0 {
+		delete(s.schedulerProfiles, name)
+	}
+	s.schedulerProfilesMu.Unlock()
+	s.triggerCallbacks("SchedulerProfile", EventData{
+		EventType:           EventDelete,
+		SchedulerProfileKey: name,
+	})
+}
+
+// GetSchedulerProfile returns the stored SchedulerProfile, or nil when absent.
+func (s *store) GetSchedulerProfile(name types.NamespacedName) *aiv1alpha1.SchedulerProfile {
+	s.schedulerProfilesMu.RLock()
+	defer s.schedulerProfilesMu.RUnlock()
+	if info := s.schedulerProfiles[name]; info != nil {
+		return info.profile
+	}
+	return nil
+}
+
+// GetAllSchedulerProfiles returns all SchedulerProfiles in the store
+func (s *store) GetAllSchedulerProfiles() map[types.NamespacedName]*aiv1alpha1.SchedulerProfile {
+	s.schedulerProfilesMu.RLock()
+	defer s.schedulerProfilesMu.RUnlock()
+	result := make(map[types.NamespacedName]*aiv1alpha1.SchedulerProfile)
+	for key, info := range s.schedulerProfiles {
+		if info.profile != nil {
+			result[key] = info.profile
+		}
+	}
+	return result
+}
+
+// GetModelServerCountForSchedulerProfile returns the number of ModelServers
+// that currently reference the given SchedulerProfile.
+func (s *store) GetModelServerCountForSchedulerProfile(name types.NamespacedName) int {
+	s.schedulerProfilesMu.RLock()
+	defer s.schedulerProfilesMu.RUnlock()
+	if info := s.schedulerProfiles[name]; info != nil {
+		return info.modelServers.Len()
+	}
+	return 0
 }
 
 func (s *store) GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, error) {
@@ -1928,17 +2147,33 @@ func updateHistogramMetrics(podinfo *PodInfo, histogramMetrics map[string]*dto.H
 	}
 }
 
-// RegisterCallback registers a callback function for a specific resource
-func (s *store) RegisterCallback(kind string, callback CallbackFunc) {
+// RegisterCallback registers a callback function for a specific resource and
+// returns a function that unregisters it.
+func (s *store) RegisterCallback(kind string, callback CallbackFunc) (unregister func()) {
+	id := s.nextCallbackID.Add(1)
 	s.callbacksMu.Lock()
-	defer s.callbacksMu.Unlock()
-	s.callbacks[kind] = append(s.callbacks[kind], callback)
+	s.callbacks[kind] = append(s.callbacks[kind], callbackEntry{id: id, fn: callback})
+	s.callbacksMu.Unlock()
+
+	return func() {
+		s.callbacksMu.Lock()
+		defer s.callbacksMu.Unlock()
+		for i, entry := range s.callbacks[kind] {
+			if entry.id == id {
+				s.callbacks[kind] = slices.Delete(s.callbacks[kind], i, i+1)
+				return
+			}
+		}
+	}
 }
 
 // triggerCallbacks executes all registered callbacks for a specific event type
 func (s *store) triggerCallbacks(kind string, data EventData) {
 	s.callbacksMu.RLock()
-	callbacks := s.callbacks[kind]
+	callbacks := make([]CallbackFunc, 0, len(s.callbacks[kind]))
+	for _, entry := range s.callbacks[kind] {
+		callbacks = append(callbacks, entry.fn)
+	}
 	s.callbacksMu.RUnlock()
 	for _, callback := range callbacks {
 		go callback(data)

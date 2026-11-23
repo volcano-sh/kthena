@@ -97,6 +97,7 @@ var EnableSessionBoost = getEnvBool("ENABLE_SESSION_BOOST", false)
 
 type Router struct {
 	scheduler       scheduler.Scheduler
+	chainManager    *scheduler.PluginChainManager
 	authenticator   *auth.JWTAuthenticator
 	store           datastore.Store
 	loadRateLimiter *ratelimit.TokenRateLimiter
@@ -170,6 +171,12 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 		klog.Fatalf("failed to parse router config: %v", err)
 	}
 
+	chainManager := scheduler.NewPluginChainManager(store)
+	err = chainManager.InitGlobalPluginChain(routerConfig)
+	if err != nil {
+		klog.Fatalf("failed to build global plugin chain: %v", err)
+	}
+
 	sessionStickyStore, err := sessionsticky.NewStore(routerConfig.SessionSticky)
 	if err != nil {
 		klog.Fatalf("session sticky store: %v", err)
@@ -206,9 +213,12 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 		klog.Fatalf("failed to create access logger: %v", err)
 	}
 
+	sched := scheduler.NewScheduler(store)
+
 	return &Router{
 		store:             store,
-		scheduler:         scheduler.NewScheduler(store, routerConfig),
+		scheduler:         sched,
+		chainManager:      chainManager,
 		authenticator:     auth.NewJWTAuthenticator(routerConfig),
 		loadRateLimiter:   loadRateLimiter,
 		accessLogger:      accessLogger,
@@ -223,6 +233,11 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 		sessionBoostTimeout: parseSessionBoostTimeout(),
 		sessionStickyStore:  sessionStickyStore,
 	}
+}
+
+// PluginChainManager exposes the router's plugin chain manager for the controllers.
+func (r *Router) PluginChainManager() *scheduler.PluginChainManager {
+	return r.chainManager
 }
 
 const defaultQueueTimeout = 60 * time.Second
@@ -660,6 +675,29 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 		PDGroup:         pdGroup,
 		MetricsRecorder: metricsRecorder,
 	}
+	// Resolve and acquire the plugin chain here (the ModelServer object is
+	// already at hand) and carry it on the context; Schedule and RunPostHooks
+	// reuse it. AcquireProfile marks the chain in use atomically with the
+	// lookup, so a chain returned here is guaranteed not retired/closed by a
+	// concurrent profile update or delete. A ModelServer without a profile
+	// reference serves on the global chain; a broken reference fails the
+	// request instead of falling back.
+	chain, resolveErr := r.chainManager.AcquireProfile(modelServer)
+	if resolveErr != nil {
+		klog.V(4).Infof("model %s: modelserver %s: failed to resolve scheduler profile: %v",
+			modelName, modelServer.Name, resolveErr)
+		accesslog.SetError(c, "scheduling", resolveErr.Error())
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable,
+			fmt.Sprintf("failed to resolve scheduler profile: %v", resolveErr))
+		return fmt.Errorf("failed to resolve scheduler profile: %w", resolveErr)
+	}
+
+	// Released when doLoadbalance returns — RunPostHooks runs inside
+	// this call stack, so the close of a replaced chain waits until
+	// every in-flight request finished its post hooks.
+	defer chain.Release()
+	ctx.ScheduleChain = chain
+
 	if stickyBindingOK {
 		ctx.StickyPodName = stickyBinding.Pod
 		ctx.StickyPrefillPodName = stickyBinding.PrefillPod

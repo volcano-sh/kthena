@@ -60,6 +60,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Networking().V1alpha1().ModelRoutes().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("modelservers"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Networking().V1alpha1().ModelServers().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("schedulerprofiles"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Networking().V1alpha1().SchedulerProfiles().Informer()}, nil
 
 		// Group=workload.serving.volcano.sh, Version=v1alpha1
 	case workloadv1alpha1.SchemeGroupVersion.WithResource("autoscalingpolicies"):
