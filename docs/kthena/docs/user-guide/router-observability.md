@@ -318,6 +318,62 @@ when routing or queue time falls between phase checkpoints. See the
 [access-log field reference](../reference/router-access-log-fields.md) for
 field-by-field descriptions and error examples.
 
+### Upstream-reported token usage
+
+`input_tokens` is the router's own estimate, calculated before the request is
+sent. To also log what the upstream reported in its response usage, set
+`accessLog.includeUpstreamUsage` in the router configuration. With Helm, set the
+`networking.kthenaRouter.accessLog.includeUpstreamUsage` value, which renders
+into the `kthena-router-config` ConfigMap:
+
+```yaml
+networking:
+  kthenaRouter:
+    accessLog:
+      includeUpstreamUsage: true
+```
+
+The router reads this setting at startup, so restart it after changing the
+ConfigMap. Access logging itself must still be enabled through
+`ACCESS_LOG_ENABLED`. Two fields are then added next to `input_tokens`:
+
+| Field | Source |
+| --- | --- |
+| `upstream_input_tokens` | `usage.prompt_tokens` reported by the upstream |
+| `cached_input_tokens` | `usage.prompt_tokens_details.cached_tokens` reported by the upstream |
+
+```json
+{
+  "input_tokens": 1790,
+  "upstream_input_tokens": 1830,
+  "cached_input_tokens": 1536,
+  "output_tokens": 412
+}
+```
+
+Each field records only what the upstream reported. A field the upstream omits
+or sends as `null` is left out of the record, and `0` is written only when the
+upstream explicitly reports `0`. As for `output_tokens`, a usage report is used
+only when its token total is positive (`total_tokens`, or prompt plus
+completion tokens when `total_tokens` is absent or `0`); an all-zero report is
+ignored and neither field is written. Both values come from the same usage report;
+`cached_input_tokens` is never derived from `input_tokens`. The meaning of
+`input_tokens` and `output_tokens` does not change.
+
+Current coverage and limits:
+
+- The fields are recorded for OpenAI-compatible Chat Completions and
+  Completions requests to ModelServer and InferencePool backends and to
+  `ExternalModelProvider` backends. They are not yet recorded for the Responses
+  API, Anthropic Messages, other `/v1/*` endpoints such as `/v1/embeddings`, or
+  prefill-decode disaggregated requests.
+- For streaming requests the router asks the upstream for a usage event when the
+  client did not. If the stream breaks off, values from a usage event already
+  received are kept; otherwise the fields are omitted.
+- Most engines report `cached_tokens` only when asked to, for example vLLM with
+  `--enable-prompt-tokens-details` or SGLang with `--enable-cache-report`. Check
+  the documentation for your engine version.
+
 When `ACCESS_LOG_OUTPUT` is `stdout` or `stderr`, `kubectl logs` can contain
 access-log records alongside other process logs. Parse each input line as JSON
 and discard non-JSON process logs. This is safer than matching lines with a

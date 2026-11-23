@@ -20,6 +20,7 @@ A Helm chart for deploying Kthena
 | networking.enabled | bool | `true` | Enable the networking subchart. |
 | networking.kthenaRouter.accessLog.enabled | bool | `true` | Enable router access logging. |
 | networking.kthenaRouter.accessLog.format | string | `"text"` | Access-log format. Supported values are `text` and `json`. |
+| networking.kthenaRouter.accessLog.includeUpstreamUsage | bool | `false` | Record the upstream-reported input and cached-input token counts as `upstream_input_tokens` and `cached_input_tokens`. |
 | networking.kthenaRouter.accessLog.output | string | `"stdout"` | Access-log destination: `stdout`, `stderr`, or a file path. |
 | networking.kthenaRouter.batch.enabled | bool | `false` | Enable the batch API. It needs the Redis from the `redis-config` ConfigMap. |
 | networking.kthenaRouter.batch.limits.maxFileBytes | int | `209715200` | Largest file one upload may have, in bytes. |

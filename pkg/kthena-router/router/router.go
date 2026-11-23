@@ -126,6 +126,10 @@ type Router struct {
 	sessionBoostTimeout time.Duration
 
 	sessionStickyStore sessionsticky.Store
+
+	// includeUpstreamUsage records upstream-reported input and cached-input
+	// token counts in the access log (accessLog.includeUpstreamUsage).
+	includeUpstreamUsage bool
 }
 
 // ActiveRequestCount returns the number of requests currently being handled by the router.
@@ -208,6 +212,9 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 	if err != nil {
 		klog.Fatalf("failed to create access logger: %v", err)
 	}
+	if routerConfig.AccessLog.IncludeUpstreamUsage && !accessLogConfig.Enabled {
+		klog.Infof("accessLog.includeUpstreamUsage is set but access logging is disabled; upstream usage is not logged")
+	}
 
 	return &Router{
 		store:             store,
@@ -225,7 +232,38 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 
 		sessionBoostTimeout: parseSessionBoostTimeout(),
 		sessionStickyStore:  sessionStickyStore,
+
+		includeUpstreamUsage: routerConfig.AccessLog.IncludeUpstreamUsage,
 	}
+}
+
+// recordUpstreamUsage copies the upstream-reported input and cached-input
+// token counts from usage into the access log when includeUpstreamUsage is
+// set and the request is a Chat Completions or Completions request. A count
+// the upstream did not report is left out of the log.
+func (r *Router) recordUpstreamUsage(accessCtx *accesslog.AccessLogContext, usage providers.TokenUsage) {
+	if !r.includeUpstreamUsage || !isUpstreamUsagePath(accessCtx.Path) {
+		return
+	}
+	accessCtx.SetUpstreamUsage(
+		reportedTokenCount(usage.PromptTokens, usage.PromptTokensReported),
+		reportedTokenCount(usage.CachedPromptTokens, usage.CachedPromptTokensReported),
+	)
+}
+
+// isUpstreamUsagePath reports whether p, the client-facing path recorded by
+// the access-log middleware, is an API whose upstream usage is logged. Other
+// /v1/* paths reaching a model server, such as /v1/embeddings, are parsed with
+// the same OpenAI usage parser but are not covered yet.
+func isUpstreamUsagePath(p string) bool {
+	return p == "/v1/chat/completions" || p == "/v1/completions"
+}
+
+func reportedTokenCount(count int, reported bool) *int {
+	if !reported {
+		return nil
+	}
+	return &count
 }
 
 const defaultQueueTimeout = 60 * time.Second
@@ -1095,6 +1133,7 @@ func (r *Router) proxyModelEndpoint(
 			// Update access log with output tokens
 			if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
 				accessCtx.SetTokenCounts(accessCtx.InputTokens, usage.CompletionTokens)
+				r.recordUpstreamUsage(accessCtx, usage)
 			}
 
 			// Record output token metrics
@@ -1202,6 +1241,7 @@ func (r *Router) proxyExternalProvider(
 		}
 		if accessCtx := accesslog.GetAccessLogContext(c); accessCtx != nil {
 			accessCtx.SetTokenCounts(accessCtx.InputTokens, usage.CompletionTokens)
+			r.recordUpstreamUsage(accessCtx, usage)
 		}
 		if metricsRecorder != nil {
 			metricsRecorder.RecordOutputTokens(usage.CompletionTokens)

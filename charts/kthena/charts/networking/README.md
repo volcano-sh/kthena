@@ -102,6 +102,7 @@ kthenaRouter:
 | `kthenaRouter.accessLog.enabled`           | boolean | `true`           | Enable request access logging                                                  |
 | `kthenaRouter.accessLog.format`            | string  | `"text"`         | Access-log format: `text` or `json`                                            |
 | `kthenaRouter.accessLog.output`            | string  | `"stdout"`       | Access-log destination: `stdout`, `stderr`, or a file path                     |
+| `kthenaRouter.accessLog.includeUpstreamUsage` | boolean | `false`       | Record upstream-reported input and cached-input token counts                   |
 
 #### Session Boost Configuration
 

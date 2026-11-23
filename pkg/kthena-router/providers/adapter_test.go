@@ -593,7 +593,7 @@ func TestOpenAIAdapterResponseParser(t *testing.T) {
 		result := parser.ParseStreamLine(`data: {"usage":{"prompt_tokens":11,"completion_tokens":22,"total_tokens":33}}`)
 		assert.True(t, result.HasUsage)
 		assert.True(t, result.SuppressLine, "router-injected usage-only chunk must be withheld")
-		assert.Equal(t, TokenUsage{PromptTokens: 11, CompletionTokens: 22, TotalTokens: 33}, result.Usage)
+		assert.Equal(t, TokenUsage{PromptTokens: 11, CompletionTokens: 22, TotalTokens: 33, PromptTokensReported: true}, result.Usage)
 
 		result = parser.ParseStreamLine(`data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":22,"total_tokens":33}}`)
 		assert.True(t, result.HasUsage)
@@ -611,11 +611,11 @@ func TestOpenAIAdapterResponseParser(t *testing.T) {
 
 		usage, ok := parser.ParseBody([]byte(`{"usage":{"prompt_tokens":7,"completion_tokens":5,"total_tokens":12}}`))
 		assert.True(t, ok)
-		assert.Equal(t, TokenUsage{PromptTokens: 7, CompletionTokens: 5, TotalTokens: 12}, usage)
+		assert.Equal(t, TokenUsage{PromptTokens: 7, CompletionTokens: 5, TotalTokens: 12, PromptTokensReported: true}, usage)
 
 		usage, ok = parser.ParseBody([]byte(`{"usage":{"prompt_tokens":7,"completion_tokens":0,"total_tokens":7}}`))
 		assert.True(t, ok)
-		assert.Equal(t, TokenUsage{PromptTokens: 7, TotalTokens: 7}, usage)
+		assert.Equal(t, TokenUsage{PromptTokens: 7, TotalTokens: 7, PromptTokensReported: true}, usage)
 
 		parser.RecordStreamLineWritten("data: [DONE]\n")
 		assert.True(t, parser.StreamCompleted())
@@ -955,4 +955,222 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestOpenAIUsageParserReportedPromptAndCachedTokens(t *testing.T) {
+	tests := []struct {
+		name      string
+		usage     string
+		wantOK    bool
+		wantUsage TokenUsage
+	}{
+		{
+			name:   "cached tokens reported",
+			usage:  `{"prompt_tokens":1830,"completion_tokens":412,"total_tokens":2242,"prompt_tokens_details":{"cached_tokens":1536}}`,
+			wantOK: true,
+			wantUsage: TokenUsage{
+				PromptTokens: 1830, CompletionTokens: 412, TotalTokens: 2242, PromptTokensReported: true,
+				CachedPromptTokens: 1536, CachedPromptTokensReported: true,
+			},
+		},
+		{
+			name:   "cached tokens explicitly 0",
+			usage:  `{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,"prompt_tokens_details":{"cached_tokens":0}}`,
+			wantOK: true,
+			wantUsage: TokenUsage{
+				PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true,
+				CachedPromptTokensReported: true,
+			},
+		},
+		{
+			name:      "cached tokens null",
+			usage:     `{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,"prompt_tokens_details":{"cached_tokens":null}}`,
+			wantOK:    true,
+			wantUsage: TokenUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true},
+		},
+		{
+			name:      "prompt token details null",
+			usage:     `{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,"prompt_tokens_details":null}`,
+			wantOK:    true,
+			wantUsage: TokenUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true},
+		},
+		{
+			name:      "prompt token details without cached tokens",
+			usage:     `{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,"prompt_tokens_details":{"audio_tokens":0}}`,
+			wantOK:    true,
+			wantUsage: TokenUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true},
+		},
+		{
+			// A malformed optional detail leaves the existing counts usable.
+			name:      "cached tokens as a string",
+			usage:     `{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,"prompt_tokens_details":{"cached_tokens":"16"}}`,
+			wantOK:    true,
+			wantUsage: TokenUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true},
+		},
+		{
+			name:      "cached tokens as a fraction",
+			usage:     `{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,"prompt_tokens_details":{"cached_tokens":16.5}}`,
+			wantOK:    true,
+			wantUsage: TokenUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true},
+		},
+		{
+			name:      "prompt token details as a string",
+			usage:     `{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,"prompt_tokens_details":"n/a"}`,
+			wantOK:    true,
+			wantUsage: TokenUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true},
+		},
+		{
+			name:      "prompt token details as an array",
+			usage:     `{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,"prompt_tokens_details":[16]}`,
+			wantOK:    true,
+			wantUsage: TokenUsage{PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true},
+		},
+		{
+			name:      "prompt tokens absent",
+			usage:     `{"completion_tokens":5,"total_tokens":5}`,
+			wantOK:    true,
+			wantUsage: TokenUsage{CompletionTokens: 5, TotalTokens: 5},
+		},
+		{
+			name:      "prompt tokens null",
+			usage:     `{"prompt_tokens":null,"completion_tokens":5,"total_tokens":5}`,
+			wantOK:    true,
+			wantUsage: TokenUsage{CompletionTokens: 5, TotalTokens: 5},
+		},
+		{
+			name:   "prompt tokens explicitly 0",
+			usage:  `{"prompt_tokens":0,"completion_tokens":5,"total_tokens":5}`,
+			wantOK: true,
+			wantUsage: TokenUsage{
+				CompletionTokens: 5, TotalTokens: 5, PromptTokensReported: true,
+			},
+		},
+		{
+			name:   "total tokens absent is derived and cached 0 is kept",
+			usage:  `{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":0}}`,
+			wantOK: true,
+			wantUsage: TokenUsage{
+				PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true,
+				CachedPromptTokensReported: true,
+			},
+		},
+		{
+			name:   "total tokens 0 is derived and cached 0 is kept",
+			usage:  `{"prompt_tokens":20,"completion_tokens":5,"total_tokens":0,"prompt_tokens_details":{"cached_tokens":0}}`,
+			wantOK: true,
+			wantUsage: TokenUsage{
+				PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true,
+				CachedPromptTokensReported: true,
+			},
+		},
+		{
+			// Validity is still decided by the total, so an all-zero usage
+			// object is not surfaced even when it reports cached tokens.
+			name:   "all-zero usage with cached 0 is not valid usage",
+			usage:  `{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,"prompt_tokens_details":{"cached_tokens":0}}`,
+			wantOK: false,
+		},
+	}
+
+	adapter, err := NewAdapter(networkingv1alpha1.OpenAI)
+	assert.NoError(t, err)
+	for _, path := range []string{"/v1/chat/completions", "/v1/completions"} {
+		for _, tt := range tests {
+			t.Run(path+"/"+tt.name, func(t *testing.T) {
+				usage, ok := adapter.ResponseParser(nil, path).ParseBody([]byte(`{"usage":` + tt.usage + `}`))
+				assert.Equal(t, tt.wantOK, ok)
+				if tt.wantOK {
+					assert.Equal(t, tt.wantUsage, usage)
+				}
+
+				result := adapter.ResponseParser(nil, path).ParseStreamLine(`data: {"choices":[],"usage":` + tt.usage + "}\n")
+				assert.Equal(t, tt.wantOK, result.HasUsage)
+				if tt.wantOK {
+					assert.Equal(t, tt.wantUsage, result.Usage)
+				} else {
+					assert.Equal(t, TokenUsage{}, result.Usage)
+				}
+			})
+		}
+	}
+}
+
+// Only the Chat Completions / Completions parser reports prompt and cached
+// token presence for now; other protocols leave the flags unset.
+func TestNonOpenAIChatParsersDoNotReportPromptTokenPresence(t *testing.T) {
+	openAI, err := NewAdapter(networkingv1alpha1.OpenAI)
+	assert.NoError(t, err)
+	anthropic, err := NewAdapter(networkingv1alpha1.Anthropic)
+	assert.NoError(t, err)
+
+	usage, ok := openAI.ResponseParser(nil, "/v1/responses").ParseBody(
+		[]byte(`{"usage":{"input_tokens":8,"output_tokens":2,"total_tokens":10,"input_tokens_details":{"cached_tokens":4}}}`))
+	assert.True(t, ok)
+	assert.Equal(t, TokenUsage{PromptTokens: 8, CompletionTokens: 2, TotalTokens: 10}, usage)
+
+	usage, ok = anthropic.ResponseParser(nil, "/v1/messages").ParseBody(
+		[]byte(`{"usage":{"input_tokens":9,"cache_read_input_tokens":3,"output_tokens":4}}`))
+	assert.True(t, ok)
+	assert.Equal(t, TokenUsage{PromptTokens: 12, CompletionTokens: 4, TotalTokens: 16}, usage)
+}
+
+type closeNotifyRecorder struct {
+	*httptest.ResponseRecorder
+}
+
+func (r *closeNotifyRecorder) CloseNotify() <-chan bool {
+	return make(chan bool)
+}
+
+type truncatedReader struct {
+	data []byte
+	read bool
+}
+
+func (r *truncatedReader) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, io.ErrUnexpectedEOF
+	}
+	r.read = true
+	return copy(p, r.data), nil
+}
+
+// A stream that breaks off keeps the usage already read from its lines and
+// reports nothing for usage that never arrived.
+func TestForwardStreamKeepsUsageReadBeforeDisconnect(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	usageLine := `data: {"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,"prompt_tokens_details":{"cached_tokens":16}}}` + "\n"
+	contentLine := `data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n"
+
+	tests := []struct {
+		name      string
+		body      string
+		wantUsage []TokenUsage
+	}{
+		{
+			name: "disconnect after usage",
+			body: contentLine + "\n" + usageLine,
+			wantUsage: []TokenUsage{{
+				PromptTokens: 20, CompletionTokens: 5, TotalTokens: 25, PromptTokensReported: true,
+				CachedPromptTokens: 16, CachedPromptTokensReported: true,
+			}},
+		},
+		{
+			name: "disconnect before usage",
+			body: contentLine,
+		},
+	}
+
+	adapter := DefaultAdapter()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(&closeNotifyRecorder{httptest.NewRecorder()})
+			var got []TokenUsage
+			_, err := ForwardStream(c, &truncatedReader{data: []byte(tt.body)}, adapter.ResponseParser(c, "/v1/chat/completions"), func(usage TokenUsage) {
+				got = append(got, usage)
+			})
+			assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+			assert.Equal(t, tt.wantUsage, got)
+		})
+	}
 }

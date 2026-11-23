@@ -307,3 +307,31 @@ func TestLoadSchedulerConfigRejectsNegativeMaxWaitingRequests(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRouterConfigAccessLog(t *testing.T) {
+	tt := []struct {
+		name   string
+		config string
+		want   AccessLogConfig
+	}{
+		{name: "section absent", config: "scheduler: {}\n", want: AccessLogConfig{}},
+		{name: "upstream usage disabled", config: "accessLog:\n  includeUpstreamUsage: false\n", want: AccessLogConfig{}},
+		{name: "upstream usage enabled", config: "accessLog:\n  includeUpstreamUsage: true\n", want: AccessLogConfig{IncludeUpstreamUsage: true}},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "routerConfiguration.yaml")
+			if err := os.WriteFile(configPath, []byte(tc.config), 0o600); err != nil {
+				t.Fatalf("write router configuration: %v", err)
+			}
+			routerConfig, err := ParseRouterConfig(configPath)
+			if err != nil {
+				t.Fatalf("parse router configuration: %v", err)
+			}
+			if routerConfig.AccessLog != tc.want {
+				t.Fatalf("AccessLog = %+v, want %+v", routerConfig.AccessLog, tc.want)
+			}
+		})
+	}
+}

@@ -46,3 +46,7 @@ data:
       redis:
         address: {{ required "kthenaRouter.sessionSticky.redis.address is required when sessionSticky.backend is redis" $redis.address | quote }}
       {{- end }}
+    {{- if .Values.kthenaRouter.accessLog.includeUpstreamUsage }}
+    accessLog:
+      includeUpstreamUsage: true
+    {{- end }}
