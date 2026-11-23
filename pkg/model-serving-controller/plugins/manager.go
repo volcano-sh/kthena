@@ -19,9 +19,11 @@ package plugins
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
+	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
@@ -140,6 +142,43 @@ func NewRoleDeleteChain(registry *Registry, specs []workloadv1alpha1.PluginSpec)
 		chain.entries = append(chain.entries, entry{plugin: plugin, spec: spec})
 	}
 	return chain, nil
+}
+
+// OnModelServingSync executes ModelServing sync hooks in plugin order.
+func (c *Chain) OnModelServingSync(ctx context.Context, req *HookRequest) HookResult {
+	if c == nil || req == nil {
+		return HookResult{}
+	}
+	var (
+		errs         []error
+		requeueAfter time.Duration
+	)
+	for _, entry := range c.entries {
+		res := entry.plugin.OnModelServingSync(ctx, req)
+		if res.RequeueAfter > 0 && (requeueAfter == 0 || res.RequeueAfter < requeueAfter) {
+			requeueAfter = res.RequeueAfter
+		}
+		if res.Err != nil {
+			errs = append(errs, fmt.Errorf("plugin %s OnModelServingSync: %w", entry.plugin.Name(), res.Err))
+			if !res.Continue {
+				return HookResult{
+					RequeueAfter: requeueAfter,
+					Err:          errors.Join(errs...),
+					Continue:     false,
+				}
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return HookResult{
+			RequeueAfter: requeueAfter,
+			Err:          errors.Join(errs...),
+			Continue:     true,
+		}
+	}
+	return HookResult{
+		RequeueAfter: requeueAfter,
+	}
 }
 
 // OnPodCreate executes plugins in order. Mutations are applied to req.Pod.

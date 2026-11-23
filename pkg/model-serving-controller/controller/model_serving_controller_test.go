@@ -9961,3 +9961,136 @@ func TestRoleTargetRejectsForeignSnapshotReuseRace(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, foreign, actual)
 }
+
+type modelServingSyncTestPlugin struct {
+	plugins.BasePlugin
+	name   string
+	onSync func(ctx context.Context, req *plugins.HookRequest) plugins.HookResult
+}
+
+func (p *modelServingSyncTestPlugin) Name() string { return p.name }
+
+func (p *modelServingSyncTestPlugin) OnModelServingSync(ctx context.Context, req *plugins.HookRequest) plugins.HookResult {
+	if p.onSync != nil {
+		return p.onSync(ctx, req)
+	}
+	return plugins.HookResult{}
+}
+
+func TestSyncModelServingPluginHook(t *testing.T) {
+	syncErr := fmt.Errorf("registry init failed")
+
+	tests := []struct {
+		name           string
+		result         plugins.HookResult
+		expectErr      bool
+		expectPods     bool
+		expectRequeued bool
+	}{
+		{
+			name:       "success continues reconcile without requeue",
+			result:     plugins.HookResult{},
+			expectPods: true,
+		},
+		{
+			name:           "success with RequeueAfter continues reconcile and requeues",
+			result:         plugins.HookResult{RequeueAfter: 20 * time.Millisecond},
+			expectPods:     true,
+			expectRequeued: true,
+		},
+		{
+			name:       "blocking error aborts reconcile before creating pods",
+			result:     plugins.HookResult{Err: syncErr, Continue: false},
+			expectErr:  true,
+			expectPods: false,
+		},
+		{
+			name:           "continuable error logs and continues reconcile with requeue",
+			result:         plugins.HookResult{Err: syncErr, Continue: true, RequeueAfter: 20 * time.Millisecond},
+			expectErr:      false,
+			expectPods:     true,
+			expectRequeued: true,
+		},
+		{
+			name:           "continuable error without RequeueAfter continues reconcile without requeue",
+			result:         plugins.HookResult{Err: syncErr, Continue: true},
+			expectErr:      false,
+			expectPods:     true,
+			expectRequeued: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			kthenaClient := kthenafake.NewSimpleClientset()
+			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextClient := apiextfake.NewSimpleClientset()
+
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			require.NoError(t, err)
+			t.Cleanup(controller.workqueue.ShutDown)
+
+			var called bool
+			var podsAtHook int
+			registry := plugins.NewRegistry()
+			registry.Register("sync-hook", func(spec workloadv1alpha1.PluginSpec) (plugins.Plugin, error) {
+				return &modelServingSyncTestPlugin{
+					name: spec.Name,
+					onSync: func(ctx context.Context, req *plugins.HookRequest) plugins.HookResult {
+						called = true
+						require.NotNil(t, req.ModelServing)
+						require.NotNil(t, req.KubeClient)
+						require.NotNil(t, req.ServiceLister)
+						pods, listErr := req.KubeClient.CoreV1().Pods(req.ModelServing.Namespace).List(ctx, metav1.ListOptions{})
+						require.NoError(t, listErr)
+						podsAtHook = len(pods.Items)
+						return tt.result
+					},
+				}, nil
+			})
+			controller.pluginsRegistry = registry
+
+			ms := createStandardModelServing("sync-hook-ms", 1, 1)
+			ms.UID = types.UID("sync-hook-ms-uid")
+			ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{
+				{Name: "sync-hook", Type: workloadv1alpha1.PluginTypeBuiltIn},
+			}
+			_, err = kthenaClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(context.Background(), ms, metav1.CreateOptions{})
+			require.NoError(t, err)
+			require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(ms))
+
+			err = controller.syncModelServing(context.Background(), ms.Namespace+"/"+ms.Name)
+			require.True(t, called, "OnModelServingSync must be invoked")
+			assert.Equal(t, 0, podsAtHook, "OnModelServingSync must run before ServingGroups and Roles create pods")
+
+			if tt.expectErr {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, syncErr)
+			} else {
+				require.NoError(t, err)
+			}
+
+			pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			if tt.expectPods {
+				assert.NotEmpty(t, pods.Items)
+			} else {
+				assert.Empty(t, pods.Items)
+			}
+
+			if tt.expectRequeued {
+				require.Eventually(t, func() bool {
+					return controller.workqueue.Len() > 0
+				}, time.Second, 5*time.Millisecond, "expected ModelServing to be requeued")
+				key, _ := controller.workqueue.Get()
+				assert.Equal(t, ms.Namespace+"/"+ms.Name, key)
+				controller.workqueue.Done(key)
+			} else {
+				assert.Never(t, func() bool {
+					return controller.workqueue.Len() > 0
+				}, 60*time.Millisecond, 10*time.Millisecond, "did not expect ModelServing to be requeued")
+			}
+		})
+	}
+}

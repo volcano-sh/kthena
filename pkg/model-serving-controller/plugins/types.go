@@ -18,6 +18,7 @@ package plugins
 
 import (
 	"context"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -25,6 +26,17 @@ import (
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
+
+// HookResult describes the outcome of a ModelServing sync hook invocation.
+type HookResult struct {
+	// RequeueAfter requests re-enqueuing the ModelServing after the given duration.
+	// A zero or non-positive duration means do not requeue.
+	RequeueAfter time.Duration
+	// Err contains the error returned by the hook, if any.
+	Err error
+	// Continue indicates whether reconciliation should proceed when Err is non-nil.
+	Continue bool
+}
 
 // HookRequest carries the context for plugin hook invocations.
 type HookRequest struct {
@@ -47,6 +59,8 @@ type HookRequest struct {
 // Plugin defines the lifecycle hooks implemented by a plugin.
 type Plugin interface {
 	Name() string
+	// OnModelServingSync is invoked on each ModelServing reconcile before ServingGroups and Roles are synced.
+	OnModelServingSync(ctx context.Context, req *HookRequest) HookResult
 	// OnPodCreate is invoked before the controller creates the Pod. Mutations are applied in-place to req.Pod.
 	OnPodCreate(ctx context.Context, req *HookRequest) error
 	// OnPodReady is invoked when the controller observes the Pod running and ready.
@@ -56,6 +70,30 @@ type Plugin interface {
 	// OnRoleDelete deletes resources associated with a Role. It must not wait for
 	// the underlying resources to disappear.
 	OnRoleDelete(ctx context.Context, req *HookRequest) error
+}
+
+// BasePlugin provides default no-op implementations for all Plugin lifecycle hooks.
+// Plugins can embed BasePlugin and override only the hooks they need.
+type BasePlugin struct{}
+
+func (BasePlugin) OnModelServingSync(_ context.Context, _ *HookRequest) HookResult {
+	return HookResult{}
+}
+
+func (BasePlugin) OnPodCreate(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
+func (BasePlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
+func (BasePlugin) OnRoleSync(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
+func (BasePlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error {
+	return nil
 }
 
 // InPlaceUpdatePlugin is implemented by plugins whose Pod mutations stay valid after an in-place image patch.

@@ -700,6 +700,11 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 
+	// Run ModelServing-level sync plugins before ServingGroups and Roles are synced.
+	if err := c.runModelServingSyncPlugins(ctx, ms); err != nil {
+		return err
+	}
+
 	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
 	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)
@@ -3075,6 +3080,32 @@ func (c *ModelServingController) buildPluginChain(ms *workloadv1alpha1.ModelServ
 		return nil, fmt.Errorf("plugin registry is not initialized")
 	}
 	return plugins.NewChain(c.pluginsRegistry, ms.Spec.Plugins)
+}
+
+func (c *ModelServingController) runModelServingSyncPlugins(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+	chain, err := c.buildPluginChain(ms)
+	if err != nil {
+		return fmt.Errorf("build plugin chain: %w", err)
+	}
+	if chain == nil {
+		return nil
+	}
+	res := chain.OnModelServingSync(ctx, &plugins.HookRequest{
+		ModelServing:  ms,
+		KubeClient:    c.kubeClientSet,
+		ServiceLister: c.servicesLister,
+	})
+	if res.Err != nil {
+		c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "PluginError", res.Err.Error())
+		if !res.Continue {
+			return fmt.Errorf("run OnModelServingSync for ModelServing %s/%s: %w", ms.Namespace, ms.Name, res.Err)
+		}
+		if res.RequeueAfter > 0 {
+			c.enqueueModelServingAfter(ms, res.RequeueAfter)
+		}
+		klog.Errorf("ModelServing %s/%s OnModelServingSync failed (continuing reconcile): %v", ms.Namespace, ms.Name, res.Err)
+	}
+	return nil
 }
 
 func (c *ModelServingController) runRoleDeletePlugins(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) error {
