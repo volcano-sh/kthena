@@ -40,7 +40,8 @@ const acceptContentTypes = runtime.ContentTypeProtobuf + "," + runtime.ContentTy
 func BuildConfig(masterURL, kubeconfigPath string) (*rest.Config, error) {
 	if masterURL == "" && kubeconfigPath == "" {
 		if config, err := rest.InClusterConfig(); err == nil {
-			return setContentTypes(config), nil
+			setContentTypes(config)
+			return config, nil
 		}
 	}
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -52,11 +53,11 @@ func BuildConfig(masterURL, kubeconfigPath string) (*rest.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return setContentTypes(config), nil
+	setContentTypes(config)
+	return config, nil
 }
 
-func setContentTypes(config *rest.Config) *rest.Config {
+func setContentTypes(config *rest.Config) {
 	config.ContentType = runtime.ContentTypeJSON
 	config.AcceptContentTypes = acceptContentTypes
-	return config
 }
