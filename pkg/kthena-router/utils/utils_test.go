@@ -73,13 +73,13 @@ func TestParsePrompt(t *testing.T) {
 		{
 			name:    "prompt as a list of strings",
 			body:    map[string]interface{}{"prompt": []interface{}{"hello", "world"}},
-			want:    &common.ChatMessage{Text: "hello\nworld"},
+			want:    &common.ChatMessage{BatchText: "hello\nworld"},
 			wantErr: false,
 		},
 		{
 			name:    "prompt as token IDs",
 			body:    map[string]interface{}{"prompt": []interface{}{json.Number("15339"), json.Number("1917")}},
-			want:    &common.ChatMessage{Text: "15339 1917"},
+			want:    &common.ChatMessage{InputTokens: 2},
 			wantErr: false,
 		},
 		{
@@ -88,7 +88,7 @@ func TestParsePrompt(t *testing.T) {
 				[]interface{}{json.Number("15339"), json.Number("1917")},
 				[]interface{}{float64(42)},
 			}},
-			want:    &common.ChatMessage{Text: "15339 1917\n42"},
+			want:    &common.ChatMessage{InputTokens: 3},
 			wantErr: false,
 		},
 		{

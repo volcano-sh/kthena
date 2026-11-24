@@ -401,11 +401,19 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		c.Set(PromptKey, prompt)
 		promptStr := utils.GetPromptString(prompt)
 
-		// Calculate input tokens for metrics using tokenizer
-		inputTokens, err := r.tokenizer.CalculateTokenNum(promptStr)
-		if err != nil {
-			klog.Errorf("failed to calculate token number: %v", err)
-			inputTokens = len(promptStr) / 4 // fallback estimation
+		// Token-ID prompts carry their exact count; otherwise estimate it from
+		// the prompt text, or from the joined text of a list-of-strings prompt.
+		inputTokens := prompt.InputTokens
+		if inputTokens == 0 {
+			estimateText := promptStr
+			if prompt.BatchText != "" {
+				estimateText = prompt.BatchText
+			}
+			inputTokens, err = r.tokenizer.CalculateTokenNum(estimateText)
+			if err != nil {
+				klog.Errorf("failed to calculate token number: %v", err)
+				inputTokens = len(estimateText) / 4 // fallback estimation
+			}
 		}
 
 		// Calculate and set input tokens for access log
@@ -418,7 +426,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		metricsRecorder.RecordInputTokens(inputTokens)
 
 		// Apply rate limiting using the unified rate limiter
-		if err := r.loadRateLimiter.RateLimit(modelName, promptStr); err != nil {
+		if err := r.loadRateLimiter.RateLimitTokens(modelName, inputTokens); err != nil {
 			var errorMsg string
 			var errorType string
 			var tokenType string

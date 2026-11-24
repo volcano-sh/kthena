@@ -128,7 +128,12 @@ func (r *TokenRateLimiter) RateLimit(model, prompt string) error {
 		klog.Errorf("failed to calculate token number: %v", err)
 		tokens = len(prompt) / 4 // fallback estimation
 	}
+	return r.RateLimitTokens(model, tokens)
+}
 
+// RateLimitTokens checks if a request with a known number of input tokens is
+// within rate limits for both input and output tokens
+func (r *TokenRateLimiter) RateLimitTokens(model string, tokens int) error {
 	r.mutex.RLock()
 	inputLimiter, hasInputLimit := r.inputLimiter[model]
 	outputLimiter, hasOutputLimit := r.outputLimiter[model]

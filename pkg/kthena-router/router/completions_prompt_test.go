@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -37,22 +38,32 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	aiv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/accesslog"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
 // TestRouter_HandlerFunc_CompletionsPromptForms checks that every prompt form of
-// the Completions API is routed, and that the prompt reaches the backend as sent.
+// the Completions API is routed, that the prompt reaches the backend as sent, that
+// token-ID prompts are counted exactly, and that only a string prompt is given to
+// the cache-affinity plugins.
 func TestRouter_HandlerFunc_CompletionsPromptForms(t *testing.T) {
+	twentyIDs := "[" + strings.TrimSuffix(strings.Repeat("15339,", 20), ",") + "]"
 	tests := []struct {
-		name       string
-		prompt     string
-		wantStatus int
+		name            string
+		prompt          string
+		wantStatus      int
+		wantInputTokens int
+		wantPromptText  string
 	}{
-		{name: "string", prompt: `"hello"`, wantStatus: http.StatusOK},
-		{name: "list of strings", prompt: `["hello","world"]`, wantStatus: http.StatusOK},
-		{name: "token IDs", prompt: `[15339,1917]`, wantStatus: http.StatusOK},
-		{name: "list of token-ID lists", prompt: `[[15339],[1917]]`, wantStatus: http.StatusOK},
+		// "hello" is 5 characters, estimated at 4 characters per token.
+		{name: "string", prompt: `"hello"`, wantStatus: http.StatusOK, wantInputTokens: 2, wantPromptText: "hello"},
+		// The batch is estimated from "hello\nworld" (11 characters).
+		{name: "list of strings", prompt: `["hello","world"]`, wantStatus: http.StatusOK, wantInputTokens: 3},
+		{name: "token IDs", prompt: `[15339,1917]`, wantStatus: http.StatusOK, wantInputTokens: 2},
+		{name: "twenty token IDs count as twenty tokens", prompt: twentyIDs, wantStatus: http.StatusOK, wantInputTokens: 20},
+		{name: "list of token-ID lists", prompt: `[[15339,1917],[42]]`, wantStatus: http.StatusOK, wantInputTokens: 3},
 		{name: "number", prompt: `123`, wantStatus: http.StatusNotFound},
 	}
 
@@ -116,10 +127,19 @@ func TestRouter_HandlerFunc_CompletionsPromptForms(t *testing.T) {
 			body := fmt.Sprintf(`{"model":"completions-model","prompt":%s,"max_tokens":4}`, tt.prompt)
 			c.Request, _ = http.NewRequest(http.MethodPost, "/v1/completions", bytes.NewBufferString(body))
 			c.Request.Header.Set("Content-Type", "application/json")
+			accessCtx := accesslog.NewAccessLogContext("completions-request", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "completions-model")
+			c.Set(accesslog.AccessLogContextKey, accessCtx)
 
 			router.HandlerFunc()(c)
 
 			assert.Equal(t, tt.wantStatus, w.Code, "body: %s", w.Body.String())
+			if tt.wantStatus == http.StatusOK {
+				assert.Equal(t, tt.wantInputTokens, accessCtx.InputTokens, "input tokens")
+				cached, ok := c.Get(PromptKey)
+				require.True(t, ok)
+				prompt := cached.(*common.ChatMessage)
+				assert.Equal(t, tt.wantPromptText, utils.GetPromptString(prompt), "text given to the cache-affinity plugins")
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			if tt.wantStatus == http.StatusOK {
