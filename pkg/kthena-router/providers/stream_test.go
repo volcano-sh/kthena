@@ -71,7 +71,7 @@ const (
 // carry it, because each copy is a cumulative snapshot rather than an increment.
 func TestForwardStreamReportsUsageOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	finalUsage := TokenUsage{PromptTokens: 10, CompletionTokens: 3, TotalTokens: 13}
+	finalUsage := TokenUsage{PromptTokens: 10, CompletionTokens: 3, TotalTokens: 13, PromptTokensReported: true}
 
 	tests := []struct {
 		name             string
@@ -104,7 +104,7 @@ func TestForwardStreamReportsUsageOnce(t *testing.T) {
 			path:          "/v1/chat/completions",
 			body:          chatChunk("", 0) + chatChunk("a", 1) + chatChunk("b", 2),
 			cutOff:        true,
-			wantUsage:     []TokenUsage{{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12}},
+			wantUsage:     []TokenUsage{{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, PromptTokensReported: true}},
 			wantErr:       io.ErrUnexpectedEOF,
 			wantForwarded: []string{`"content":"b"`},
 		},
@@ -128,7 +128,7 @@ func TestForwardStreamReportsUsageOnce(t *testing.T) {
 			path: "/v1/responses",
 			body: "data: {\"type\":\"response.output_text.delta\",\"delta\":\"a\"}\n\n" +
 				"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"total_tokens\":13}}}\n\n",
-			wantUsage:        []TokenUsage{finalUsage},
+			wantUsage:        []TokenUsage{{PromptTokens: 10, CompletionTokens: 3, TotalTokens: 13}},
 			wantReturnTokens: 3,
 			wantForwarded:    []string{"response.completed"},
 		},

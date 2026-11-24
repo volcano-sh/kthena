@@ -107,7 +107,7 @@ func TestGetPodMetrics(t *testing.T) {
 			status:        http.StatusOK,
 			body:          vllmMetrics,
 			wantMetrics:   wantMergedMetrics,
-			wantHistogram: map[string]*dto.Histogram{utils.TTFT: histogram(6, 8)},
+			wantHistogram: map[string]*dto.Histogram{utils.TTFT: histogram(6, 8), utils.TTFT + "{}": histogram(6, 8)},
 		},
 		{
 			name:          "merges SGLang gauge and histogram results",
