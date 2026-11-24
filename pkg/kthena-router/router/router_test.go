@@ -930,7 +930,8 @@ func TestRouter_HandlerFunc_MultiModalChat(t *testing.T) {
 	prompt, ok := c.Get(PromptKey)
 	require.True(t, ok)
 	assert.True(t, prompt.(*common.ChatMessage).HasMultiModal())
-	chatRequest := prompt.(*common.ChatMessage).ChatRequest
+	assert.Equal(t, common.APIChatCompletions, prompt.(*common.ChatMessage).API)
+	chatRequest := prompt.(*common.ChatMessage).Request
 	require.NotNil(t, chatRequest, "a Chat Completions prompt keeps its request for rendering")
 	assert.Equal(t, content, chatRequest["messages"].([]interface{})[0].(map[string]interface{})["content"])
 }

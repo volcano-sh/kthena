@@ -71,13 +71,25 @@ type ChatMessage struct {
 	// Messages is used for chat conversation input (chat mode)
 	Messages []Message `json:"messages,omitempty"`
 
-	// ChatRequest is the body of the Chat Completions request the prompt was
-	// parsed from. The engine renders a multimodal prompt from it, so that the
-	// request fields that shape the prompt, such as tools,
+	// Request is the body of the request the prompt was parsed from, and API
+	// the API of that request. The engine renders a multimodal prompt from
+	// the request itself, through the render endpoint of its API, so that the
+	// request fields that shape the prompt, such as tools, instructions,
 	// chat_template_kwargs or mm_processor_kwargs, are rendered as for
-	// inference. It is nil for other APIs, and it is not serialized.
-	ChatRequest map[string]interface{} `json:"-"`
+	// inference. Request is nil for APIs without a render endpoint. Neither is
+	// serialized.
+	Request map[string]interface{} `json:"-"`
+	API     API                    `json:"-"`
 }
+
+// API is an inference API whose requests the engine can render.
+type API string
+
+const (
+	APIChatCompletions API = "chat_completions"
+	APIResponses       API = "responses"
+	APIMessages        API = "messages"
+)
 
 // HasMultiModal reports whether any message carries a non-text input.
 func (m *ChatMessage) HasMultiModal() bool {

@@ -136,11 +136,12 @@ the same block keys as the engine, media included.
 - The router still estimates input tokens from text only. Rate limiting on input
   tokens therefore undercounts multimodal requests. Fairness scheduling is not
   affected, because it records the prompt tokens reported by the engine.
-- `kvcache-aware` renders multimodal prompts with the vLLM
-  `/v1/chat/completions/render` endpoint, either on the tokenizer service or on
-  a vLLM model pod. `vllm serve` registers that endpoint only with
-  `--enable-scale-out`; `vllm launch render`, which the tokenizer service runs,
-  always registers it. The router asks for `mm_payload: "none"` (vLLM v0.32 and
+- `kvcache-aware` renders multimodal prompts with the vLLM render endpoints
+  (`/v1/chat/completions/render`, `/v1/responses/render` and
+  `/v1/messages/render`), either on the tokenizer service or on a vLLM model
+  pod. `vllm serve` registers them only with `--enable-scale-out`;
+  `vllm launch render`, which the tokenizer service runs, always registers them.
+  The Messages endpoint needs vLLM v0.29 and the Responses one v0.30. The router asks for `mm_payload: "none"` (vLLM v0.32 and
   later) so that the response carries no processed media; older versions
   ignore the field and also return the processed media, which works but makes
   the response larger.
@@ -200,6 +201,15 @@ type Message struct {
 	// ContentParts is list content in Chat Completions form, for requests the
 	// engine has to render; nil for string content or unrenderable media.
 	ContentParts []map[string]interface{} `json:"-"`
+}
+
+type ChatMessage struct {
+	Text     string    `json:"text,omitempty"`
+	Messages []Message `json:"messages,omitempty"`
+	// Request and API are the body and the API of a request the engine renders
+	// as sent: Chat Completions, Responses or Anthropic Messages.
+	Request map[string]interface{} `json:"-"`
+	API     API                    `json:"-"`
 }
 
 func (m *ChatMessage) HasMultiModal() bool
@@ -269,21 +279,29 @@ same keys if it knows the token IDs, the placeholder positions and the
 identifiers, so it asks the engine instead of guessing:
 
 1. For a multimodal prompt, `kvcache-aware` sends a render request with
-   `mm_payload: "none"` to the vLLM `/v1/chat/completions/render` endpoint. For
-   a Chat Completions request this is the request as sent, with the upstream
-   model and without `stream` and `stream_options`, so that fields such as
-   `tools`, `chat_template_kwargs` and `mm_processor_kwargs` render the same
-   prompt as for inference. For the other APIs it holds the converted messages,
-   with `ContentParts` as their content, and `add_generation_prompt: true`. The
-   endpoint applies the chat template, processes the media and returns the token
-   IDs, plus the identifier and placeholder range of every media item. The
-   tokenizer service proxies this endpoint; with `fallbackToEngine`, or without
+   `mm_payload: "none"` to the vLLM render endpoint of the API of the request:
+   `/v1/chat/completions/render` for Chat Completions, `/v1/responses/render`
+   for Responses and `/v1/messages/render` for Anthropic Messages. The render
+   request is the request as sent, with the upstream model and without `stream`
+   and `stream_options`, so that the engine prepares it exactly as for
+   inference: fields such as `tools`, `chat_template_kwargs` and
+   `mm_processor_kwargs` render the same prompt, and the Responses
+   `instructions` and the Messages `system` become the same system message. A
+   Responses request with `previous_response_id` is not rendered, because the
+   render endpoint is stateless and rejects it. Prompts of other APIs are
+   rendered through `/v1/chat/completions/render` from their converted
+   messages, with `ContentParts` as their content, and
+   `add_generation_prompt: true`. Every endpoint applies the chat template,
+   processes the media and returns the token IDs, plus the identifier and
+   placeholder range of every media item. The tokenizer service proxies these
+   endpoints; with `fallbackToEngine`, or without
    the service, the router renders on a vLLM pod of the model. Prompts with
    media passed by URL are always rendered on a vLLM pod, since rendering
    fetches the media and the tokenizer service may run in the router pod,
    where a client-provided URL could reach pod-local endpoints. The router
-   checks every content part of the request as sent for a media URL, including
-   parts without a `type`, from which vLLM also reads media URLs. A message
+   checks the prompt fields of the request as sent for a media URL at any
+   depth, including parts without a `type`, from which vLLM also reads media
+   URLs, and media in tool outputs, which the router does not parse. A message
    without `ContentParts` holding media makes the prompt unrenderable, and the
    plugin does not score the request. The result is kept for the whole
    scheduling of the request, so with Prefill-Decode Disaggregation the decode
@@ -300,6 +318,36 @@ token IDs, followed, for each media item overlapping the block in offset order,
 by the big-endian `uint32` byte length of its identifier, the identifier and its
 offset as a big-endian `int64`; the first 8 bytes, masked to 63 bits, are the
 key. Without media the bytes, and so the key, are the same as for text.
+
+For example, with a block size of 4, a text-only prompt and a prompt whose
+image `A` is expanded into six placeholder tokens `P` are keyed as follows:
+
+```text
+                block 0           block 1           block 2
+Text-only request
+  tokens        t0 t1 t2 t3       t4 t5 t6 t7       t8 t9
+  key           H(t0 t1 t2 t3)    H(t4 t5 t6 t7)    H(t8 t9)
+
+Image A at token 2, expanded into 6 placeholder tokens P
+  tokens        t0 t1 P  P        P  P  P  P        t2 t3
+                      |______ image A _____|
+  key           H(t0 t1 P P,      H(P P P P,        H(t2 t3)
+                  (A, 2))           (A, -2))
+
+Image B instead of A
+  tokens        t0 t1 P  P        P  P  P  P        t2 t3
+  key           H(t0 t1 P P,      H(P P P P,        H(t2 t3)
+                  (B, 2))           (B, -2))
+```
+
+The placeholder token IDs of `A` and `B` are the same, so token IDs alone would
+make the two requests match each other's cache. The identifier in the key of
+every block the image overlaps, with its offset relative to the block, negative
+for the blocks after the one the image starts in, keeps them apart, and keeps
+apart the same image at different positions. A pod is scored by the blocks it
+holds in a row from the first one, so the last block, which holds no media and
+has the same key in both requests, only counts after the blocks of the same
+image.
 
 Text-only prompts are tokenized as before.
 

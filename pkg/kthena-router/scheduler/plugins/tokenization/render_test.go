@@ -33,7 +33,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kthena-router/testutil"
 )
 
-func TestNewVLLMChatRenderRequest(t *testing.T) {
+func TestNewVLLMRenderRequest(t *testing.T) {
 	image := common.MultiModalItem{Modality: common.ModalityImage, Hash: 1}
 	parts := []map[string]interface{}{
 		{"type": "image_url", "image_url": map[string]interface{}{"url": "https://example.com/cat.png"}},
@@ -41,11 +41,12 @@ func TestNewVLLMChatRenderRequest(t *testing.T) {
 	}
 
 	t.Run("messages keep their content parts", func(t *testing.T) {
-		request, err := newVLLMChatRenderRequest("model", &common.ChatMessage{Messages: []common.Message{
+		path, request, err := newVLLMRenderRequest("model", &common.ChatMessage{Messages: []common.Message{
 			{Role: "system", Content: "be brief"},
 			{Role: "user", Content: "describe", MultiModal: []common.MultiModalItem{image}, ContentParts: parts},
 		}})
 		require.NoError(t, err)
+		assert.Equal(t, vllmChatRenderPath, path)
 		data, err := json.Marshal(request)
 		require.NoError(t, err)
 		assert.JSONEq(t, `{
@@ -63,12 +64,12 @@ func TestNewVLLMChatRenderRequest(t *testing.T) {
 	})
 
 	t.Run("text prompt is not renderable", func(t *testing.T) {
-		_, err := newVLLMChatRenderRequest("model", &common.ChatMessage{Text: "hello"})
+		_, _, err := newVLLMRenderRequest("model", &common.ChatMessage{Text: "hello"})
 		assert.ErrorIs(t, err, errNotRenderable)
 	})
 
 	t.Run("media without content parts is not renderable", func(t *testing.T) {
-		_, err := newVLLMChatRenderRequest("model", &common.ChatMessage{Messages: []common.Message{
+		_, _, err := newVLLMRenderRequest("model", &common.ChatMessage{Messages: []common.Message{
 			{Role: "user", MultiModal: []common.MultiModalItem{image}},
 		}})
 		assert.ErrorIs(t, err, errNotRenderable)
@@ -84,13 +85,15 @@ func TestNewVLLMChatRenderRequest(t *testing.T) {
 			"stream":               true,
 			"stream_options":       map[string]interface{}{"include_usage": true},
 		}
-		request, err := newVLLMChatRenderRequest("model", &common.ChatMessage{
+		path, request, err := newVLLMRenderRequest("model", &common.ChatMessage{
 			Messages: []common.Message{
 				{Role: "user", Content: "describe", MultiModal: []common.MultiModalItem{image}, ContentParts: parts},
 			},
-			ChatRequest: chatRequest,
+			Request: chatRequest,
+			API:     common.APIChatCompletions,
 		})
 		require.NoError(t, err)
+		assert.Equal(t, vllmChatRenderPath, path)
 		data, err := json.Marshal(request)
 		require.NoError(t, err)
 		assert.JSONEq(t, `{
@@ -106,6 +109,55 @@ func TestNewVLLMChatRenderRequest(t *testing.T) {
 		}`, string(data))
 		assert.Equal(t, "route-model", chatRequest["model"], "the inference request must not change")
 		assert.Contains(t, chatRequest, "stream")
+	})
+
+	messages := []common.Message{{Role: "user", Content: "describe", MultiModal: []common.MultiModalItem{image}, ContentParts: parts}}
+
+	t.Run("responses request is rendered through its own endpoint", func(t *testing.T) {
+		path, request, err := newVLLMRenderRequest("model", &common.ChatMessage{
+			Messages: messages,
+			Request: map[string]interface{}{
+				"model":        "route-model",
+				"instructions": "be brief",
+				"input": []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+					map[string]interface{}{"type": "input_image", "image_url": "https://example.com/cat.png"},
+				}}},
+				"stream": true,
+			},
+			API: common.APIResponses,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "/v1/responses/render", path)
+		data, err := json.Marshal(request)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{
+			"model": "model",
+			"instructions": "be brief",
+			"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "https://example.com/cat.png"}]}],
+			"mm_payload": "none"
+		}`, string(data))
+	})
+
+	t.Run("responses request continuing a stored response is not renderable", func(t *testing.T) {
+		_, _, err := newVLLMRenderRequest("model", &common.ChatMessage{
+			Messages: messages,
+			Request:  map[string]interface{}{"input": "describe", "previous_response_id": "resp_1"},
+			API:      common.APIResponses,
+		})
+		assert.ErrorIs(t, err, errNotRenderable)
+	})
+
+	t.Run("messages request is rendered through its own endpoint", func(t *testing.T) {
+		path, request, err := newVLLMRenderRequest("model", &common.ChatMessage{
+			Messages: messages,
+			Request:  map[string]interface{}{"model": "route-model", "system": "be brief", "max_tokens": 16},
+			API:      common.APIMessages,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "/v1/messages/render", path)
+		data, err := json.Marshal(request)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"model": "model", "system": "be brief", "max_tokens": 16, "mm_payload": "none"}`, string(data))
 	})
 }
 
@@ -129,7 +181,7 @@ func TestReferencesRemoteMedia(t *testing.T) {
 				ContentParts: []map[string]interface{}{{"type": "text", "text": "hi"}, tt.part},
 			}}}
 			assert.Equal(t, tt.want, referencesRemoteMedia(parsed), "parsed content parts")
-			raw := &common.ChatMessage{ChatRequest: map[string]interface{}{"messages": []interface{}{
+			raw := &common.ChatMessage{API: common.APIChatCompletions, Request: map[string]interface{}{"messages": []interface{}{
 				map[string]interface{}{"role": "user", "content": []interface{}{
 					map[string]interface{}{"type": "text", "text": "hi"},
 					tt.part,
@@ -214,15 +266,86 @@ func TestReferencesRemoteMediaChatRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			prompt := &common.ChatMessage{
 				// The parsed parts only hold the typed inline image.
-				Messages:    []common.Message{{Role: "user", ContentParts: []map[string]interface{}{inline}}},
-				ChatRequest: map[string]interface{}{"model": "m", "messages": tt.messages},
+				Messages: []common.Message{{Role: "user", ContentParts: []map[string]interface{}{inline}}},
+				Request:  map[string]interface{}{"model": "m", "messages": tt.messages},
+				API:      common.APIChatCompletions,
 			}
 			assert.Equal(t, tt.want, referencesRemoteMedia(prompt))
 		})
 	}
 }
 
-func TestParseVLLMChatRenderResponse(t *testing.T) {
+func TestReferencesRemoteMediaOtherAPIs(t *testing.T) {
+	inline := map[string]interface{}{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+	tests := []struct {
+		name    string
+		api     common.API
+		request map[string]interface{}
+		want    bool
+	}{
+		{
+			name: "responses input image by URL",
+			api:  common.APIResponses,
+			request: map[string]interface{}{"input": []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+				map[string]interface{}{"type": "input_image", "image_url": "https://example.com/i.png"},
+			}}}},
+			want: true,
+		},
+		{
+			// The router does not parse tool outputs, while vLLM fetches
+			// their media.
+			name: "responses function call output image by URL",
+			api:  common.APIResponses,
+			request: map[string]interface{}{"input": []interface{}{
+				map[string]interface{}{"role": "user", "content": []interface{}{inline}},
+				map[string]interface{}{"type": "function_call_output", "call_id": "c", "output": []interface{}{
+					map[string]interface{}{"type": "input_image", "image_url": "http://127.0.0.1:15000/debug/pprof/"},
+				}},
+			}},
+			want: true,
+		},
+		{
+			name: "responses inline image",
+			api:  common.APIResponses,
+			request: map[string]interface{}{"instructions": "be brief", "input": []interface{}{
+				map[string]interface{}{"role": "user", "content": []interface{}{inline}},
+			}},
+			want: false,
+		},
+		{
+			name: "messages image by URL in a tool result",
+			api:  common.APIMessages,
+			request: map[string]interface{}{"messages": []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": "t", "content": []interface{}{
+					map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "url", "url": "https://example.com/i.png"}},
+				}},
+			}}}},
+			want: true,
+		},
+		{
+			name: "messages inline images",
+			api:  common.APIMessages,
+			request: map[string]interface{}{"system": "be brief", "messages": []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+				map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+				map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "url", "url": "data:image/png;base64,AAAA"}},
+			}}}},
+			want: false,
+		},
+		{
+			name:    "fields outside the prompt are not checked",
+			api:     common.APIChatCompletions,
+			request: map[string]interface{}{"messages": []interface{}{}, "response_format": map[string]interface{}{"image_url": map[string]interface{}{"type": "string"}}},
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, referencesRemoteMedia(&common.ChatMessage{Request: tt.request, API: tt.api}))
+		})
+	}
+}
+
+func TestParseVLLMRenderResponse(t *testing.T) {
 	tests := []struct {
 		name    string
 		data    string
@@ -274,7 +397,7 @@ func TestParseVLLMChatRenderResponse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseVLLMChatRenderResponse([]byte(tt.data))
+			got, err := parseVLLMRenderResponse([]byte(tt.data))
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -285,6 +408,15 @@ func TestParseVLLMChatRenderResponse(t *testing.T) {
 	}
 }
 
+func isRenderPath(path string) bool {
+	for _, renderPath := range vllmRenderPaths {
+		if path == renderPath {
+			return true
+		}
+	}
+	return false
+}
+
 // newRenderTestServer returns an httptest server that renders every request
 // into the given tokens and counts the requests it received.
 func newRenderTestServer(t *testing.T, tokens []uint32, statusCode int) (*httptest.Server, *atomic.Int32) {
@@ -293,7 +425,7 @@ func newRenderTestServer(t *testing.T, tokens []uint32, statusCode int) (*httpte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		_, _ = io.Copy(io.Discard, r.Body)
-		if r.URL.Path != vllmChatRenderPath {
+		if !isRenderPath(r.URL.Path) {
 			http.NotFound(w, r)
 			return
 		}
@@ -390,6 +522,26 @@ func TestTokenizerManagerRenderPrompt(t *testing.T) {
 
 		assert.Zero(t, serviceRequests.Load())
 		assert.Equal(t, int32(1), engineRequests.Load())
+	})
+
+	t.Run("responses prompt is rendered through the responses endpoint", func(t *testing.T) {
+		var path atomic.Value
+		engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path.Store(r.URL.Path)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"token_ids": []uint32{9}})
+		}))
+		t.Cleanup(engine.Close)
+		engineAddr := engine.Listener.Addr().(*net.TCPAddr)
+		pod := testutil.PodInfoWithEngine("pod-vllm", "default", engineAddr.IP.String(), EngineVLLM)
+
+		responsesPrompt := newPrompt("data:image/png;base64,AAAA")
+		responsesPrompt.API = common.APIResponses
+		responsesPrompt.Request = map[string]interface{}{"input": []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+			map[string]interface{}{"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+		}}}}
+		_, err := newManager("", true, engineAddr.Port).RenderPrompt("model", responsesPrompt, []*datastore.PodInfo{pod})
+		require.NoError(t, err)
+		assert.Equal(t, "/v1/responses/render", path.Load())
 	})
 
 	t.Run("text prompt is not rendered", func(t *testing.T) {
