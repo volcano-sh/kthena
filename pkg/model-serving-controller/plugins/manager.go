@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"sort"
 	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -35,28 +34,19 @@ type Factory func(spec workloadv1alpha1.PluginSpec) (Plugin, error)
 
 // Registry keeps a mapping from plugin name to factory.
 type Registry struct {
-	factories         map[string]Factory
-	roleDeletePlugins map[string]struct{}
+	factories map[string]Factory
 }
 
 var DefaultRegistry = NewRegistry()
 
 func NewRegistry() *Registry {
 	return &Registry{
-		factories:         map[string]Factory{},
-		roleDeletePlugins: map[string]struct{}{},
+		factories: map[string]Factory{},
 	}
 }
 
 func (r *Registry) Register(name string, factory Factory) {
 	r.factories[name] = factory
-}
-
-// RegisterRoleDelete marks a plugin whose Role delete hook must also run when
-// the plugin is no longer present in the current ModelServing spec. This lets
-// Role deletion clean resources created before the plugin was removed.
-func (r *Registry) RegisterRoleDelete(name string) {
-	r.roleDeletePlugins[name] = struct{}{}
 }
 
 // entry couples the instantiated plugin with its spec for scope evaluation.
@@ -96,52 +86,6 @@ func NewChain(registry *Registry, specs []workloadv1alpha1.PluginSpec) (*Chain, 
 		entries = append(entries, entry{plugin: p, spec: spec})
 	}
 	return &Chain{entries: entries}, nil
-}
-
-// NewRoleDeleteChain builds the configured plugin chain and appends cleanup
-// plugins that must run on Role deletion even if they have since been removed
-// from the ModelServing spec.
-func NewRoleDeleteChain(registry *Registry, specs []workloadv1alpha1.PluginSpec) (*Chain, error) {
-	chain, err := NewChain(registry, specs)
-	if err != nil {
-		return nil, err
-	}
-
-	var names []string
-	for name := range registry.roleDeletePlugins {
-		names = append(names, name)
-		for i := range chain.entries {
-			if chain.entries[i].spec.Name == name {
-				// Deletion owns resources created under previous plugin scopes too.
-				chain.entries[i].spec.Scope = nil
-			}
-		}
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		configured := false
-		for i := range chain.entries {
-			if chain.entries[i].spec.Name == name {
-				configured = true
-				break
-			}
-		}
-		if configured {
-			continue
-		}
-		factory, ok := registry.factories[name]
-		if !ok {
-			return nil, fmt.Errorf("role delete plugin %s not registered", name)
-		}
-		spec := workloadv1alpha1.PluginSpec{Name: name, Type: workloadv1alpha1.PluginTypeBuiltIn}
-		plugin, err := factory(spec)
-		if err != nil {
-			return nil, fmt.Errorf("build role delete plugin %s: %w", name, err)
-		}
-		chain.entries = append(chain.entries, entry{plugin: plugin, spec: spec})
-	}
-	return chain, nil
 }
 
 // OnModelServingSync executes ModelServing sync hooks in plugin order.
