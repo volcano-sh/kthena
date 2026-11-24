@@ -19,8 +19,11 @@ package app
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	routerpkg "github.com/volcano-sh/kthena/pkg/kthena-router/router"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -216,5 +219,56 @@ func TestMatchedListenerIsStableAfterGatewayUpdate(t *testing.T) {
 
 	if matched.GatewayKey != target.GatewayKey {
 		t.Fatalf("matched listener changed to %q after update", matched.GatewayKey)
+	}
+}
+
+// A Gateway listener serves every path, so authentication must cover every
+// path, not only the ones under /v1/.
+func TestGatewayListenerAuthenticatesEveryPath(t *testing.T) {
+	quietGin(t)
+	t.Setenv("ACCESS_LOG_ENABLED", "false")
+	issuer := newTokenIssuer(t)
+	r := NewRouter(datastore.New(), issuer.routerConfig(t), common.NewTransportRegistry())
+	lm := &ListenerManager{
+		router: r,
+		server: &Server{Port: "80"},
+		portListeners: map[int32]*PortListenerInfo{
+			80: {Listeners: []ListenerConfig{{GatewayKey: "default/gateway", ListenerName: "http", Port: 80}}},
+		},
+	}
+	handler := newListenerHandler(listenerConfig{gateway: &listenerGatewayConfig{lm: lm, port: 80}})
+	valid := issuer.token(t, "https://issuer.example", "alice")
+	body := `{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		token      string
+		wantStatus int
+	}{
+		{name: "canonical path without token", method: http.MethodPost, path: "/v1/chat/completions", wantStatus: http.StatusUnauthorized},
+		{name: "rewritten prefix without token", method: http.MethodPost, path: "/llm/v1/chat/completions", wantStatus: http.StatusUnauthorized},
+		{name: "rewritten prefix with forged token", method: http.MethodPost, path: "/llm/v1/chat/completions", token: "forged.x.y", wantStatus: http.StatusUnauthorized},
+		{name: "backend endpoint outside /v1 without token", method: http.MethodPost, path: "/tokenize", wantStatus: http.StatusUnauthorized},
+		{name: "uncleaned path without token", method: http.MethodPost, path: "//v1/chat/completions", wantStatus: http.StatusUnauthorized},
+		{name: "backend metrics without token", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusUnauthorized},
+		{name: "model list without token", method: http.MethodGet, path: "/models", wantStatus: http.StatusUnauthorized},
+		{name: "model list with valid token", method: http.MethodGet, path: "/models", token: valid, wantStatus: http.StatusOK},
+		{name: "health check needs no token", method: http.MethodGet, path: "/healthz", wantStatus: http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			if tt.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+			if recorder.Code != tt.wantStatus {
+				t.Fatalf("%s %s status = %d, want %d: %s", tt.method, tt.path, recorder.Code, tt.wantStatus, recorder.Body.String())
+			}
+		})
 	}
 }

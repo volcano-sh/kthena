@@ -773,33 +773,15 @@ func (lm *ListenerManager) checkAndClosePortIfEmpty(port int32) {
 	}
 }
 
+// AccessLogMiddleware logs every request that reaches it. Management endpoints
+// are answered before it runs, so it must not exempt any other path.
 func AccessLogMiddleware(gwRouter *router.Router) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Access log for "/v1/" only
-		if !strings.HasPrefix(c.Request.URL.Path, "/v1/") {
-			c.Next()
-			return
-		}
-
-		// Calling Middleware
-		gwRouter.AccessLog()(c)
-	}
+	return gwRouter.AccessLog()
 }
 
+// AuthMiddleware authenticates every request that reaches it. In Gateway API
+// mode the router serves any path (HTTPRoute rewrites, /models, ...), so
+// exempting paths here would let requests bypass authentication.
 func AuthMiddleware(gwRouter *router.Router) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Auth for "/v1/" only
-		if !strings.HasPrefix(c.Request.URL.Path, "/v1/") {
-			c.Next()
-			return
-		}
-
-		// Calling Middleware
-		gwRouter.Auth()(c)
-		if c.IsAborted() {
-			return
-		}
-
-		c.Next()
-	}
+	return gwRouter.Auth()
 }
