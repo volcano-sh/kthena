@@ -517,7 +517,12 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 
 	var isLora bool
 	var err error
-	modelTarget, isLora, modelRoute, matchedRule, err = r.store.MatchModelTarget(modelName, c.Request, gatewayKey)
+	listener := datastore.GatewayListener{
+		GatewayKey:   gatewayKey,
+		ListenerName: c.GetString(GatewayListenerNameKey),
+		Port:         c.GetInt(GatewayListenerPortKey),
+	}
+	modelTarget, isLora, modelRoute, matchedRule, err = r.store.MatchModelTarget(modelName, c.Request, listener)
 	if err != nil {
 		accesslog.SetError(c, "model_route_matching", fmt.Sprintf("failed to match model route target: %v", err))
 	}

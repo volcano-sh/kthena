@@ -1762,7 +1762,7 @@ func TestStoreMatchModelTargetForModelServer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setupStore()
-			target, isLora, _, matchedRule, err := s.MatchModelTarget(tt.modelName, tt.request, "")
+			target, isLora, _, matchedRule, err := s.MatchModelTarget(tt.modelName, tt.request, GatewayListener{})
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -1854,7 +1854,7 @@ func TestStoreMatchModelTargetExternalProvider(t *testing.T) {
 	}
 	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
 
-	target, isLora, route, _, err := s.MatchModelTarget("gpt-router", req, "")
+	target, isLora, route, _, err := s.MatchModelTarget("gpt-router", req, GatewayListener{})
 	assert.NoError(t, err)
 	assert.False(t, isLora)
 	assert.Equal(t, mr, route)
@@ -1880,7 +1880,7 @@ func TestStoreMatchesModelBoosterSpecName(t *testing.T) {
 	target, isLora, matchedRoute, _, err := store.MatchModelTarget(
 		model.Spec.Name,
 		&http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
-		"",
+		GatewayListener{},
 	)
 	assert.NoError(t, err)
 	assert.False(t, isLora)
@@ -1942,10 +1942,10 @@ func TestAddOrUpdateModelRoute_UpdatesLoraRoutes(t *testing.T) {
 	assert.NoError(t, s.AddOrUpdateModelRoute(mr))
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
-	_, _, _, _, err := s.MatchModelTarget("math-lora", req, "")
+	_, _, _, _, err := s.MatchModelTarget("math-lora", req, GatewayListener{})
 	assert.Error(t, err)
 
-	target, isLora, _, _, err := s.MatchModelTarget("code-lora", req, "")
+	target, isLora, _, _, err := s.MatchModelTarget("code-lora", req, GatewayListener{})
 	assert.NoError(t, err)
 	assert.True(t, isLora)
 	assert.Equal(t, ModelTargetKindModelServer, target.Kind)
@@ -2393,7 +2393,7 @@ func TestMatchModelTarget_EmptyTargetModels_NoPanic(t *testing.T) {
 
 	// Before the fix this would panic. After the fix it returns an error.
 	assert.NotPanics(t, func() {
-		_, _, _, _, err := s.MatchModelTarget("my-model", req, "")
+		_, _, _, _, err := s.MatchModelTarget("my-model", req, GatewayListener{})
 		assert.Error(t, err)
 	})
 }
@@ -2436,7 +2436,7 @@ func TestMatchModelTarget_EmptyTargetModels_FallsThrough(t *testing.T) {
 	s.AddOrUpdateModelRoute(mr)
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}}
-	target, _, _, _, err := s.MatchModelTarget("my-model", req, "")
+	target, _, _, _, err := s.MatchModelTarget("my-model", req, GatewayListener{})
 	assert.NoError(t, err)
 	assert.Equal(t, ModelTargetKindModelServer, target.Kind)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "good-server"}, target.Name)
@@ -2447,12 +2447,48 @@ func TestMatchModelTarget_GatewayScoped(t *testing.T) {
 	kindService := gatewayv1.Kind("Service")
 	sectionHTTPS := gatewayv1.SectionName("https")
 	sectionNonexistent := gatewayv1.SectionName("nonexistent-listener")
+	sectionHTTP := gatewayv1.SectionName("http")
+	port8443 := gatewayv1.PortNumber(8443)
+
+	// newTwoListenerStore returns a store with Gateway default/my-gateway, which
+	// has listeners "http" (port 8080) and "https" (port 8443), and the given
+	// ModelRoutes for model llama3. The route for refs[i] is created i seconds
+	// after the first one and sends traffic to the ModelServer servers[i].
+	newTwoListenerStore := func(refs []gatewayv1.ParentReference, servers []string) *store {
+		s := newStore()
+		s.AddOrUpdateGateway(&gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
+			Spec: gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 8080},
+				{Name: "https", Port: 8443},
+			}},
+		})
+		for i := range refs {
+			s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:         "default",
+					Name:              "route-" + servers[i],
+					CreationTimestamp: metav1.NewTime(time.Unix(int64(i), 0)),
+				},
+				Spec: aiv1alpha1.ModelRouteSpec{
+					ModelName:  "llama3",
+					ParentRefs: []gatewayv1.ParentReference{refs[i]},
+					Rules: []*aiv1alpha1.Rule{
+						{Name: "r", TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: servers[i], Weight: ptr(uint32(100))}}},
+					},
+				},
+			})
+		}
+		return s
+	}
 
 	tests := []struct {
 		name           string
 		setupStore     func() *store
 		modelName      string
 		gatewayKey     string
+		listenerName   string
+		listenerPort   int
 		request        *http.Request
 		expectedServer types.NamespacedName
 		expectedIsLora bool
@@ -2652,6 +2688,8 @@ func TestMatchModelTarget_GatewayScoped(t *testing.T) {
 			},
 			modelName:      "llama3",
 			gatewayKey:     "default/my-gateway",
+			listenerName:   "https",
+			listenerPort:   8443,
 			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
 			expectedServer: types.NamespacedName{Namespace: "default", Name: "llama3-server"},
 			expectedError:  false,
@@ -2750,12 +2788,101 @@ func TestMatchModelTarget_GatewayScoped(t *testing.T) {
 			expectedServer: types.NamespacedName{Namespace: "default", Name: "server-a"},
 			expectedError:  false,
 		},
+		{
+			name: "sectionName skips request from another listener",
+			setupStore: func() *store {
+				return newTwoListenerStore(
+					[]gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindGateway, SectionName: &sectionHTTPS}},
+					[]string{"internal-server"})
+			},
+			modelName:     "llama3",
+			gatewayKey:    "default/my-gateway",
+			listenerName:  "http",
+			listenerPort:  8080,
+			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedError: true,
+		},
+		{
+			name: "sectionName is skipped when the listener is unknown",
+			setupStore: func() *store {
+				return newTwoListenerStore(
+					[]gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindGateway, SectionName: &sectionHTTPS}},
+					[]string{"internal-server"})
+			},
+			modelName:     "llama3",
+			gatewayKey:    "default/my-gateway",
+			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedError: true,
+		},
+		{
+			name: "port matches the listener port",
+			setupStore: func() *store {
+				return newTwoListenerStore(
+					[]gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindGateway, Port: &port8443}},
+					[]string{"internal-server"})
+			},
+			modelName:      "llama3",
+			gatewayKey:     "default/my-gateway",
+			listenerName:   "https",
+			listenerPort:   8443,
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "internal-server"},
+		},
+		{
+			name: "port skips request from another port",
+			setupStore: func() *store {
+				return newTwoListenerStore(
+					[]gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindGateway, Port: &port8443}},
+					[]string{"internal-server"})
+			},
+			modelName:     "llama3",
+			gatewayKey:    "default/my-gateway",
+			listenerName:  "http",
+			listenerPort:  8080,
+			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedError: true,
+		},
+		{
+			name: "same model on two listeners: request on the second listener uses its own route",
+			setupStore: func() *store {
+				return newTwoListenerStore(
+					[]gatewayv1.ParentReference{
+						{Name: "my-gateway", Kind: &kindGateway, SectionName: &sectionHTTP},
+						{Name: "my-gateway", Kind: &kindGateway, SectionName: &sectionHTTPS},
+					},
+					[]string{"public-server", "internal-server"})
+			},
+			modelName:      "llama3",
+			gatewayKey:     "default/my-gateway",
+			listenerName:   "https",
+			listenerPort:   8443,
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "internal-server"},
+		},
+		{
+			name: "same model on two listeners: request on the first listener uses its own route",
+			setupStore: func() *store {
+				return newTwoListenerStore(
+					[]gatewayv1.ParentReference{
+						{Name: "my-gateway", Kind: &kindGateway, SectionName: &sectionHTTP},
+						{Name: "my-gateway", Kind: &kindGateway, SectionName: &sectionHTTPS},
+					},
+					[]string{"public-server", "internal-server"})
+			},
+			modelName:      "llama3",
+			gatewayKey:     "default/my-gateway",
+			listenerName:   "http",
+			listenerPort:   8080,
+			request:        &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedServer: types.NamespacedName{Namespace: "default", Name: "public-server"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.setupStore()
-			target, isLora, _, _, err := s.MatchModelTarget(tt.modelName, tt.request, tt.gatewayKey)
+			listener := GatewayListener{GatewayKey: tt.gatewayKey, ListenerName: tt.listenerName, Port: tt.listenerPort}
+			target, isLora, _, _, err := s.MatchModelTarget(tt.modelName, tt.request, listener)
 
 			if tt.expectedError {
 				assert.Error(t, err)
@@ -2981,7 +3108,7 @@ func TestGCRegexCacheDropsUnreferencedPatterns(t *testing.T) {
 	assert.NoError(t, s.AddOrUpdateModelRoute(regexModelRoute("default", "r1", "m1", pattern)))
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/gc-me"}, Header: http.Header{}}
-	_, _, _, _, err := s.MatchModelTarget("m1", req, "")
+	_, _, _, _, err := s.MatchModelTarget("m1", req, GatewayListener{})
 	assert.NoError(t, err)
 	assert.Equal(t, []string{pattern}, cachedPatterns(s), "pattern should be cached after a matching request")
 
@@ -2996,7 +3123,7 @@ func TestGCRegexCacheKeepsPatternsStillInUse(t *testing.T) {
 	assert.NoError(t, s.AddOrUpdateModelRoute(regexModelRoute("default", "r2", "m2", shared)))
 
 	req := &http.Request{URL: &url.URL{Path: "/v1/shared"}, Header: http.Header{}}
-	_, _, _, _, err := s.MatchModelTarget("m1", req, "")
+	_, _, _, _, err := s.MatchModelTarget("m1", req, GatewayListener{})
 	assert.NoError(t, err)
 	assert.Equal(t, []string{shared}, cachedPatterns(s))
 
@@ -3027,7 +3154,7 @@ func TestRegexCacheUnderRouteChurn(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_, _, _, _, _ = s.MatchModelTarget("stable-model", req, "")
+					_, _, _, _, _ = s.MatchModelTarget("stable-model", req, GatewayListener{})
 				}
 			}
 		}()

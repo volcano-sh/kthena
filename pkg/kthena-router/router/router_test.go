@@ -864,6 +864,71 @@ func TestRouter_HandlerFunc_AggregatedMode(t *testing.T) {
 	assert.Equal(t, float64(1), requestCounterValue(t, router, "test-model", "/v1/chat/completions", "200", "successful_request")-requestsBefore)
 }
 
+// TestRouter_HandlerFunc_ModelRouteSectionName verifies that a ModelRoute whose
+// parentRef sets sectionName only serves requests that arrive on that Gateway
+// listener.
+func TestRouter_HandlerFunc_ModelRouteSectionName(t *testing.T) {
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"response-id"}`)
+	})
+	router, store, backend := setupTestRouter(t, backendHandler)
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-internal", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("internal-model"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-internal", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+	}
+	kind := gatewayv1.Kind("Gateway")
+	section := gatewayv1.SectionName("internal")
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-internal", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName:  "internal-model",
+			ParentRefs: []gatewayv1.ParentReference{{Name: "gw", Kind: &kind, SectionName: &section}},
+			Rules: []*aiv1alpha1.Rule{
+				{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-internal"}}},
+			},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateGateway(&gatewayv1.Gateway{
+		ObjectMeta: v1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{
+			{Name: "public", Port: 8080},
+			{Name: "internal", Port: 8081},
+		}},
+	}))
+	assert.NoError(t, store.AddOrUpdateModelServer(modelServer, sets.New(types.NamespacedName{Name: "pod-internal", Namespace: "default"})))
+	assert.NoError(t, store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer}))
+	assert.NoError(t, store.AddOrUpdateModelRoute(modelRoute))
+
+	send := func(listenerName string, listenerPort int) int {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model": "internal-model", "prompt": "hello"}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set(GatewayKey, "default/gw")
+		c.Set(GatewayListenerNameKey, listenerName)
+		c.Set(GatewayListenerPortKey, listenerPort)
+		router.HandlerFunc()(c)
+		return w.Code
+	}
+
+	assert.Equal(t, http.StatusOK, send("internal", 8081), "the listener named in sectionName serves the model")
+	assert.Equal(t, http.StatusNotFound, send("public", 8080), "another listener of the same Gateway must not serve the model")
+}
+
 // TestRouter_HandlerFunc_UsesPerModelServerTransport verifies that when a
 // ModelServer has a per-ModelServer transport registered, the aggregated
 // forwarding path uses it instead of the shared default and still succeeds.
