@@ -344,6 +344,60 @@ func TestValidateAudiences(t *testing.T) {
 		assert.NoError(t, err, "Should pass validation when one of multiple audiences matches")
 	})
 
+	t.Run("multiple audiences generic slice match", func(t *testing.T) {
+		jwks := &Jwks{
+			Audiences: []string{"expected-audience", "another-audience"},
+		}
+		tok := &mockAudienceToken{
+			Token:    jwt.New(),
+			audClaim: []interface{}{"different-audience", "expected-audience"},
+		}
+
+		err := authenticator.validateAudiences(tok, jwks)
+		assert.NoError(t, err, "Should pass validation when generic slice contains expected audience")
+	})
+
+	t.Run("multiple audiences generic slice mismatch", func(t *testing.T) {
+		jwks := &Jwks{
+			Audiences: []string{"expected-audience", "another-audience"},
+		}
+		tok := &mockAudienceToken{
+			Token:    jwt.New(),
+			audClaim: []interface{}{"different-audience", "yet-another-audience"},
+		}
+
+		err := authenticator.validateAudiences(tok, jwks)
+		assert.Error(t, err, "Should return error when generic slice does not contain expected audience")
+		assert.Contains(t, err.Error(), "audience mismatch")
+	})
+
+	t.Run("multiple audiences generic slice with non-string items", func(t *testing.T) {
+		jwks := &Jwks{
+			Audiences: []string{"expected-audience"},
+		}
+		tok := &mockAudienceToken{
+			Token:    jwt.New(),
+			audClaim: []interface{}{12345, true, "expected-audience"},
+		}
+
+		err := authenticator.validateAudiences(tok, jwks)
+		assert.NoError(t, err, "Should skip non-string items and match expected audience")
+	})
+
+	t.Run("multiple audiences parsed from raw jwt", func(t *testing.T) {
+		jwks := &Jwks{
+			Audiences: []string{"expected-audience", "another-audience"},
+		}
+		// Payload: {"aud": ["other-audience", "expected-audience"]}
+		// Header: {"alg":"none"}
+		raw := "eyJhbGciOiJub25lIn0.eyJhdWQiOlsib3RoZXItYXVkaWVuY2UiLCJleHBlY3RlZC1hdWRpZW5jZSJdfQ."
+		parsedToken, parseErr := jwt.ParseInsecure([]byte(raw))
+		assert.NoError(t, parseErr)
+
+		err := authenticator.validateAudiences(parsedToken, jwks)
+		assert.NoError(t, err)
+	})
+
 	t.Run("multiple audiences mismatch", func(t *testing.T) {
 		jwks := &Jwks{
 			Audiences: []string{"expected-audience", "another-audience"},
@@ -356,6 +410,23 @@ func TestValidateAudiences(t *testing.T) {
 	})
 
 	token.Remove("aud")
+}
+
+// mockAudienceToken allows injecting arbitrary types into the "aud" claim
+// for testing decoder edge cases (e.g. []interface{} vs []string).
+type mockAudienceToken struct {
+	jwt.Token
+	audClaim interface{}
+}
+
+func (m *mockAudienceToken) Get(claim string, dst interface{}) error {
+	if claim == "aud" {
+		if p, ok := dst.(*interface{}); ok {
+			*p = m.audClaim
+			return nil
+		}
+	}
+	return m.Token.Get(claim, dst)
 }
 
 // verifies issuer claim is correctly matched against the configured JWKS issuer

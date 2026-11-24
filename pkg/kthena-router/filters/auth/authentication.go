@@ -141,8 +141,8 @@ func (j *JWTAuthenticator) validateIssuer(token jwt.Token, jwks *Jwks) error {
 
 func (j *JWTAuthenticator) validateAudiences(token jwt.Token, jwks *Jwks) error {
 	var aud interface{}
-	audinecesCache := jwks.Audiences
-	if len(audinecesCache) == 0 {
+	audiencesCache := jwks.Audiences
+	if len(audiencesCache) == 0 {
 		// If audiences are not configured, we skip audience validation
 		return nil
 	}
@@ -160,7 +160,7 @@ func (j *JWTAuthenticator) validateAudiences(token jwt.Token, jwks *Jwks) error 
 	audMatched := false
 	switch audVal := aud.(type) {
 	case string:
-		for _, expectedAud := range audinecesCache {
+		for _, expectedAud := range audiencesCache {
 			if audVal == expectedAud {
 				audMatched = true
 				break
@@ -168,9 +168,26 @@ func (j *JWTAuthenticator) validateAudiences(token jwt.Token, jwks *Jwks) error 
 		}
 	case []string:
 		for _, audItem := range audVal {
-			for _, expectedAud := range audinecesCache {
+			for _, expectedAud := range audiencesCache {
 				if audItem == expectedAud {
 					audMatched = true
+					break
+				}
+			}
+			if audMatched {
+				break
+			}
+		}
+	case []interface{}:
+		for _, audItem := range audVal {
+			if str, ok := audItem.(string); ok {
+				for _, expectedAud := range audiencesCache {
+					if str == expectedAud {
+						audMatched = true
+						break
+					}
+				}
+				if audMatched {
 					break
 				}
 			}
@@ -178,7 +195,7 @@ func (j *JWTAuthenticator) validateAudiences(token jwt.Token, jwks *Jwks) error 
 	}
 
 	if !audMatched {
-		return fmt.Errorf("audience mismatch: expected one of %v, got %v", audinecesCache, aud)
+		return fmt.Errorf("audience mismatch: expected one of %v, got %v", audiencesCache, aud)
 	}
 	return nil
 }
