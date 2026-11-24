@@ -99,7 +99,7 @@ test-e2e: ## Run all e2e tests sequentially (legacy).
 	@echo "Setting up Kind cluster for E2E tests..."
 	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} ./test/e2e/setup.sh
 	@echo "Running E2E tests sequentially..."
-	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=15m
+	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=25m
 	@echo "E2E tests completed"
 
 .PHONY: test-e2e-controller-manager

@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -58,7 +59,10 @@ const (
 	routerContainerPort            = "8080" // kthenaRouter.port in the Helm chart; the Service exposes it as 80
 	kvCacheSyncModeEnv             = "KV_EVENT_SYNC_MODE"
 	kvCacheStreamWaitTimeout       = 90 * time.Second
-	kvCacheOwnershipConfirmHits    = 3
+	kvCacheOwnershipProbeAttempts  = 5
+	kvCacheOwnershipProbeInterval  = 2 * time.Second
+	kvCacheMemoryEngineCacheSize   = "32"
+	kvCacheMatchRatioMetric        = "kthena_router_kvcache_aware_match_ratio"
 	kvCacheOwnershipWaitTimeout    = 90 * time.Second
 	kvCacheMappingPrefix           = "vllm:kv:block"
 	kvCacheOwnershipPrefix         = "matrix:kv:block"
@@ -85,7 +89,7 @@ func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string
 
 func setupKVCacheFixture(t *testing.T, kube kubernetes.Interface, namespace, redisNamespace string) []corev1.Pod {
 	t.Helper()
-	return createKVCacheFixture(t, kube, namespace, false, func(container *corev1.Container) {
+	return createKVCacheFixture(t, kube, namespace, false, "", func(container *corev1.Container) {
 		redisHostSet := false
 		for j := range container.Env {
 			if container.Env[j].Name == "REDIS_HOST" {
@@ -101,7 +105,7 @@ func setupKVCacheFixture(t *testing.T, kube kubernetes.Interface, namespace, red
 // KV events to routers (KV_EVENT_SYNC_MODE=memory) and without any Redis settings.
 func setupKVCacheMemoryFixture(t *testing.T, kube kubernetes.Interface, namespace string, gated bool) []corev1.Pod {
 	t.Helper()
-	return createKVCacheFixture(t, kube, namespace, gated, func(container *corev1.Container) {
+	return createKVCacheFixture(t, kube, namespace, gated, kvCacheMemoryEngineCacheSize, func(container *corev1.Container) {
 		env := make([]corev1.EnvVar, 0, len(container.Env)+1)
 		for _, e := range container.Env {
 			if e.Name != "REDIS_HOST" && e.Name != "REDIS_PORT" {
@@ -112,9 +116,26 @@ func setupKVCacheMemoryFixture(t *testing.T, kube kubernetes.Interface, namespac
 	})
 }
 
-// createKVCacheFixture deploys the KV-cache mock fixture. With gated set, pods also need the
+// setKVCacheEngineCacheSize overrides the simulated engine's KV cache capacity in blocks.
+func setKVCacheEngineCacheSize(t *testing.T, statefulSet *appsv1.StatefulSet, size string) {
+	t.Helper()
+	const flag = "--kv-cache-size="
+	replaced := false
+	for i := range statefulSet.Spec.Template.Spec.Containers {
+		container := &statefulSet.Spec.Template.Spec.Containers[i]
+		for j, arg := range container.Args {
+			if strings.HasPrefix(arg, flag) {
+				container.Args[j] = flag + size
+				replaced = true
+			}
+		}
+	}
+	require.True(t, replaced, "KV-cache fixture needs a %s argument", flag)
+}
+
+// createKVCacheFixture deploys the KV-cache mock fixture. engineCacheSize, when set, raises the engine cache. With gated set, pods also need the
 // kvCacheReadinessGate condition, which the test flips to make a pod NotReady without restarting it.
-func createKVCacheFixture(t *testing.T, kube kubernetes.Interface, namespace string, gated bool, configureRuntime func(*corev1.Container)) []corev1.Pod {
+func createKVCacheFixture(t *testing.T, kube kubernetes.Interface, namespace string, gated bool, engineCacheSize string, configureRuntime func(*corev1.Container)) []corev1.Pod {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -130,6 +151,9 @@ func createKVCacheFixture(t *testing.T, kube kubernetes.Interface, namespace str
 		runtimeFound = true
 	}
 	require.True(t, runtimeFound, "KV-cache fixture needs a %s container", kvCacheRuntimeContainer)
+	if engineCacheSize != "" {
+		setKVCacheEngineCacheSize(t, statefulSet, engineCacheSize)
+	}
 
 	if gated {
 		statefulSet.Spec.Template.Spec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: kvCacheReadinessGate}}
@@ -513,29 +537,69 @@ func warmKVCacheMemory(t *testing.T, kube kubernetes.Interface, pod corev1.Pod, 
 		"sidecar of pod %s did not stream KV blocks to routers", pod.Name)
 }
 
-// confirmKVCacheOwnership waits until the router behind chatURL has applied the blocks a pod streamed.
-// The sidecar logs only show that events were queued. A stream is ordered, so a router that routes a
-// throwaway prompt to the pod, warmed after the prompts under test, has applied everything streamed before
-// it. Probes use unique, short prompts led by a distinct token: a probe that races ahead of the router
-// only warms another pod for its own prompt and never for the prompts under test. Several hits in a row
-// rule out a miss that happened to land on the pod.
-func confirmKVCacheOwnership(t *testing.T, kube kubernetes.Interface, kthenaNamespace, chatURL, model string, pod corev1.Pod) {
-	t.Helper()
-	hits := 0
-	deadline := time.Now().Add(kvCacheStreamWaitTimeout)
-	for attempt := 0; time.Now().Before(deadline); attempt++ {
-		prompt := fmt.Sprintf("probe%d%s kvcache ownership check", attempt, utils.RandomString(6))
-		warmKVCacheMemory(t, kube, pod, model, prompt)
-		messages := []utils.ChatMessage{utils.NewChatMessage("user", prompt)}
-		if utils.SelectedPodAfterChatURLHeaders(t, kube, kthenaNamespace, chatURL, model, messages, nil) != pod.Name {
-			hits = 0
+// kvCacheMatchCounts scrapes the router and returns how many kvcache-aware match attempts it has
+// recorded for the model and how many of them were misses (match ratio 0).
+func kvCacheMatchCounts(metricsURL, model string) (total, misses float64, err error) {
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(metricsURL)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, 0, err
+	}
+	modelLabel := fmt.Sprintf(`model=%q`, model)
+	for _, line := range strings.Split(string(body), "\n") {
+		isCount := strings.HasPrefix(line, kvCacheMatchRatioMetric+"_count{")
+		isMissBucket := strings.HasPrefix(line, kvCacheMatchRatioMetric+"_bucket{") && strings.Contains(line, `le="0"`)
+		if !(isCount || isMissBucket) || !strings.Contains(line, modelLabel) {
 			continue
 		}
-		if hits++; hits == kvCacheOwnershipConfirmHits {
-			return
+		fields := strings.Fields(line)
+		value, parseErr := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if parseErr != nil {
+			return 0, 0, parseErr
+		}
+		if isCount {
+			total += value
+		} else {
+			misses += value
 		}
 	}
-	require.FailNowf(t, "router did not apply the KV blocks streamed by the pod", "pod=%s url=%s", pod.Name, chatURL)
+	return total, misses, nil
+}
+
+// confirmKVCacheOwnership waits until routerPod has applied the blocks a pod streamed. The sidecar logs
+// only show that events were queued, and the selected pod cannot show it either because a miss can pick
+// the owner on a tie. The router's own match ratio can: a probe prompt that only the owner holds is
+// scored as a hit (ratio above 0) only once the router has indexed the owner's blocks. The pod streams
+// its blocks in order, so a router that has applied the probe has applied everything streamed before it,
+// including the prompts under test. Each probe is unique and short, led by a distinct token: a probe
+// that races ahead of the router only warms another pod for its own prompt and never for the prompts
+// under test. chatURL must reach routerPod. Probes are capped so they stay within the engine cache.
+func confirmKVCacheOwnership(t *testing.T, kube kubernetes.Interface, chatURL, model string, pod, routerPod corev1.Pod) {
+	t.Helper()
+	localPort := utils.AllocateLocalPort(t)
+	pf, err := utils.SetupPortForwardToPod(routerPod.Namespace, routerPod.Name, localPort, utils.RouterMetricsPort)
+	require.NoError(t, err, "port-forward to router metrics")
+	defer pf.Close()
+	metricsURL := fmt.Sprintf("http://127.0.0.1:%s/metrics", localPort)
+
+	for attempt := 0; attempt < kvCacheOwnershipProbeAttempts; attempt++ {
+		prompt := fmt.Sprintf("probe%d%s kvcache ownership check", attempt, utils.RandomString(6))
+		warmKVCacheMemory(t, kube, pod, model, prompt)
+		totalBefore, missesBefore, err := kvCacheMatchCounts(metricsURL, model)
+		require.NoError(t, err, "read router match ratio metric")
+		_ = utils.CheckChatCompletionsWithURLAndHeaders(t, chatURL, model, []utils.ChatMessage{utils.NewChatMessage("user", prompt)}, nil)
+		totalAfter, missesAfter, err := kvCacheMatchCounts(metricsURL, model)
+		require.NoError(t, err, "read router match ratio metric")
+		if (totalAfter-totalBefore)-(missesAfter-missesBefore) >= 1 {
+			return
+		}
+		time.Sleep(kvCacheOwnershipProbeInterval)
+	}
+	require.FailNowf(t, "router did not apply the KV blocks streamed by the pod", "pod=%s router=%s", pod.Name, routerPod.Name)
 }
 
 // assertKVCacheHitRouting sends the warmed prompt through the router and expects most requests on the owning pod.

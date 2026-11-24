@@ -181,6 +181,21 @@ func TestSchedulerPluginKVCacheAwarePrefixAndLifecycle(t *testing.T) {
 	waitForSchedulerPluginInMetrics(t, metricsURL, plugins.KVCacheAwarePluginName, "score")
 }
 
+// newestRouterPod returns the most recently created active router pod. The memory tests run one router
+// replica, and after a rollout the newest pod is the one that serves requests.
+func newestRouterPod(t *testing.T) corev1.Pod {
+	t.Helper()
+	pods := activeRouterPods(t)
+	require.NotEmpty(t, pods, "no active router pods")
+	newest := pods[0]
+	for _, pod := range pods[1:] {
+		if pod.CreationTimestamp.After(newest.CreationTimestamp.Time) {
+			newest = pod
+		}
+	}
+	return newest
+}
+
 // activeRouterPods returns ready router pods that are not terminating.
 func activeRouterPods(t *testing.T) []corev1.Pod {
 	t.Helper()
@@ -225,7 +240,7 @@ func TestSchedulerPluginKVCacheAwareMemory(t *testing.T) {
 	warmedPod := pods[0]
 	warmKVCacheMemory(t, testCtx.KubeClient, warmedPod, route.Spec.ModelName, prompt)
 
-	confirmKVCacheOwnership(t, testCtx.KubeClient, kthenaNamespace, chatURL, route.Spec.ModelName, warmedPod)
+	confirmKVCacheOwnership(t, testCtx.KubeClient, chatURL, route.Spec.ModelName, warmedPod, newestRouterPod(t))
 	assertKVCacheHitRouting(t, testCtx.KubeClient, kthenaNamespace, chatURL, route.Spec.ModelName, prompt, warmedPod, pods)
 	assertKVCacheMissRouting(t, testCtx.KubeClient, kthenaNamespace, chatURL, route.Spec.ModelName, pods)
 
@@ -241,7 +256,7 @@ func TestSchedulerPluginKVCacheAwareMemoryPodLifecycle(t *testing.T) {
 	prompt := "kthena kvcache memory lifecycle test"
 	ownerPod := pods[0]
 	warmKVCacheMemory(t, testCtx.KubeClient, ownerPod, model, prompt)
-	confirmKVCacheOwnership(t, testCtx.KubeClient, kthenaNamespace, chatURL, model, ownerPod)
+	confirmKVCacheOwnership(t, testCtx.KubeClient, chatURL, model, ownerPod, newestRouterPod(t))
 	assertKVCacheHitRouting(t, testCtx.KubeClient, kthenaNamespace, chatURL, model, prompt, ownerPod, pods)
 
 	deletedAt := metav1.NewTime(time.Now())
@@ -271,7 +286,7 @@ func TestSchedulerPluginKVCacheAwareMemoryPodLifecycle(t *testing.T) {
 	// The simulated engine hashes only the first block, so lead with a token the old prompt does not share.
 	newPrompt := "replacement kvcache memory test"
 	warmKVCacheMemory(t, testCtx.KubeClient, replacement, model, newPrompt)
-	confirmKVCacheOwnership(t, testCtx.KubeClient, kthenaNamespace, chatURL, model, replacement)
+	confirmKVCacheOwnership(t, testCtx.KubeClient, chatURL, model, replacement, newestRouterPod(t))
 	assertKVCacheHitRouting(t, testCtx.KubeClient, kthenaNamespace, chatURL, model, newPrompt, replacement, survivors)
 }
 
@@ -284,7 +299,7 @@ func TestSchedulerPluginKVCacheAwareMemoryRouterRestart(t *testing.T) {
 	prompt := "kthena kvcache memory restart test"
 	warmedPod := pods[0]
 	warmKVCacheMemory(t, testCtx.KubeClient, warmedPod, model, prompt)
-	confirmKVCacheOwnership(t, testCtx.KubeClient, kthenaNamespace, chatURL, model, warmedPod)
+	confirmKVCacheOwnership(t, testCtx.KubeClient, chatURL, model, warmedPod, newestRouterPod(t))
 	assertKVCacheHitRouting(t, testCtx.KubeClient, kthenaNamespace, chatURL, model, prompt, warmedPod, pods)
 
 	restartedAt := metav1.NewTime(time.Now())
@@ -293,7 +308,7 @@ func TestSchedulerPluginKVCacheAwareMemoryRouterRestart(t *testing.T) {
 	t.Cleanup(closePF)
 	waitForRouterRegistration(t, testCtx.KubeClient, pods, activeRouterPods(t), restartedAt)
 
-	confirmKVCacheOwnership(t, testCtx.KubeClient, kthenaNamespace, newChatURL, model, warmedPod)
+	confirmKVCacheOwnership(t, testCtx.KubeClient, newChatURL, model, warmedPod, newestRouterPod(t))
 	assertKVCacheHitRouting(t, testCtx.KubeClient, kthenaNamespace, newChatURL, model, prompt, warmedPod, pods)
 }
 
@@ -309,7 +324,7 @@ func TestSchedulerPluginKVCacheAwareMemoryNotReady(t *testing.T) {
 	owner := pods[0]
 	warmKVCacheMemory(t, testCtx.KubeClient, owner, model, ownedPrompt)
 	warmKVCacheMemory(t, testCtx.KubeClient, owner, model, routedPrompt)
-	confirmKVCacheOwnership(t, testCtx.KubeClient, kthenaNamespace, chatURL, model, owner)
+	confirmKVCacheOwnership(t, testCtx.KubeClient, chatURL, model, owner, newestRouterPod(t))
 	assertKVCacheHitRouting(t, testCtx.KubeClient, kthenaNamespace, chatURL, model, ownedPrompt, owner, pods)
 
 	notReadyAt := metav1.NewTime(time.Now())
@@ -334,7 +349,7 @@ func TestSchedulerPluginKVCacheAwareMemoryNotReady(t *testing.T) {
 	}, time.Minute, time.Second, "owner pod %s did not become Ready again", owner.Name)
 	waitForRouterRegistration(t, testCtx.KubeClient, []corev1.Pod{owner}, activeRouterPods(t), readyAt)
 
-	confirmKVCacheOwnership(t, testCtx.KubeClient, kthenaNamespace, chatURL, model, owner)
+	confirmKVCacheOwnership(t, testCtx.KubeClient, chatURL, model, owner, newestRouterPod(t))
 	assertKVCacheHitRouting(t, testCtx.KubeClient, kthenaNamespace, chatURL, model, ownedPrompt, owner, pods)
 }
 
@@ -361,7 +376,7 @@ func TestSchedulerPluginKVCacheAwareMemoryMultiRouter(t *testing.T) {
 		t.Cleanup(pf.Close)
 
 		routerURL := fmt.Sprintf("http://127.0.0.1:%s/v1/chat/completions", localPort)
-		confirmKVCacheOwnership(t, testCtx.KubeClient, kthenaNamespace, routerURL, model, warmedPod)
+		confirmKVCacheOwnership(t, testCtx.KubeClient, routerURL, model, warmedPod, routerPod)
 		since := metav1.NewTime(time.Now())
 		utils.SendRouterChatRequests(t, routerURL, model, prompt, kvCacheRoutingRequestCount/2)
 		time.Sleep(2 * time.Second)
