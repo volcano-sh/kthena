@@ -1,0 +1,14 @@
+# Tokenizer as its own Deployment and Service.
+networking:
+  kthenaRouter:
+    tokenizerService:
+      enabled: true
+      mode: standalone
+      models:
+        deepseek-v3: deepseek-ai/DeepSeek-V3
+        qwen3: /models/qwen3
+      extraEnv:
+        - name: HF_ENDPOINT
+          value: https://huggingface.co
+      standalone:
+        replicas: 2

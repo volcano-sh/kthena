@@ -1,0 +1,7 @@
+# Certificates from cert-manager, with TLS on the router.
+global:
+  certManagementMode: cert-manager
+networking:
+  kthenaRouter:
+    tls:
+      enabled: true
