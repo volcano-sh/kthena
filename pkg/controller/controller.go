@@ -159,7 +159,7 @@ func SetupController(ctx context.Context, cc Config) {
 			startControllers(ctx)
 			klog.Info("Start as leader")
 		}
-		leaderElector, err := initLeaderElector(kubeClient, startedLeading)
+		leaderElector, err := initLeaderElector(ctx, kubeClient, startedLeading)
 		if err != nil {
 			panic(err)
 		}
@@ -172,7 +172,7 @@ func SetupController(ctx context.Context, cc Config) {
 }
 
 // initLeaderElector inits a leader elector for leader election
-func initLeaderElector(kubeClient kubernetes.Interface, startedLeading func(ctx context.Context)) (*leaderelection.LeaderElector, error) {
+func initLeaderElector(ctx context.Context, kubeClient kubernetes.Interface, startedLeading func(ctx context.Context)) (*leaderelection.LeaderElector, error) {
 	resourceLock, err := newResourceLock(kubeClient)
 	if err != nil {
 		return nil, err
@@ -185,7 +185,14 @@ func initLeaderElector(kubeClient kubernetes.Interface, startedLeading func(ctx 
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: startedLeading,
 			OnStoppedLeading: func() {
-				klog.Error("leader election lost")
+				select {
+				case <-ctx.Done():
+					klog.Info("leader election stopped, the controller manager is shutting down")
+				default:
+					// Exit so the Pod restarts and rejoins the election as a standby.
+					klog.Error("leader election lost, exiting")
+					klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+				}
 			},
 		},
 		ReleaseOnCancel: false,
