@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,6 +48,10 @@ type GatewayController struct {
 	workqueue   workqueue.TypedRateLimitingInterface[any]
 	initialSync *atomic.Bool
 	store       datastore.Store
+
+	// ownershipRecheckInterval is how often a Gateway is checked again while
+	// its GatewayClass belongs to another controller.
+	ownershipRecheckInterval time.Duration
 }
 
 func NewGatewayController(
@@ -63,6 +68,8 @@ func NewGatewayController(
 		workqueue:     workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]()),
 		initialSync:   &atomic.Bool{},
 		store:         store,
+
+		ownershipRecheckInterval: 30 * time.Second,
 	}
 
 	// Filter handler to only process Gateways that reference the kthena-router GatewayClass
@@ -173,26 +180,29 @@ func (c *GatewayController) syncHandler(key string) error {
 
 	// Update Gateway status to Accepted=True and Programmed=True
 	if err := c.updateGatewayStatus(gateway); err != nil {
-		klog.Errorf("Failed to update Gateway %s/%s status: %v", namespace, name, err)
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			// Deleted, or changed since it was stored: the newer object's event syncs it again.
+			return nil
+		}
+		return err
 	}
 
 	return nil
 }
 
-// updateGatewayStatus patches the Gateway status with Accepted=True and Programmed=True.
+// updateGatewayStatus sets Accepted=True and Programmed=True on the Gateway and
+// one status entry per listener, for the Gateway as it was stored. The update
+// carries that object's resourceVersion, so it fails with a conflict if the
+// Gateway changed since. It writes only when the status changes: every write
+// causes an update event that syncs the Gateway again.
 func (c *GatewayController) updateGatewayStatus(gateway *gatewayv1.Gateway) error {
 	ctx := context.Background()
-
-	current, err := c.gatewayClient.GatewayV1().Gateways(gateway.Namespace).Get(ctx, gateway.Name, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get gateway for status update: %w", err)
-	}
 
 	now := metav1.Now()
 	acceptedCondition := metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionAccepted),
 		Status:             metav1.ConditionTrue,
-		ObservedGeneration: current.Generation,
+		ObservedGeneration: gateway.Generation,
 		LastTransitionTime: now,
 		Reason:             string(gatewayv1.GatewayReasonAccepted),
 		Message:            "Gateway is accepted by kthena-router controller",
@@ -200,38 +210,63 @@ func (c *GatewayController) updateGatewayStatus(gateway *gatewayv1.Gateway) erro
 	programmedCondition := metav1.Condition{
 		Type:               string(gatewayv1.GatewayConditionProgrammed),
 		Status:             metav1.ConditionTrue,
-		ObservedGeneration: current.Generation,
+		ObservedGeneration: gateway.Generation,
 		LastTransitionTime: now,
 		Reason:             string(gatewayv1.GatewayReasonProgrammed),
 		Message:            "Gateway is programmed and listening",
 	}
 
-	existingAccepted := apimeta.FindStatusCondition(current.Status.Conditions, string(gatewayv1.GatewayConditionAccepted))
-	existingProgrammed := apimeta.FindStatusCondition(current.Status.Conditions, string(gatewayv1.GatewayConditionProgrammed))
-	if existingAccepted != nil && existingAccepted.Status == metav1.ConditionTrue &&
-		existingProgrammed != nil && existingProgrammed.Status == metav1.ConditionTrue {
-		return nil
-	}
-
-	updated := current.DeepCopy()
-	apimeta.SetStatusCondition(&updated.Status.Conditions, acceptedCondition)
-	apimeta.SetStatusCondition(&updated.Status.Conditions, programmedCondition)
+	updated := gateway.DeepCopy()
+	setCondition(&updated.Status.Conditions, acceptedCondition)
+	setCondition(&updated.Status.Conditions, programmedCondition)
 
 	// Populate per-listener status for each listener in the Gateway spec.
 	updated.Status.Listeners = buildListenerStatuses(gateway)
+
+	if apiequality.Semantic.DeepEqual(gateway.Status, updated.Status) {
+		return nil
+	}
+
+	// A GatewayClass with this name may now belong to another controller.
+	// Writing status then would overwrite that controller's status, and each
+	// side would undo the other's write.
+	gatewayClass, err := c.gatewayClient.GatewayV1().GatewayClasses().Get(ctx, string(gateway.Spec.GatewayClassName), metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to get gatewayclass for status update: %w", err)
+	}
+	if err == nil && string(gatewayClass.Spec.ControllerName) != ControllerName {
+		klog.V(2).Infof("Not updating Gateway %s/%s status: GatewayClass %s belongs to %s", gateway.Namespace, gateway.Name, gatewayClass.Name, gatewayClass.Spec.ControllerName)
+		// The class can be handed back to kthena-router later, and a
+		// GatewayClass change does not enqueue its Gateways. Check again.
+		c.workqueue.AddAfter(cache.MetaObjectToName(gateway).String(), c.ownershipRecheckInterval)
+		return nil
+	}
 
 	_, err = c.gatewayClient.GatewayV1().Gateways(gateway.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to update gateway status: %w", err)
 	}
 
-	klog.V(2).Infof("Updated Gateway %s/%s status: Accepted=True, Programmed=True", gateway.Namespace, gateway.Name)
+	klog.V(2).Infof("Updated Gateway %s/%s status", gateway.Namespace, gateway.Name)
 	return nil
+}
+
+// setCondition merges condition into conditions, except when the existing
+// condition of that type observes a newer generation: the Gateway API asks to
+// leave it to a later reconcile then.
+func setCondition(conditions *[]metav1.Condition, condition metav1.Condition) {
+	existing := apimeta.FindStatusCondition(*conditions, condition.Type)
+	if existing != nil && existing.ObservedGeneration > condition.ObservedGeneration {
+		return
+	}
+	apimeta.SetStatusCondition(conditions, condition)
 }
 
 // buildListenerStatuses constructs per-listener status for each listener in the Gateway spec.
 // Each listener gets Accepted=True, Programmed=True, ResolvedRefs=True, Conflicted=False,
-// supportedKinds based on protocol, and attachedRoutes count.
+// supportedKinds based on protocol, and attachedRoutes count. Conditions are
+// merged into the listener's current ones, so a condition keeps its
+// lastTransitionTime while its status does not change.
 func buildListenerStatuses(gateway *gatewayv1.Gateway) []gatewayv1.ListenerStatus {
 	var listenerStatuses []gatewayv1.ListenerStatus
 
@@ -275,6 +310,16 @@ func buildListenerStatuses(gateway *gatewayv1.Gateway) []gatewayv1.ListenerStatu
 				},
 			},
 		}
+		for _, current := range gateway.Status.Listeners {
+			if current.Name == listener.Name {
+				conditions := append([]metav1.Condition(nil), current.Conditions...)
+				for _, condition := range ls.Conditions {
+					setCondition(&conditions, condition)
+				}
+				ls.Conditions = conditions
+				break
+			}
+		}
 		listenerStatuses = append(listenerStatuses, ls)
 	}
 
@@ -312,7 +357,8 @@ func supportedKindsForListener(listener gatewayv1.Listener) []gatewayv1.RouteGro
 			{Group: groupNamePtr(gatewayv1.GroupName), Kind: "UDPRoute"},
 		}
 	default:
-		return nil
+		// supportedKinds is required, so the API server rejects null.
+		return []gatewayv1.RouteGroupKind{}
 	}
 }
 
