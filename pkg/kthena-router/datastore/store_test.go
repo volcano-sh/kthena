@@ -2672,7 +2672,7 @@ func TestMatchModelTarget_GatewayScoped(t *testing.T) {
 				s := newStore()
 				s.AddOrUpdateGateway(&gatewayv1.Gateway{
 					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
-					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http"}, {Name: "https"}}},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http", Port: 8080}, {Name: "https", Port: 8443}}},
 				})
 				s.AddOrUpdateModelRoute(&aiv1alpha1.ModelRoute{
 					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "route-a"},
@@ -2811,6 +2811,26 @@ func TestMatchModelTarget_GatewayScoped(t *testing.T) {
 			},
 			modelName:     "llama3",
 			gatewayKey:    "default/my-gateway",
+			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
+			expectedError: true,
+		},
+		{
+			name: "sectionName skips request from a listener removed from the Gateway",
+			setupStore: func() *store {
+				s := newTwoListenerStore(
+					[]gatewayv1.ParentReference{{Name: "my-gateway", Kind: &kindGateway, SectionName: &sectionHTTPS}},
+					[]string{"internal-server"})
+				// The "https" listener is removed while requests from it are still arriving.
+				s.AddOrUpdateGateway(&gatewayv1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-gateway"},
+					Spec:       gatewayv1.GatewaySpec{Listeners: []gatewayv1.Listener{{Name: "http", Port: 8080}}},
+				})
+				return s
+			},
+			modelName:     "llama3",
+			gatewayKey:    "default/my-gateway",
+			listenerName:  "https",
+			listenerPort:  8443,
 			request:       &http.Request{URL: &url.URL{Path: "/v1/chat/completions"}},
 			expectedError: true,
 		},

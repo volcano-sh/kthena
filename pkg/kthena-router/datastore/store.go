@@ -1592,7 +1592,8 @@ func (s *store) matchesGatewayListener(mr *aiv1alpha1.ModelRoute, listener Gatew
 	s.gatewayMutex.RLock()
 	defer s.gatewayMutex.RUnlock()
 
-	if s.gateways[listener.GatewayKey] == nil {
+	gatewayObj := s.gateways[listener.GatewayKey]
+	if gatewayObj == nil {
 		return false
 	}
 
@@ -1623,9 +1624,24 @@ func (s *store) matchesGatewayListener(mr *aiv1alpha1.ModelRoute, listener Gatew
 		if parentRef.Port != nil && int(*parentRef.Port) != listener.Port {
 			continue
 		}
+		// Listeners are updated asynchronously, so a request can still carry a
+		// listener that was just removed from the Gateway.
+		if (parentRef.SectionName != nil || parentRef.Port != nil) && !gatewayHasListener(gatewayObj, listener) {
+			continue
+		}
 		return true
 	}
 
+	return false
+}
+
+// gatewayHasListener checks if the Gateway still has the listener the request arrived on.
+func gatewayHasListener(gateway *gatewayv1.Gateway, listener GatewayListener) bool {
+	for _, l := range gateway.Spec.Listeners {
+		if string(l.Name) == listener.ListenerName && int(l.Port) == listener.Port {
+			return true
+		}
+	}
 	return false
 }
 
