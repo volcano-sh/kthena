@@ -2640,8 +2640,8 @@ func TestKVCacheAware_QueryRedisForBlocks_PipelineErrors(t *testing.T) {
 	tests := []struct {
 		name       string
 		clientOpts func(addr string) *redis.Options // nil → default (just addr)
-		closeFirst bool                              // close miniredis before the query
-		setup      setupFunc                         // nil → no data seeded
+		closeFirst bool                             // close miniredis before the query
+		setup      setupFunc                        // nil → no data seeded
 		wantErr    bool
 		check      func(t *testing.T, result map[uint64][]string)
 	}{
