@@ -110,7 +110,11 @@ type scaleOneTargetResult struct {
 	Skip                bool
 }
 
+// scaleOneTarget computes the replicas for one target. Its only history write is
+// the one-time seed of the stabilization windows. Results are recorded by
+// recordScaleOneTargetResult.
 func scaleOneTarget(input scaleOneTargetInput) scaleOneTargetResult {
+	input.Status.RecordInitialRecommendation(input.CurrentReplicas)
 	instancesAlgorithm := algorithm.RecommendedInstancesAlgorithm{
 		MinInstances:                  input.MinReplicas,
 		MaxInstances:                  input.MaxReplicas,

@@ -27,6 +27,8 @@ type Status struct {
 	PanicModeEndsAt           int64
 	PanicModeHoldMilliseconds int64
 	History                   *algorithm.History
+	// initialRecommendationRecorded is false until the first reconcile.
+	initialRecommendationRecorded bool
 }
 
 func NewStatus(behavior *v1alpha1.AutoscalingPolicyBehavior) *Status {
@@ -61,6 +63,19 @@ func NewStatus(behavior *v1alpha1.AutoscalingPolicyBehavior) *Status {
 			MinCorrectedForPanic:  datastructure.NewMinimumLineChartSlidingWindow[int32](behavior.ScaleUp.PanicPolicy.Period.Milliseconds()),
 		},
 	}
+}
+
+// RecordInitialRecommendation adds the current replicas to both stabilization
+// windows on the first reconcile, as Kubernetes HPA does. The history lives
+// only in memory, so it is empty after a controller restart, a policy edit and
+// a new policy. Without this, the first scale-down or scale-up would skip its
+// window.
+func (s *Status) RecordInitialRecommendation(currentInstances int32) {
+	if s.initialRecommendationRecorded {
+		return
+	}
+	s.initialRecommendationRecorded = true
+	s.AppendRecommendation(currentInstances)
 }
 
 func (s *Status) AppendRecommendation(recommendedInstances int32) {

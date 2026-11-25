@@ -425,24 +425,11 @@ func TestRestoreReplicasOfEachBackend(t *testing.T) {
 	}
 }
 
-// Optimize must record the raw recommendation, not the corrected value, into
-// the recommendation windows; otherwise the scale-down stabilization window
-// refills itself every cycle and never drains (#1644).
-func TestOptimizeRecordsRawRecommendationInStabilizationWindows(t *testing.T) {
-	var metricValue atomic.Value
-	metricValue.Store("100")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/api/v1/query") {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"status":"success","data":{"resultType":"scalar","result":[1700000000,"%s"]}}`, metricValue.Load())
-	}))
-	t.Cleanup(srv.Close)
-
-	targetRef := corev1.ObjectReference{Kind: "ModelServing", Name: "backend-a"}
-	policy := &workload.AutoscalingPolicy{
+// newStabilizationTestPolicy returns a heterogeneous policy with one backend,
+// a one-hour stabilization window in both directions and a Prometheus metric
+// served from serverURL.
+func newStabilizationTestPolicy(serverURL string, targetRef corev1.ObjectReference) *workload.AutoscalingPolicy {
+	return &workload.AutoscalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "hetero-policy", Namespace: "default"},
 		Spec: workload.AutoscalingPolicySpec{
 			TolerancePercent: 10,
@@ -480,7 +467,7 @@ func TestOptimizeRecordsRawRecommendationInStabilizationWindows(t *testing.T) {
 							TargetRef: targetRef,
 							MetricSources: map[string]workload.MetricSource{
 								"http_rps": {Prometheus: &workload.PrometheusMetricSource{
-									ServerURL: srv.URL,
+									ServerURL: serverURL,
 									Query:     "sum(rate(http_requests_total[2m]))",
 								}},
 							},
@@ -493,6 +480,26 @@ func TestOptimizeRecordsRawRecommendationInStabilizationWindows(t *testing.T) {
 			},
 		},
 	}
+}
+
+// Optimize must record the raw recommendation, not the corrected value, into
+// the recommendation windows; otherwise the scale-down stabilization window
+// refills itself every cycle and never drains (#1644).
+func TestOptimizeRecordsRawRecommendationInStabilizationWindows(t *testing.T) {
+	var metricValue atomic.Value
+	metricValue.Store("100")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/api/v1/query") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"status":"success","data":{"resultType":"scalar","result":[1700000000,"%s"]}}`, metricValue.Load())
+	}))
+	t.Cleanup(srv.Close)
+
+	targetRef := corev1.ObjectReference{Kind: "ModelServing", Name: "backend-a"}
+	policy := newStabilizationTestPolicy(srv.URL, targetRef)
 
 	optimizer := NewOptimizer(policy)
 	podLister := corelister.NewPodLister(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}))
@@ -523,4 +530,27 @@ func TestOptimizeRecordsRawRecommendationInStabilizationWindows(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, int32(10), heldMax,
 		"corrected windows must record the corrected value")
+}
+
+// A new Optimizer has an empty history. This happens after a controller
+// restart, a policy edit and a new policy. The scale-down stabilization window
+// must still hold the current replicas, as Kubernetes HPA does.
+func TestOptimizeHoldsScaleDownWithEmptyHistory(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"status":"success","data":{"resultType":"scalar","result":[1700000000,"20"]}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	targetRef := corev1.ObjectReference{Kind: "ModelServing", Name: "backend-a"}
+	policy := newStabilizationTestPolicy(srv.URL, targetRef)
+	optimizer := NewOptimizer(policy)
+	podLister := corelister.NewPodLister(cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}))
+	targetKey := HeterogeneousTargetKey(targetRef, policy.Namespace)
+
+	replicas, err := optimizer.Optimize(context.Background(), podLister, policy, map[string]int32{targetKey: 10})
+	require.NoError(t, err)
+	require.NotNil(t, replicas)
+	assert.Equal(t, int32(10), replicas[targetKey],
+		"the first scale down after an empty history should be held by the stabilization window")
 }
