@@ -50,6 +50,8 @@ type SchedulerProfileList struct {
 type SchedulerProfileSpec struct {
 	// PluginConfig holds per-plugin arguments, keyed by plugin name.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	PluginConfig []PluginConfig `json:"pluginConfig,omitempty"`
 	// Plugins declares which filter and score plugins are enabled, with
 	// their score weights. An empty section means no plugins of that kind
@@ -93,6 +95,8 @@ type Filter struct {
 type Score struct {
 	// Enabled score plugins with weights. Weight must be greater than 0.
 	// +optional
+	// +listType=map
+	// +listMapKey=name
 	Enabled []PluginWithWeight `json:"enabled,omitempty"`
 }
 
