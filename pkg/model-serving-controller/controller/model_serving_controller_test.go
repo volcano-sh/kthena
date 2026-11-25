@@ -15,7 +15,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"sort"
@@ -45,6 +47,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	volcanofake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
 	volcanoinformers "volcano.sh/apis/pkg/client/informers/externalversions"
@@ -53,6 +56,7 @@ import (
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
@@ -10123,4 +10127,449 @@ func TestSyncModelServingPluginHook(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newPodLabelTestFixture(t *testing.T, msName, roleName string, workerReplicas int32, entryLabels, workerLabels map[string]string) (*ModelServingController, *kubefake.Clientset, *workloadv1alpha1.ModelServing, string, string) {
+	t.Helper()
+
+	role := workloadv1alpha1.Role{
+		Name:           roleName,
+		Replicas:       ptr.To[int32](1),
+		WorkerReplicas: workerReplicas,
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Metadata: &workloadv1alpha1.Metadata{Labels: entryLabels},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "main", Image: "vllm:v1"}},
+			},
+		},
+	}
+	if workerReplicas > 0 {
+		role.WorkerTemplate = &workloadv1alpha1.PodTemplateSpec{
+			Metadata: &workloadv1alpha1.Metadata{Labels: workerLabels},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "worker", Image: "vllm:v1"}},
+			},
+		}
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      msName,
+			UID:       types.UID(msName + "-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas:       ptr.To[int32](1),
+			RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type:         workloadv1alpha1.RoleRollingUpdate,
+				UpdateMethod: workloadv1alpha1.InPlaceUpdateMethod,
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{role},
+			},
+		},
+	}
+
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset(ms.DeepCopy())
+	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextClient := apiextfake.NewSimpleClientset()
+
+	c, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	require.NoError(t, err)
+	t.Cleanup(c.workqueue.ShutDown)
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms))
+
+	rev := utils.ModelServingRevision(ms)
+	roleHash, err := utils.RoleRevisionHash(ms, roleName)
+	require.NoError(t, err)
+	return c, kubeClient, ms, rev, roleHash
+}
+
+func countPodPatchActions(kubeClient *kubefake.Clientset) []kubetesting.PatchAction {
+	var patches []kubetesting.PatchAction
+	for _, action := range kubeClient.Actions() {
+		if action.GetVerb() == "patch" && action.GetResource().Resource == "pods" {
+			if pa, ok := action.(kubetesting.PatchAction); ok {
+				patches = append(patches, pa)
+			}
+		}
+	}
+	return patches
+}
+
+func TestUpdatePodRestoresDriftedIdentityAndTemplateLabels(t *testing.T) {
+	c, kubeClient, ms, rev, roleHash := newPodLabelTestFixture(
+		t,
+		"my-ms",
+		"prefill-node",
+		0,
+		map[string]string{"app": "kthena", "tier": "inference"},
+		nil,
+	)
+	role := ms.Spec.Template.Roles[0]
+	pod := utils.GenerateEntryPod(role, ms, "my-ms-0", "prefill-node-0", rev, roleHash)
+	pod.UID = types.UID("pod-uid-1")
+	pod.ResourceVersion = "10"
+	pod.Labels["sidecar.istio.io/inject"] = "true"
+	pod.Status.Phase = corev1.PodRunning
+
+	_, err := kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod.DeepCopy(), metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(pod.DeepCopy()))
+
+	// Normal kubelet status update with unchanged valid labels makes zero API calls.
+	kubeClient.ClearActions()
+	statusUpdate := pod.DeepCopy()
+	statusUpdate.ResourceVersion = "11"
+	statusUpdate.Status.PodIP = "10.0.0.1"
+	require.NoError(t, c.podsInformer.GetIndexer().Update(statusUpdate.DeepCopy()))
+	c.updatePod(pod.DeepCopy(), statusUpdate.DeepCopy())
+	assert.Empty(t, kubeClient.Actions(), "normal status updates must not trigger API calls")
+
+	// Mutate/delete identity and template labels while keeping unrelated sidecar label.
+	drifted := statusUpdate.DeepCopy()
+	drifted.ResourceVersion = "12"
+	delete(drifted.Labels, workloadv1alpha1.ModelServingNameLabelKey)
+	drifted.Labels[workloadv1alpha1.RoleLabelKey] = "wrong-role"
+	drifted.Labels[workloadv1alpha1.RoleIDKey] = "wrong-role-9"
+	delete(drifted.Labels, workloadv1alpha1.EntryLabelKey)
+	drifted.Labels["tier"] = "corrupted"
+	_, err = kubeClient.CoreV1().Pods(ms.Namespace).Update(context.Background(), drifted.DeepCopy(), metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Update(drifted.DeepCopy()))
+
+	kubeClient.ClearActions()
+	c.updatePod(statusUpdate.DeepCopy(), drifted.DeepCopy())
+
+	patches := countPodPatchActions(kubeClient)
+	require.Len(t, patches, 1)
+
+	repaired, err := kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, ms.Name, repaired.Labels[workloadv1alpha1.ModelServingNameLabelKey])
+	assert.Equal(t, "my-ms-0", repaired.Labels[workloadv1alpha1.GroupNameLabelKey])
+	assert.Equal(t, "prefill-node", repaired.Labels[workloadv1alpha1.RoleLabelKey])
+	assert.Equal(t, "prefill-node-0", repaired.Labels[workloadv1alpha1.RoleIDKey])
+	assert.Equal(t, utils.Entry, repaired.Labels[workloadv1alpha1.EntryLabelKey])
+	assert.Equal(t, "inference", repaired.Labels["tier"])
+	assert.Equal(t, "kthena", repaired.Labels["app"])
+	assert.Equal(t, "true", repaired.Labels["sidecar.istio.io/inject"], "unrelated user/sidecar labels must be preserved")
+
+	// Second updatePod with the repaired Pod must issue 0 patches (no infinite loop).
+	require.NoError(t, c.podsInformer.GetIndexer().Update(repaired.DeepCopy()))
+	kubeClient.ClearActions()
+	c.updatePod(drifted.DeepCopy(), repaired.DeepCopy())
+	assert.Empty(t, countPodPatchActions(kubeClient))
+}
+
+func TestUpdatePodRemovesBogusEntryLabelFromWorkerPod(t *testing.T) {
+	c, kubeClient, ms, rev, roleHash := newPodLabelTestFixture(
+		t,
+		"ms-worker",
+		"decode",
+		1,
+		map[string]string{"kind": "entry"},
+		map[string]string{"kind": "worker"},
+	)
+	role := ms.Spec.Template.Roles[0]
+	worker := utils.GenerateWorkerPod(role, ms, "ms-worker-0", "decode-0", 1, rev, roleHash)
+	worker.UID = types.UID("worker-uid-1")
+	worker.ResourceVersion = "5"
+
+	_, err := kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), worker.DeepCopy(), metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	drifted := worker.DeepCopy()
+	drifted.ResourceVersion = "6"
+	drifted.Labels[workloadv1alpha1.EntryLabelKey] = utils.Entry
+	_, err = kubeClient.CoreV1().Pods(ms.Namespace).Update(context.Background(), drifted.DeepCopy(), metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(drifted.DeepCopy()))
+
+	kubeClient.ClearActions()
+	c.updatePod(worker.DeepCopy(), drifted.DeepCopy())
+
+	patches := countPodPatchActions(kubeClient)
+	require.Len(t, patches, 1)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(patches[0].GetPatch(), &payload))
+	metaMap := payload["metadata"].(map[string]any)
+	labelsMap := metaMap["labels"].(map[string]any)
+	val, exists := labelsMap[workloadv1alpha1.EntryLabelKey]
+	require.True(t, exists, "patch must explicitly clear spurious entry label")
+	assert.Nil(t, val, "StrategicMergePatch must encode removed label as JSON null")
+
+	repaired, err := kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), worker.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	_, hasEntry := repaired.Labels[workloadv1alpha1.EntryLabelKey]
+	assert.False(t, hasEntry)
+}
+
+func TestUpdatePodMutatedGroupNameCleansStaleStoreAndRestores(t *testing.T) {
+	c, kubeClient, ms, rev, roleHash := newPodLabelTestFixture(t, "ms-group", "prefill", 0, nil, nil)
+	role := ms.Spec.Template.Roles[0]
+	pod := utils.GenerateEntryPod(role, ms, "ms-group-0", "prefill-0", rev, roleHash)
+	pod.UID = types.UID("pod-uid-group")
+	pod.ResourceVersion = "1"
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+
+	// Simulate the pod briefly tracked under wrong group "ms-group-1".
+	c.store.AddServingGroup(utils.GetNamespaceName(ms), 0, rev)
+	c.store.AddRunningPodToServingGroup(utils.GetNamespaceName(ms), "ms-group-1", pod.Name, rev, roleHash, "prefill", "prefill-0")
+
+	oldWrong := pod.DeepCopy()
+	oldWrong.Labels[workloadv1alpha1.GroupNameLabelKey] = "ms-group-1"
+	newWrong := oldWrong.DeepCopy()
+	newWrong.ResourceVersion = "2"
+	newWrong.Labels[workloadv1alpha1.GroupNameLabelKey] = "ms-group-99"
+
+	_, err := kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), newWrong.DeepCopy(), metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(newWrong.DeepCopy()))
+
+	c.updatePod(oldWrong, newWrong)
+
+	runningInWrong, err := c.store.GetRunningPodNumByServingGroup(utils.GetNamespaceName(ms), "ms-group-1")
+	require.NoError(t, err)
+	assert.Equal(t, 0, runningInWrong, "stale runningPod entry in wrong group must be cleaned up")
+
+	repaired, err := kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "ms-group-0", repaired.Labels[workloadv1alpha1.GroupNameLabelKey])
+}
+
+func TestDeletePodSelectorExitRestoresLabelsWithConflictRetry(t *testing.T) {
+	c, kubeClient, ms, rev, roleHash := newPodLabelTestFixture(t, "ms-exit", "prefill", 0, map[string]string{"app": "vllm"}, nil)
+	role := ms.Spec.Template.Roles[0]
+	pod := utils.GenerateEntryPod(role, ms, "ms-exit-0", "prefill-0", rev, roleHash)
+	pod.UID = types.UID("pod-uid-exit")
+	pod.ResourceVersion = "20"
+
+	c.store.AddServingGroup(utils.GetNamespaceName(ms), 0, rev)
+	c.store.AddRunningPodToServingGroup(utils.GetNamespaceName(ms), "ms-exit-0", pod.Name, rev, roleHash, "prefill", "prefill-0")
+
+	// Live Pod in API server had GroupNameLabelKey stripped (selector-exit).
+	liveStripped := pod.DeepCopy()
+	delete(liveStripped.Labels, workloadv1alpha1.GroupNameLabelKey)
+	_, err := kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), liveStripped.DeepCopy(), metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// Simulate one concurrent kubelet status conflict on the first Patch attempt.
+	patchAttempts := 0
+	kubeClient.PrependReactor("patch", "pods", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		patchAttempts++
+		if patchAttempts == 1 {
+			return true, nil, apierrors.NewConflict(corev1.Resource("pods"), pod.Name, fmt.Errorf("resourceVersion changed"))
+		}
+		return false, nil, nil
+	})
+
+	// Deliver via DeletedFinalStateUnknown tombstone as watch reconnects can emit.
+	tombstone := cache.DeletedFinalStateUnknown{Key: ms.Namespace + "/" + pod.Name, Obj: liveStripped.DeepCopy()}
+	c.deletePod(tombstone)
+
+	assert.Equal(t, 2, patchAttempts, "selector-exit recovery must retry on Conflict")
+	running, err := c.store.GetRunningPodNumByServingGroup(utils.GetNamespaceName(ms), "ms-exit-0")
+	require.NoError(t, err)
+	assert.Equal(t, 1, running, "live pod must remain in store on selector-exit")
+
+	repaired, err := kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "ms-exit-0", repaired.Labels[workloadv1alpha1.GroupNameLabelKey])
+	assert.Equal(t, "vllm", repaired.Labels["app"])
+}
+
+func TestDeletePodGenuinelyDeletedWithStrippedLabelsCleansStore(t *testing.T) {
+	c, kubeClient, ms, rev, roleHash := newPodLabelTestFixture(t, "ms-del", "prefill", 0, nil, nil)
+	role := ms.Spec.Template.Roles[0]
+	pod := utils.GenerateEntryPod(role, ms, "ms-del-0", "prefill-0", rev, roleHash)
+	pod.UID = types.UID("pod-uid-del")
+
+	c.store.AddServingGroup(utils.GetNamespaceName(ms), 0, rev)
+	c.store.AddRole(utils.GetNamespaceName(ms), "ms-del-0", "prefill", "prefill-0", rev, roleHash)
+	c.store.AddRunningPodToServingGroup(utils.GetNamespaceName(ms), "ms-del-0", pod.Name, rev, roleHash, "prefill", "prefill-0")
+
+	// Pod was stripped of GroupNameLabelKey/ModelServingNameLabelKey and genuinely deleted (not in kubeClient).
+	stripped := pod.DeepCopy()
+	delete(stripped.Labels, workloadv1alpha1.GroupNameLabelKey)
+	delete(stripped.Labels, workloadv1alpha1.ModelServingNameLabelKey)
+	delete(stripped.Labels, workloadv1alpha1.RoleLabelKey)
+
+	c.deletePod(stripped)
+
+	running, err := c.store.GetRunningPodNumByServingGroup(utils.GetNamespaceName(ms), "ms-del-0")
+	require.NoError(t, err)
+	assert.Equal(t, 0, running, "genuinely deleted pod with stripped labels must still be removed from store")
+	assert.Equal(t, datastore.RoleNotFound, c.store.GetRoleStatus(utils.GetNamespaceName(ms), "ms-del-0", "prefill", "prefill-0"))
+	assert.Empty(t, countPodPatchActions(kubeClient))
+}
+
+func TestUpdatePodHistoricalRevisionAndInPlaceInProgressPreserved(t *testing.T) {
+	c, kubeClient, ms, oldRev, oldRoleHash := newPodLabelTestFixture(
+		t,
+		"ms-hist",
+		"prefill",
+		0,
+		map[string]string{"tpl": "old-v1"},
+		nil,
+	)
+	// Persist old revision ControllerRevision.
+	oldData, err := utils.BuildRevisionData(ms)
+	require.NoError(t, err)
+	_, _, err = utils.RecordModelServingRevision(context.Background(), kubeClient, ms, oldData)
+	require.NoError(t, err)
+
+	// Advance ModelServing spec to v2 in lister.
+	msV2 := ms.DeepCopy()
+	msV2.Generation = 2
+	msV2.Spec.Template.Roles[0].EntryTemplate.Metadata.Labels["tpl"] = "new-v2"
+	msV2.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "vllm:v2"
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(msV2))
+	newRev := utils.ModelServingRevision(msV2)
+	require.NotEqual(t, oldRev, newRev)
+
+	// Pod is on oldRev with an in-place update InProgress toward newRev.
+	oldPod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, "ms-hist-0", "prefill-0", oldRev, oldRoleHash)
+	oldPod.UID = types.UID("pod-uid-hist")
+	oldPod.ResourceVersion = "30"
+	stateRaw, err := json.Marshal(inplace.State{
+		Revision:  newRev,
+		StartedAt: metav1.Now(),
+		Done:      false,
+	})
+	require.NoError(t, err)
+	oldPod.Annotations = map[string]string{
+		workloadv1alpha1.InPlaceUpdateStateAnnotationKey: string(stateRaw),
+	}
+
+	drifted := oldPod.DeepCopy()
+	drifted.ResourceVersion = "31"
+	drifted.Labels["tpl"] = "tampered"
+	delete(drifted.Labels, workloadv1alpha1.EntryLabelKey)
+
+	_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), drifted.DeepCopy(), metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(drifted.DeepCopy()))
+
+	c.updatePod(oldPod, drifted)
+
+	repaired, err := kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), oldPod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, oldRev, repaired.Labels[workloadv1alpha1.RevisionLabelKey], "in-progress pod must keep source revision")
+	assert.Equal(t, oldRoleHash, repaired.Labels[workloadv1alpha1.RoleTemplateHashLabelKey])
+	assert.Equal(t, "old-v1", repaired.Labels["tpl"], "must restore historical ControllerRevision template label, not v2")
+	assert.Equal(t, utils.Entry, repaired.Labels[workloadv1alpha1.EntryLabelKey])
+}
+
+func TestUpdatePodTerminatingDoesNotPatch(t *testing.T) {
+	c, kubeClient, ms, rev, roleHash := newPodLabelTestFixture(t, "ms-term", "prefill", 0, nil, nil)
+	role := ms.Spec.Template.Roles[0]
+	pod := utils.GenerateEntryPod(role, ms, "ms-term-0", "prefill-0", rev, roleHash)
+	pod.UID = types.UID("pod-uid-term")
+	pod.ResourceVersion = "40"
+	now := metav1.Now()
+	pod.DeletionTimestamp = &now
+	delete(pod.Labels, workloadv1alpha1.EntryLabelKey)
+
+	_, err := kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod.DeepCopy(), metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(pod.DeepCopy()))
+
+	kubeClient.ClearActions()
+	c.updatePod(nil, pod.DeepCopy())
+	assert.Empty(t, countPodPatchActions(kubeClient))
+}
+
+func TestUpdatePodLWSLabelsPluginDriftAndFastPath(t *testing.T) {
+	c, kubeClient, ms, _, _ := newPodLabelTestFixture(t, "lws-sample", "prefill", 1, map[string]string{"app": "lws-app"}, map[string]string{"role": "worker"})
+	ms = ms.DeepCopy()
+	ms.OwnerReferences = []metav1.OwnerReference{
+		{Kind: "LeaderWorkerSet", Name: "lws-sample"},
+	}
+	ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{
+		{Name: plugins.LWSLabelsPluginName, Type: workloadv1alpha1.PluginTypeBuiltIn},
+	}
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(ms))
+
+	rev := utils.ModelServingRevision(ms)
+	roleHash, err := utils.RoleRevisionHash(ms, "prefill")
+	require.NoError(t, err)
+	role := ms.Spec.Template.Roles[0]
+
+	entryPod := utils.GenerateEntryPod(role, ms, "lws-sample-0", "prefill-0", rev, roleHash)
+	entryPod.UID = types.UID("lws-entry-uid")
+	entryPod.ResourceVersion = "1"
+	entryPod.Labels["custom-sidecar"] = "keep"
+	expectedEntryLWS, err := plugins.ExpectedLWSLabels(ms, "lws-sample-0", entryPod.Name, entryPod.Namespace, true)
+	require.NoError(t, err)
+	require.NotEmpty(t, expectedEntryLWS)
+	maps.Copy(entryPod.Labels, expectedEntryLWS)
+
+	_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod.DeepCopy(), metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(entryPod.DeepCopy()))
+
+	// 1. Clean Pod with LWS labels causes 0 API calls and 0 patches on status updates.
+	kubeClient.ClearActions()
+	cleanStatus := entryPod.DeepCopy()
+	cleanStatus.ResourceVersion = "2"
+	cleanStatus.Status.PodIP = "10.0.0.2"
+	require.NoError(t, c.podsInformer.GetIndexer().Update(cleanStatus.DeepCopy()))
+	c.updatePod(entryPod.DeepCopy(), cleanStatus.DeepCopy())
+	assert.Empty(t, kubeClient.Actions(), "clean LWS pod status update must trigger zero API calls")
+
+	// 2. Drifted/deleted LWS labels are detected and patched back without disturbing user labels.
+	driftedEntry := cleanStatus.DeepCopy()
+	driftedEntry.ResourceVersion = "3"
+	delete(driftedEntry.Labels, lwsv1.SetNameLabelKey)
+	driftedEntry.Labels[lwsv1.WorkerIndexLabelKey] = "9"
+	driftedEntry.Labels[lwsv1.GroupUniqueHashLabelKey] = "bad-hash"
+	_, err = kubeClient.CoreV1().Pods(ms.Namespace).Update(context.Background(), driftedEntry.DeepCopy(), metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Update(driftedEntry.DeepCopy()))
+
+	kubeClient.ClearActions()
+	c.updatePod(cleanStatus.DeepCopy(), driftedEntry.DeepCopy())
+	require.Len(t, countPodPatchActions(kubeClient), 1)
+
+	repairedEntry, err := kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), entryPod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	for k, want := range expectedEntryLWS {
+		assert.Equal(t, want, repairedEntry.Labels[k], "LWS label %s must be restored", k)
+	}
+	assert.Equal(t, "keep", repairedEntry.Labels["custom-sidecar"])
+
+	kubeClient.ClearActions()
+	c.updatePod(driftedEntry.DeepCopy(), repairedEntry.DeepCopy())
+	assert.Empty(t, countPodPatchActions(kubeClient))
+
+	// 3. Already-drifted LWS label on status update (oldPod.Labels == newPod.Labels) must NOT be bypassed by fast path.
+	workerPod := utils.GenerateWorkerPod(role, ms, "lws-sample-0", "prefill-0", 1, rev, roleHash)
+	workerPod.UID = types.UID("lws-worker-uid")
+	workerPod.ResourceVersion = "10"
+	expectedWorkerLWS, err := plugins.ExpectedLWSLabels(ms, "lws-sample-0", workerPod.Name, workerPod.Namespace, false)
+	require.NoError(t, err)
+	maps.Copy(workerPod.Labels, expectedWorkerLWS)
+	workerPod.Labels[lwsv1.WorkerIndexLabelKey] = "99"
+
+	_, err = kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), workerPod.DeepCopy(), metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Add(workerPod.DeepCopy()))
+
+	workerStatus := workerPod.DeepCopy()
+	workerStatus.ResourceVersion = "11"
+	workerStatus.Status.PodIP = "10.0.0.3"
+	require.NoError(t, c.podsInformer.GetIndexer().Update(workerStatus.DeepCopy()))
+
+	kubeClient.ClearActions()
+	c.updatePod(workerPod.DeepCopy(), workerStatus.DeepCopy())
+	require.Len(t, countPodPatchActions(kubeClient), 1)
+
+	repairedWorker, err := kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), workerPod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "1", repairedWorker.Labels[lwsv1.WorkerIndexLabelKey])
+	assert.Equal(t, expectedWorkerLWS[lwsv1.GroupUniqueHashLabelKey], repairedWorker.Labels[lwsv1.GroupUniqueHashLabelKey])
 }

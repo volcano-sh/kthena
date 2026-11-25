@@ -19,6 +19,7 @@ package plugins
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -49,40 +50,67 @@ func NewLWSLabelsPlugin(spec workloadv1alpha1.PluginSpec) (Plugin, error) {
 
 func (p *LWSLabelsPlugin) Name() string { return p.name }
 
+// ExpectedLWSLabels computes the LeaderWorkerSet compatibility labels for a Pod
+// when ms is owned by a LeaderWorkerSet, or returns nil when not applicable.
+func ExpectedLWSLabels(ms *workloadv1alpha1.ModelServing, servingGroup, podName, namespace string, isEntry bool) (map[string]string, error) {
+	if ms == nil {
+		return nil, nil
+	}
+
+	lwsName, ok := getOwningLWSName(ms.OwnerReferences)
+	if !ok {
+		return nil, nil
+	}
+
+	_, groupIndex := msutils.GetParentNameAndOrdinal(servingGroup)
+	if groupIndex < 0 {
+		return nil, fmt.Errorf("invalid servingGroup %q for pod %s", servingGroup, podName)
+	}
+
+	workerIndex, err := deriveWorkerIndex(isEntry, podName)
+	if err != nil {
+		return nil, err
+	}
+
+	leaderHostname := fmt.Sprintf("%s-%d", lwsName, groupIndex)
+	groupKey := lwsutils.Sha1Hash(fmt.Sprintf("%s/%s", namespace, leaderHostname))
+	return map[string]string{
+		leaderworkerset.SetNameLabelKey:         lwsName,
+		leaderworkerset.GroupIndexLabelKey:      strconv.Itoa(groupIndex),
+		leaderworkerset.WorkerIndexLabelKey:     strconv.Itoa(workerIndex),
+		leaderworkerset.GroupUniqueHashLabelKey: groupKey,
+	}, nil
+}
+
 func (p *LWSLabelsPlugin) OnPodCreate(_ context.Context, req *HookRequest) error {
 	if req == nil || req.Pod == nil || req.ModelServing == nil {
 		return nil
 	}
 
-	lwsName, ok := getOwningLWSName(req.ModelServing.OwnerReferences)
-	if !ok {
-		return nil
-	}
-
-	_, groupIndex := msutils.GetParentNameAndOrdinal(req.ServingGroup)
-	if groupIndex < 0 {
-		return fmt.Errorf("invalid servingGroup %q for pod %s", req.ServingGroup, req.Pod.Name)
-	}
-
-	workerIndex, err := deriveWorkerIndex(req.IsEntry, req.Pod.Name)
+	lwsLabels, err := ExpectedLWSLabels(req.ModelServing, req.ServingGroup, req.Pod.Name, req.Pod.Namespace, req.IsEntry)
 	if err != nil {
 		return err
+	}
+	if lwsLabels == nil {
+		return nil
 	}
 
 	if req.Role == nil {
 		return fmt.Errorf("missing role for LWS pod %s", req.Pod.Name)
 	}
+	lwsName := lwsLabels[leaderworkerset.SetNameLabelKey]
+	_, groupIndex := msutils.GetParentNameAndOrdinal(req.ServingGroup)
+	workerIndex, err := deriveWorkerIndex(req.IsEntry, req.Pod.Name)
+	if err != nil {
+		return err
+	}
 	groupSize := int(req.Role.WorkerReplicas) + 1
 	leaderHostname := fmt.Sprintf("%s-%d", lwsName, groupIndex)
-	groupKey := lwsutils.Sha1Hash(fmt.Sprintf("%s/%s", req.Pod.Namespace, leaderHostname))
 
 	if req.Pod.Labels == nil {
 		req.Pod.Labels = map[string]string{}
 	}
-	req.Pod.Labels[leaderworkerset.SetNameLabelKey] = lwsName
-	req.Pod.Labels[leaderworkerset.GroupIndexLabelKey] = strconv.Itoa(groupIndex)
-	req.Pod.Labels[leaderworkerset.WorkerIndexLabelKey] = strconv.Itoa(workerIndex)
-	req.Pod.Labels[leaderworkerset.GroupUniqueHashLabelKey] = groupKey
+	maps.Copy(req.Pod.Labels, lwsLabels)
 	if req.Pod.Annotations == nil {
 		req.Pod.Annotations = map[string]string{}
 	}

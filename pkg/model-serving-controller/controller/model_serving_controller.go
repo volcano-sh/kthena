@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"reflect"
 	"slices"
@@ -344,7 +345,7 @@ func (c *ModelServingController) addPod(obj interface{}) {
 	c.updatePod(nil, obj)
 }
 
-func (c *ModelServingController) updatePod(_, newObj interface{}) {
+func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 	newPod, ok := newObj.(*corev1.Pod)
 	if !ok {
 		klog.Error("failed to parse newPod type when updatePod")
@@ -365,6 +366,29 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 	if current, err := c.podsLister.Pods(newPod.Namespace).Get(newPod.Name); err != nil || current.UID != newPod.UID || current.DeletionTimestamp != nil {
 		klog.V(2).Infof("ignoring the event of pod %s/%s (uid %s): it is gone, replaced or terminating", newPod.Namespace, newPod.Name, newPod.UID)
 		return
+	}
+
+	oldPod, _ := oldObj.(*corev1.Pod)
+	patchedPod, ownerMS, repairErr := c.reconcilePodLabels(oldPod, newPod)
+	if repairErr != nil {
+		if apierrors.IsConflict(repairErr) {
+			klog.V(4).Infof("conflict reconciling pod %s/%s labels, waiting for next update: %v", newPod.Namespace, newPod.Name, repairErr)
+			return
+		}
+		klog.Errorf("failed to reconcile pod %s/%s labels: %v", newPod.Namespace, newPod.Name, repairErr)
+		if ownerMS != nil {
+			c.enqueueModelServingAfter(ownerMS, enqueueAfter)
+		}
+		return
+	}
+	if patchedPod != nil {
+		if ownerMS != nil {
+			c.enqueueModelServing(ownerMS)
+		}
+		updated := newPod.DeepCopy()
+		updated.Labels = maps.Clone(patchedPod.Labels)
+		updated.ResourceVersion = patchedPod.ResourceVersion
+		newPod = updated
 	}
 
 	ms, servingGroupName, err := c.getModelServingByChildResource(newPod)
@@ -457,11 +481,16 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	}
 
 	ms, servingGroupName, roleName, roleID := c.getModelServingAndResourceDetails(pod)
-	// ms is nil means the modelserving is deleted
-	// delete the pod
+	recoveredIdentity := false
+	// ms is nil either because the ModelServing was deleted, or because
+	// GroupNameLabelKey / ModelServingNameLabelKey was stripped from the Pod.
 	if ms == nil {
-		klog.Warningf("ModelServing of deleted pod: %s not found, might be already deleted", pod.Name)
-		return
+		var handled bool
+		ms, servingGroupName, roleName, roleID, handled = c.handleSelectorExitOrDeletedPod(pod)
+		if handled {
+			return
+		}
+		recoveredIdentity = true
 	}
 
 	if c.recreatedSinceDeletion(ms, servingGroupName, pod) {
@@ -474,7 +503,11 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	c.store.DeleteRunningPodFromServingGroup(utils.GetNamespaceName(ms), servingGroupName, pod.Name)
 
 	// skip handling if pod revision mismatches serving group revision or owner mismatch
-	if c.shouldSkipHandling(ms, servingGroupName, pod) {
+	if recoveredIdentity {
+		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			return
+		}
+	} else if c.shouldSkipHandling(ms, servingGroupName, pod) {
 		return
 	}
 
@@ -482,7 +515,7 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		return
 	}
 
-	err := c.handleDeletedPod(ms, servingGroupName, pod)
+	err := c.handleDeletedPodWithIdentity(ms, servingGroupName, roleName, roleID, pod)
 	if err != nil {
 		klog.Errorf("handle deleted pod %s/%s failed in ServingGroup %s of ModelServing %s/%s: %v", pod.Namespace, pod.Name, servingGroupName, ms.Namespace, ms.Name, err)
 	}
@@ -2260,13 +2293,15 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 // role/serving group out of Running so AvailableReplicas stops counting it. It
 // does not delete the pod.
 func (c *ModelServingController) markPodUnavailable(ms *workloadv1alpha1.ModelServing, servingGroupName string, errPod *corev1.Pod) error {
+	return c.markPodUnavailableWithRole(ms, servingGroupName, utils.GetRoleName(errPod), utils.GetRoleID(errPod), errPod)
+}
+
+func (c *ModelServingController) markPodUnavailableWithRole(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string, errPod *corev1.Pod) error {
 	c.store.DeleteRunningPodFromServingGroup(types.NamespacedName{
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
 	}, servingGroupName, errPod.Name)
 
-	roleName := utils.GetRoleName(errPod)
-	roleID := utils.GetRoleID(errPod)
 	// Update role status back to Creating when pod fails
 	if roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID); roleStatus == datastore.RoleRunning {
 		if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, datastore.RoleCreating); err != nil {
@@ -2334,6 +2369,10 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 }
 
 func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) error {
+	return c.handleDeletedPodWithIdentity(ms, servingGroupName, utils.GetRoleName(pod), utils.GetRoleID(pod), pod)
+}
+
+func (c *ModelServingController) handleDeletedPodWithIdentity(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string, pod *corev1.Pod) error {
 	// pod is deleted due to failure or other reasons and needs to be rebuilt according to the RecoveryPolicy
 	switch ms.Spec.RecoveryPolicy {
 	case workloadv1alpha1.ServingGroupRecreate:
@@ -2356,12 +2395,12 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 				return fmt.Errorf("failed to set ServingGroup %s status: %v", servingGroupName, err)
 			}
 		}
-		if err := c.DeleteRole(context.Background(), ms, servingGroupName, utils.GetRoleName(pod), utils.GetRoleID(pod)); err != nil {
+		if err := c.DeleteRole(context.Background(), ms, servingGroupName, roleName, roleID); err != nil {
 			return err
 		}
 	case workloadv1alpha1.NoneRestartPolicy:
 		// None: re-enqueue to refill the single missing pod (not the whole role/group).
-		if err := c.markPodUnavailable(ms, servingGroupName, pod); err != nil {
+		if err := c.markPodUnavailableWithRole(ms, servingGroupName, roleName, roleID, pod); err != nil {
 			klog.Warningf("mark pod %s unavailable: %v", pod.Name, err)
 		}
 		c.enqueueModelServing(ms)

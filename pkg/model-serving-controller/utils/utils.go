@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -96,11 +97,78 @@ func GeneratePodName(groupName, roleName string, podIndex int) string {
 	return groupName + "-" + roleName + "-" + strconv.Itoa(podIndex)
 }
 
+// ParseModelServingPodName parses a controller-generated Pod name of the form
+// "<msName>-<groupOrdinal>-<roleName>-<roleOrdinal>-<podIndex>" into its
+// structural components. It requires msName to be known (e.g. from OwnerReference)
+// so hyphens inside msName or roleName are handled unambiguously.
+func ParseModelServingPodName(msName, podName string) (groupName, roleName, roleID string, podIndex int, ok bool) {
+	if msName == "" || !strings.HasPrefix(podName, msName+"-") {
+		return "", "", "", 0, false
+	}
+	rest := podName[len(msName)+1:]
+	firstDash := strings.IndexByte(rest, '-')
+	if firstDash <= 0 {
+		return "", "", "", 0, false
+	}
+	groupIdxStr := rest[:firstDash]
+	groupIdx, err := strconv.Atoi(groupIdxStr)
+	if err != nil || groupIdx < 0 || strconv.Itoa(groupIdx) != groupIdxStr {
+		return "", "", "", 0, false
+	}
+	groupName = GenerateServingGroupName(msName, groupIdx)
+
+	afterGroup := rest[firstDash+1:]
+	lastDash := strings.LastIndexByte(afterGroup, '-')
+	if lastDash <= 0 || lastDash == len(afterGroup)-1 {
+		return "", "", "", 0, false
+	}
+	roleID = afterGroup[:lastDash]
+	podIdxStr := afterGroup[lastDash+1:]
+	podIndex, err = strconv.Atoi(podIdxStr)
+	if err != nil || podIndex < 0 || strconv.Itoa(podIndex) != podIdxStr {
+		return "", "", "", 0, false
+	}
+
+	roleName, roleIdx := GetParentNameAndOrdinal(roleID)
+	if roleName == "" || roleIdx < 0 || roleID != GenerateRoleID(roleName, roleIdx) {
+		return "", "", "", 0, false
+	}
+	if GeneratePodName(groupName, roleID, podIndex) != podName {
+		return "", "", "", 0, false
+	}
+	return groupName, roleName, roleID, podIndex, true
+}
+
+// ExpectedPodLabels builds the expected label map for a Pod belonging to role/ms,
+// matching the exact precedence used during Pod creation.
+func ExpectedPodLabels(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName, roleID string, podIndex int, revision, roleTemplateHash string) map[string]string {
+	labels := map[string]string{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		workloadv1alpha1.GroupNameLabelKey:        groupName,
+		workloadv1alpha1.RoleLabelKey:             role.Name,
+		workloadv1alpha1.RoleIDKey:                roleID,
+		workloadv1alpha1.RevisionLabelKey:         revision,
+		workloadv1alpha1.RoleTemplateHashLabelKey: roleTemplateHash,
+	}
+	var metadata *workloadv1alpha1.Metadata
+	if podIndex == 0 {
+		labels[workloadv1alpha1.EntryLabelKey] = Entry
+		metadata = role.EntryTemplate.Metadata
+	} else if role.WorkerTemplate != nil {
+		metadata = role.WorkerTemplate.Metadata
+	}
+	if metadata != nil {
+		for k, v := range metadata.Labels {
+			labels[k] = v
+		}
+	}
+	return labels
+}
+
 func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName, roleID, revision, roleTemplateHash string) *corev1.Pod {
 	entryPodName := GeneratePodName(groupName, roleID, 0)
-	entryPod := createBasePod(role, ms, entryPodName, groupName, roleID, revision, roleTemplateHash)
-	entryPod.ObjectMeta.Labels[workloadv1alpha1.EntryLabelKey] = Entry
-	addPodLabelAndAnnotation(entryPod, role.EntryTemplate.Metadata)
+	entryPod := createBasePod(ms, entryPodName, ExpectedPodLabels(role, ms, groupName, roleID, 0, revision, roleTemplateHash))
+	addPodAnnotations(entryPod, role.EntryTemplate.Metadata)
 	entryPod.Spec = *role.EntryTemplate.Spec.DeepCopy()
 	entryPod.Spec.SchedulerName = ms.Spec.SchedulerName
 	// Build environment variables into each container of all pod
@@ -116,8 +184,8 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelSer
 	}
 
 	workerPodName := GeneratePodName(groupName, roleID, podIndex)
-	workerPod := createBasePod(role, ms, workerPodName, groupName, roleID, revision, roleTemplateHash)
-	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
+	workerPod := createBasePod(ms, workerPodName, ExpectedPodLabels(role, ms, groupName, roleID, podIndex, revision, roleTemplateHash))
+	addPodAnnotations(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = *role.WorkerTemplate.Spec.DeepCopy()
 	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
 	envVars := createCommonEnvVars(role, podIndex)
@@ -125,7 +193,7 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelSer
 	return workerPod
 }
 
-func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, name, groupName, roleID, revision, roleTemplateHash string) *corev1.Pod {
+func createBasePod(ms *workloadv1alpha1.ModelServing, name string, podLabels map[string]string) *corev1.Pod {
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -134,14 +202,7 @@ func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ms.Namespace,
-			Labels: map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
-				workloadv1alpha1.GroupNameLabelKey:        groupName,
-				workloadv1alpha1.RoleLabelKey:             role.Name,
-				workloadv1alpha1.RoleIDKey:                roleID,
-				workloadv1alpha1.RevisionLabelKey:         revision,
-				workloadv1alpha1.RoleTemplateHashLabelKey: roleTemplateHash,
-			},
+			Labels:    podLabels,
 			OwnerReferences: []metav1.OwnerReference{
 				newModelServingOwnerRef(ms),
 			},
@@ -149,17 +210,9 @@ func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing
 	}
 }
 
-func addPodLabelAndAnnotation(pod *corev1.Pod, metadata *workloadv1alpha1.Metadata) {
+func addPodAnnotations(pod *corev1.Pod, metadata *workloadv1alpha1.Metadata) {
 	if metadata == nil {
 		return
-	}
-	if metadata.Labels != nil {
-		if pod.Labels == nil {
-			pod.Labels = make(map[string]string)
-		}
-		for k, v := range metadata.Labels {
-			pod.Labels[k] = v
-		}
 	}
 	if metadata.Annotations != nil {
 		if pod.Annotations == nil {
