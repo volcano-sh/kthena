@@ -74,6 +74,14 @@ type Config struct {
 	// RendererStableWindow is how long a renderer must run while ready before
 	// its restart budget is restored.
 	RendererStableWindow time.Duration
+	// RendererBackoffBase is the initial delay before the first restart attempt.
+	// The delay doubles on every consecutive failure up to RendererBackoffMax.
+	// Set to zero (the default for unset) to restart immediately on every tick,
+	// matching the pre-backoff behaviour.
+	RendererBackoffBase time.Duration
+	// RendererBackoffMax caps the restart delay introduced by exponential
+	// backoff. Ignored when RendererBackoffBase is zero.
+	RendererBackoffMax time.Duration
 	// ProxyTimeout bounds a proxied /tokenize request.
 	ProxyTimeout time.Duration
 }
@@ -94,6 +102,8 @@ func ConfigFromEnv() Config {
 		RendererStartupTimeout: time.Duration(envInt("RENDERER_STARTUP_TIMEOUT_SECONDS", 600)) * time.Second,
 		RendererMaxRestarts:    envInt("RENDERER_MAX_RESTARTS", 3),
 		RendererStableWindow:   time.Duration(envInt("RENDERER_STABLE_WINDOW_SECONDS", 600)) * time.Second,
+		RendererBackoffBase:    time.Duration(envInt("RENDERER_BACKOFF_BASE_SECONDS", 10)) * time.Second,
+		RendererBackoffMax:     time.Duration(envInt("RENDERER_BACKOFF_MAX_SECONDS", 300)) * time.Second,
 		ProxyTimeout:           time.Duration(envInt("PROXY_TIMEOUT_SECONDS", 5)) * time.Second,
 	}
 }
