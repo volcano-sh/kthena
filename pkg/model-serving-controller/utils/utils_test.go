@@ -575,3 +575,50 @@ func TestGetMaxSurgeForRole(t *testing.T) {
 		})
 	}
 }
+
+func TestManagedPodLabelsOverrideTemplateLabels(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "real-ms", Namespace: "default", UID: "ms-uid"},
+	}
+	role := workloadv1alpha1.Role{
+		Name:           "prefill",
+		WorkerReplicas: 1,
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Metadata: &workloadv1alpha1.Metadata{
+				Labels: map[string]string{
+					workloadv1alpha1.ModelServingNameLabelKey: "spoof-ms",
+					workloadv1alpha1.GroupNameLabelKey:        "spoof-group",
+					workloadv1alpha1.RoleLabelKey:             "spoof-role",
+					workloadv1alpha1.RoleIDKey:                "spoof-0",
+					workloadv1alpha1.GroupInstanceIDLabelKey:  "spoof-gid",
+					workloadv1alpha1.RoleInstanceIDLabelKey:   "spoof-rid",
+					"custom-label":                            "kept",
+				},
+			},
+		},
+		WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+			Metadata: &workloadv1alpha1.Metadata{
+				Labels: map[string]string{
+					workloadv1alpha1.EntryLabelKey: "true",
+				},
+			},
+		},
+	}
+
+	entry := GenerateEntryPod(role, ms, "real-ms-0", "prefill-0", "rev1", "hash1")
+	worker := GenerateWorkerPod(role, ms, "real-ms-0", "prefill-0", 1, "rev1", "hash1")
+	gid, rid := NewInstanceID(), NewInstanceID()
+	assert.Len(t, gid, 16)
+	assert.Len(t, rid, 16)
+	SetPodInstanceIDs(entry, gid, rid)
+	SetPodInstanceIDs(worker, gid, rid)
+
+	assert.Equal(t, "real-ms", entry.Labels[workloadv1alpha1.ModelServingNameLabelKey])
+	assert.Equal(t, "real-ms-0", entry.Labels[workloadv1alpha1.GroupNameLabelKey])
+	assert.Equal(t, "prefill", entry.Labels[workloadv1alpha1.RoleLabelKey])
+	assert.Equal(t, "prefill-0", entry.Labels[workloadv1alpha1.RoleIDKey])
+	assert.Equal(t, gid, entry.Labels[workloadv1alpha1.GroupInstanceIDLabelKey])
+	assert.Equal(t, rid, entry.Labels[workloadv1alpha1.RoleInstanceIDLabelKey])
+	assert.Equal(t, "kept", entry.Labels["custom-label"])
+	assert.NotContains(t, worker.Labels, workloadv1alpha1.EntryLabelKey)
+}

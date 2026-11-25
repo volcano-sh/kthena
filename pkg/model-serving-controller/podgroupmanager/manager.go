@@ -240,6 +240,25 @@ func (m *Manager) stopPodGroupInformer() {
 	}
 }
 
+type groupInstanceIDContextKey struct{}
+
+// WithGroupInstanceID binds a ServingGroup instance ID to a PodGroup operation context.
+func WithGroupInstanceID(ctx context.Context, instanceID string) context.Context {
+	if instanceID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, groupInstanceIDContextKey{}, instanceID)
+}
+
+// GroupInstanceIDFromContext extracts a ServingGroup instance ID from ctx if present.
+func GroupInstanceIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(groupInstanceIDContextKey{}).(string)
+	return id
+}
+
 // CreateOrUpdatePodGroup creates a PodGroup for the given ServingGroup if it doesn't exist,
 // or updates it if it does.
 // Returns an error and a requeue duration if there is an error.
@@ -262,6 +281,12 @@ func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alph
 
 	if !utils.IsOwnedByModelServingWithUID(podGroup, ms.UID) {
 		return fmt.Errorf("PodGroup %s is not owned by ModelServing %s", pgName, ms.Name), enqueueAfter
+	}
+	if expectedInstanceID := GroupInstanceIDFromContext(ctx); podGroup.Labels[workloadv1alpha1.GroupInstanceIDLabelKey] != expectedInstanceID {
+		return fmt.Errorf("PodGroup %s belongs to ServingGroup instance %q (expected %q)", pgName, podGroup.Labels[workloadv1alpha1.GroupInstanceIDLabelKey], expectedInstanceID), enqueueAfter
+	}
+	if podGroup.DeletionTimestamp != nil {
+		return fmt.Errorf("PodGroup %s is terminating", pgName), enqueueAfter
 	}
 
 	return m.updatePodGroupIfNeeded(ctx, podGroup, ms), 0
@@ -297,14 +322,19 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 	// minResources: aggregated resource requirements of all pods in the ServingGroup
 	minMember, minRoleMember, minResources := m.calculateRequirements(ms)
 
+	podGroupLabels := map[string]string{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		workloadv1alpha1.GroupNameLabelKey:        podGroupName,
+	}
+	if instanceID := GroupInstanceIDFromContext(ctx); instanceID != "" {
+		podGroupLabels[workloadv1alpha1.GroupInstanceIDLabelKey] = instanceID
+	}
+
 	podGroup := &schedulingv1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podGroupName,
 			Namespace: ms.Namespace,
-			Labels: map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
-				workloadv1alpha1.GroupNameLabelKey:        podGroupName,
-			},
+			Labels:    podGroupLabels,
 			Annotations: map[string]string{
 				schedulingv1beta1.KubeGroupNameAnnotationKey: podGroupName,
 			},
@@ -498,7 +528,22 @@ func (m *Manager) DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 		return nil
 	}
 
-	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, servingGroupName, metav1.DeleteOptions{}); err != nil {
+	pg, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Get(ctx, servingGroupName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !utils.IsControlledByModelServing(pg, ms) ||
+		pg.Labels[workloadv1alpha1.GroupNameLabelKey] != servingGroupName ||
+		pg.Labels[workloadv1alpha1.GroupInstanceIDLabelKey] != GroupInstanceIDFromContext(ctx) {
+		return nil
+	}
+	uid := pg.UID
+	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, servingGroupName, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	}); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return err
 		}
@@ -514,7 +559,13 @@ func (m *Manager) CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.Mod
 	}
 
 	for _, podGroup := range existingPodGroups {
-		err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, podGroup.Name, metav1.DeleteOptions{})
+		if !utils.IsControlledByModelServing(podGroup, ms) {
+			continue
+		}
+		uid := podGroup.UID
+		err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, podGroup.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid},
+		})
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete PodGroup %s: %v", podGroup.Name, err)
 		}

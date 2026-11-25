@@ -40,20 +40,20 @@ type HookResult struct {
 
 // HookRequest carries the context for plugin hook invocations.
 type HookRequest struct {
-	ModelServing  *workloadv1alpha1.ModelServing
-	ServingGroup  string
-	RoleName      string
-	RoleID        string
-	RoleIndex     int
-	Role          *workloadv1alpha1.Role
-	IsEntry       bool
-	Pod           *corev1.Pod
-	KubeClient    kubernetes.Interface
-	ServiceLister listerv1.ServiceLister
+	ModelServing    *workloadv1alpha1.ModelServing
+	ServingGroup    string
+	GroupInstanceID string
+	RoleName        string
+	RoleID          string
+	RoleInstanceID  string
+	RoleIndex       int
+	Role            *workloadv1alpha1.Role
+	IsEntry         bool
+	Pod             *corev1.Pod
+	KubeClient      kubernetes.Interface
+	ServiceLister   listerv1.ServiceLister
 	// lwsPodDNS records that the LWS plugin configured this Pod for its shared Service.
 	lwsPodDNS bool
-	// Cleanup retains auxiliary UID targets across retries of one Role deletion.
-	Cleanup *RoleCleanup
 }
 
 // Plugin defines the lifecycle hooks implemented by a plugin.

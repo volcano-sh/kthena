@@ -36,14 +36,18 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-func deletionTestPod(ms *workload.ModelServing, name string) *corev1.Pod {
-	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ms.Namespace, UID: types.UID(name + "-old"), Labels: map[string]string{"role": "same"}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}}}
+func deletionTestPod(ms *workload.ModelServing, name, instanceID string) *corev1.Pod {
+	lbls := map[string]string{"role": "same"}
+	if instanceID != "" {
+		lbls[workload.RoleInstanceIDLabelKey] = instanceID
+	}
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ms.Namespace, UID: types.UID(name + "-old"), Labels: lbls, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}}}
 }
 
-func TestPodDeletionTargetsRetryNeverAbsorbsReplacements(t *testing.T) {
+func TestDeleteInstancePodsRetryNeverAbsorbsReplacements(t *testing.T) {
 	ctx := context.Background()
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "ms-old"}}
-	first, second := deletionTestPod(ms, "a"), deletionTestPod(ms, "b")
+	first, second := deletionTestPod(ms, "a", "inst-old"), deletionTestPod(ms, "b", "inst-old")
 	client := kubefake.NewSimpleClientset(first, second)
 	deletes := map[string]int{}
 	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
@@ -58,42 +62,41 @@ func TestPodDeletionTargetsRetryNeverAbsorbsReplacements(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	targets := &podDeletionTargets{}
 	selector := labels.SelectorFromSet(map[string]string{"role": "same"})
-	require.ErrorContains(t, targets.Delete(ctx, client, ms, selector), "retry")
-	replacementA, replacementB, newPod := deletionTestPod(ms, "a"), deletionTestPod(ms, "b"), deletionTestPod(ms, "c")
+	matchOld := func(pod *corev1.Pod) bool {
+		return pod.Labels[workload.RoleInstanceIDLabelKey] == "inst-old"
+	}
+	_, err := deleteInstancePods(ctx, client, ms, selector, matchOld)
+	require.ErrorContains(t, err, "retry")
+
+	replacementA := deletionTestPod(ms, "a", "inst-new")
+	replacementB := deletionTestPod(ms, "b", "inst-new")
+	newPod := deletionTestPod(ms, "c", "inst-new")
 	replacementA.UID, replacementB.UID = "a-new", "b-new"
-	_, err := client.CoreV1().Pods(ms.Namespace).Create(ctx, replacementA, metav1.CreateOptions{})
+	_, err = client.CoreV1().Pods(ms.Namespace).Create(ctx, replacementA, metav1.CreateOptions{})
 	require.NoError(t, err)
 	_, err = client.CoreV1().Pods(ms.Namespace).Update(ctx, replacementB, metav1.UpdateOptions{})
 	require.NoError(t, err)
 	_, err = client.CoreV1().Pods(ms.Namespace).Create(ctx, newPod, metav1.CreateOptions{})
 	require.NoError(t, err)
-	require.NoError(t, targets.Delete(ctx, client, ms, selector))
-	require.NoError(t, targets.Delete(ctx, client, ms, selector))
+	replacements, err := deleteInstancePods(ctx, client, ms, selector, matchOld)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a", "b", "c"}, replacements)
 	assert.Equal(t, map[string]int{"a": 1, "b": 1}, deletes)
 	for _, pod := range []*corev1.Pod{replacementA, replacementB, newPod} {
-		current, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		require.NoError(t, err)
+		current, getErr := client.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		require.NoError(t, getErr)
 		assert.Equal(t, pod.UID, current.UID)
 	}
-	listCount := 0
 	for _, action := range client.Actions() {
-		if action.GetVerb() == "list" {
-			listCount++
-		}
 		assert.NotEqual(t, "delete-collection", action.GetVerb())
 	}
-	assert.Equal(t, 1, listCount)
-	newer := ms.DeepCopy()
-	newer.UID = "ms-new"
-	require.ErrorContains(t, targets.Delete(ctx, client, newer, selector), "different ModelServing identity")
 }
 
-func TestPodDeletionTargetsFenceReplacementBetweenGetAndDelete(t *testing.T) {
+func TestDeleteInstancePodsFenceReplacementBetweenListAndDelete(t *testing.T) {
 	ctx := context.Background()
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "ms-old"}}
-	pod := deletionTestPod(ms, "a")
+	pod := deletionTestPod(ms, "a", "inst-old")
 	client := kubefake.NewSimpleClientset(pod)
 	deletes := 0
 	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
@@ -102,29 +105,41 @@ func TestPodDeletionTargetsFenceReplacementBetweenGetAndDelete(t *testing.T) {
 		assert.Equal(t, pod.UID, *deletion.GetDeleteOptions().Preconditions.UID)
 		replacement := pod.DeepCopy()
 		replacement.UID = "new"
+		replacement.Labels[workload.RoleInstanceIDLabelKey] = "inst-new"
 		require.NoError(t, client.Tracker().Update(schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}, replacement, ms.Namespace))
 		return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, fmt.Errorf("UID precondition failed"))
 	})
-	targets := &podDeletionTargets{}
-	require.ErrorContains(t, targets.Delete(ctx, client, ms, labels.Everything()), "UID precondition")
-	require.NoError(t, targets.Delete(ctx, client, ms, labels.Everything()))
+	matchOld := func(p *corev1.Pod) bool {
+		return p.Labels[workload.RoleInstanceIDLabelKey] == "inst-old"
+	}
+	_, err := deleteInstancePods(ctx, client, ms, labels.Everything(), matchOld)
+	require.ErrorContains(t, err, "UID precondition")
+	replacements, err := deleteInstancePods(ctx, client, ms, labels.Everything(), matchOld)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a"}, replacements)
 	assert.Equal(t, 1, deletes)
 	current, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, types.UID("new"), current.UID)
 }
 
-func TestPodDeletionTargetsOnlyCurrentControllerOwnedPods(t *testing.T) {
+func TestDeleteInstancePodsOnlyCurrentControllerOwnedPods(t *testing.T) {
 	ctx := context.Background()
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "ms-old"}}
-	owned, foreignUID, foreignName, nonController, foreignKind := deletionTestPod(ms, "owned"), deletionTestPod(ms, "foreignUID"), deletionTestPod(ms, "foreignName"), deletionTestPod(ms, "nonController"), deletionTestPod(ms, "foreignKind")
+	owned := deletionTestPod(ms, "owned", "inst-1")
+	foreignUID := deletionTestPod(ms, "foreignUID", "inst-1")
+	foreignName := deletionTestPod(ms, "foreignName", "inst-1")
+	nonController := deletionTestPod(ms, "nonController", "inst-1")
+	foreignKind := deletionTestPod(ms, "foreignKind", "inst-1")
 	foreignUID.OwnerReferences[0].UID = "other"
 	foreignName.OwnerReferences[0].Name = "other"
 	nonController.OwnerReferences[0].Controller = ptr.To(false)
 	foreignKind.OwnerReferences[0].Kind = "StatefulSet"
 	client := kubefake.NewSimpleClientset(owned, foreignUID, foreignName, nonController, foreignKind)
-	targets := &podDeletionTargets{}
-	require.NoError(t, targets.Delete(ctx, client, ms, labels.Everything()))
+	_, err := deleteInstancePods(ctx, client, ms, labels.Everything(), func(p *corev1.Pod) bool {
+		return p.Labels[workload.RoleInstanceIDLabelKey] == "inst-1"
+	})
+	require.NoError(t, err)
 	pods, err := client.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	assert.Len(t, pods.Items, 4)
@@ -133,18 +148,27 @@ func TestPodDeletionTargetsOnlyCurrentControllerOwnedPods(t *testing.T) {
 	}
 }
 
-func TestPodDeletionTargetsAcceptedDeleteDoesNotWaitForFinalizer(t *testing.T) {
+func TestDeleteInstancePodsTerminatingPodSkipsDuplicateDelete(t *testing.T) {
 	ctx := context.Background()
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "ms-old"}}
-	pod := deletionTestPod(ms, "a")
+	pod := deletionTestPod(ms, "a", "inst-1")
 	pod.Finalizers = []string{"example.com/hold"}
 	client := kubefake.NewSimpleClientset(pod)
 	deletes := 0
-	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) { deletes++; return true, nil, nil })
-	targets := &podDeletionTargets{}
-	require.NoError(t, targets.Delete(ctx, client, ms, labels.Everything()))
-	require.NoError(t, targets.Delete(ctx, client, ms, labels.Everything()))
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deletes++
+		terminating := pod.DeepCopy()
+		now := metav1.Now()
+		terminating.DeletionTimestamp = &now
+		require.NoError(t, client.Tracker().Update(schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}, terminating, ms.Namespace))
+		return true, nil, nil
+	})
+	match := func(p *corev1.Pod) bool { return p.Labels[workload.RoleInstanceIDLabelKey] == "inst-1" }
+	_, err := deleteInstancePods(ctx, client, ms, labels.Everything(), match)
+	require.NoError(t, err)
+	_, err = deleteInstancePods(ctx, client, ms, labels.Everything(), match)
+	require.NoError(t, err)
 	assert.Equal(t, 1, deletes)
-	_, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	_, err = client.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	require.NoError(t, err, "accepted deletion is separate from observed capacity disappearance")
 }

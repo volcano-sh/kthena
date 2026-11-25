@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -1938,4 +1939,61 @@ func TestPodGroupComparisonIncludesPolicies(t *testing.T) {
 			require.True(t, hasPodGroupChanged(current, updated))
 		})
 	}
+}
+
+func TestPodGroupInstanceIDFencesDeleteAndUpdate(t *testing.T) {
+	ctx := context.Background()
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: "ms-uid"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			SchedulerName: "volcano",
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{{Name: "infer", Replicas: ptr.To[int32](1)}},
+			},
+		},
+	}
+	pgName := "ms-0"
+	replacement := &schedulingv1beta1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pgName,
+			Namespace: ms.Namespace,
+			UID:       "pg-new",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        pgName,
+				workloadv1alpha1.GroupInstanceIDLabelKey:  "group-new",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: workloadv1alpha1.GroupVersion.String(),
+				Kind:       workloadv1alpha1.ModelServingKind.Kind,
+				Name:       ms.Name,
+				UID:        ms.UID,
+				Controller: ptr.To(true),
+			}},
+		},
+	}
+	volcanoClient := volcanofake.NewSimpleClientset(replacement)
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, indexer.Add(replacement))
+	manager := &Manager{
+		volcanoClient:  volcanoClient,
+		PodGroupLister: volcanoschedulerlister.NewPodGroupLister(indexer),
+	}
+	manager.hasPodGroupCRD.Store(true)
+
+	// Stale deletion targeting group-old must NOT delete group-new's PodGroup.
+	require.NoError(t, manager.DeletePodGroup(WithGroupInstanceID(ctx, "group-old"), ms, pgName))
+	actual, err := volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Get(ctx, pgName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, replacement.UID, actual.UID)
+
+	// Stale CreateOrUpdate targeting group-old must refuse to overwrite group-new's PodGroup.
+	updateErr, retryAfter := manager.CreateOrUpdatePodGroup(WithGroupInstanceID(ctx, "group-old"), ms, pgName)
+	require.ErrorContains(t, updateErr, "belongs to ServingGroup instance")
+	require.Positive(t, retryAfter)
+
+	// Matching deletion targeting group-new deletes with UID precondition.
+	require.NoError(t, manager.DeletePodGroup(WithGroupInstanceID(ctx, "group-new"), ms, pgName))
+	_, err = volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Get(ctx, pgName, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
 }

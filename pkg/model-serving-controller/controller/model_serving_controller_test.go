@@ -8008,8 +8008,24 @@ func TestDeleteServingGroupRetainsDeletionOnFailure(t *testing.T) {
 				Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
 			}
 
+			podGroup := &schedulingv1beta1.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            sgName,
+					UID:             types.UID("test-podgroup-uid"),
+					Namespace:       "default",
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)},
+					Labels: map[string]string{
+						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+						workloadv1alpha1.GroupNameLabelKey:        sgName,
+					},
+				},
+			}
+
 			drainWorkqueue(t, controller.workqueue)
 			assertQueueEmpty(t, controller.workqueue)
+
+			_, err = volcanoClient.SchedulingV1beta1().PodGroups("default").Create(context.TODO(), podGroup, metav1.CreateOptions{})
+			assert.NoError(t, err)
 
 			_, err = client.CoreV1().Pods("default").Create(context.TODO(), pod, metav1.CreateOptions{})
 			assert.NoError(t, err)

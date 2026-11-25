@@ -377,7 +377,7 @@ func TestHeadlessServicePluginRejectsUnmanagedNameCollision(t *testing.T) {
 
 func headlessTestRequest() *HookRequest {
 	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default", UID: "ms-uid"}}
-	return &HookRequest{ModelServing: ms, ServingGroup: "test-ms-0", RoleName: "serve", RoleID: "serve-0", Role: &workloadv1alpha1.Role{Name: "serve", WorkerReplicas: 1, WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}}, Cleanup: &RoleCleanup{}}
+	return &HookRequest{ModelServing: ms, ServingGroup: "test-ms-0", RoleName: "serve", RoleID: "serve-0", Role: &workloadv1alpha1.Role{Name: "serve", WorkerReplicas: 1, WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}}}
 }
 
 func headlessTestService(req *HookRequest) *corev1.Service {
@@ -489,11 +489,15 @@ func TestHeadlessServiceStrictIdentity(t *testing.T) {
 	}
 }
 
-func TestHeadlessRoleCleanupRetainsUIDAcrossFailedDelete(t *testing.T) {
+func TestHeadlessRoleDeletePreservesReplacementInstanceAcrossRetry(t *testing.T) {
 	for _, replace := range []bool{false, true} {
 		t.Run(fmt.Sprintf("replacement %t", replace), func(t *testing.T) {
 			req := headlessTestRequest()
+			req.GroupInstanceID = "group-old"
+			req.RoleInstanceID = "role-old"
 			service := headlessTestService(req)
+			service.Labels[workloadv1alpha1.GroupInstanceIDLabelKey] = req.GroupInstanceID
+			service.Labels[workloadv1alpha1.RoleInstanceIDLabelKey] = req.RoleInstanceID
 			client := kubefake.NewSimpleClientset(service)
 			req.KubeClient = client
 			resource := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "services"}
@@ -508,6 +512,7 @@ func TestHeadlessRoleCleanupRetainsUIDAcrossFailedDelete(t *testing.T) {
 					if replace {
 						replacement := service.DeepCopy()
 						replacement.UID = "service-replacement"
+						replacement.Labels[workloadv1alpha1.RoleInstanceIDLabelKey] = "role-new"
 						require.NoError(t, client.Tracker().Update(resource, replacement, service.Namespace))
 						return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "services"}, service.Name, fmt.Errorf("UID changed"))
 					}
@@ -523,13 +528,27 @@ func TestHeadlessRoleCleanupRetainsUIDAcrossFailedDelete(t *testing.T) {
 			if replace {
 				require.NoError(t, err)
 				assert.Equal(t, types.UID("service-replacement"), current.UID)
-				assert.Equal(t, 1, deletes, "retry must not adopt the replacement UID")
+				assert.Equal(t, 1, deletes, "retry must not delete a replacement Role instance Service")
 			} else {
 				assert.True(t, apierrors.IsNotFound(err))
 				assert.Equal(t, 2, deletes)
 			}
 		})
 	}
+}
+
+func TestHeadlessServiceRejectsPreviousInstanceServiceTakeover(t *testing.T) {
+	req := headlessTestRequest()
+	req.GroupInstanceID = "group-1"
+	req.RoleInstanceID = "role-new"
+	staleService := headlessTestService(req)
+	staleService.Labels[workloadv1alpha1.GroupInstanceIDLabelKey] = "group-1"
+	staleService.Labels[workloadv1alpha1.RoleInstanceIDLabelKey] = "role-old"
+	client := kubefake.NewSimpleClientset(staleService)
+	req.KubeClient = client
+	plugin, err := NewHeadlessServicePlugin(workloadv1alpha1.PluginSpec{Name: HeadlessServicePluginName})
+	require.NoError(t, err)
+	require.ErrorContains(t, plugin.OnRoleSync(context.Background(), req), "belongs to previous Role instance")
 }
 
 func TestHeadlessServiceRestoresMissingDiscoveryWithoutChangingEntry(t *testing.T) {

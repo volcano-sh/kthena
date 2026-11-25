@@ -51,6 +51,10 @@ type Store interface {
 	UpdateServingGroupStatus(modelServingName types.NamespacedName, groupName string, Status ServingGroupStatus) error
 	UpdateServingGroupRevision(modelServingName types.NamespacedName, groupName string, revision string) error
 	UpdateRoleRevision(modelServingName types.NamespacedName, groupName, roleName, roleID, revision, roleTemplateHash string) error
+	EnsureServingGroupInstanceID(modelServingName types.NamespacedName, groupName, instanceID string) string
+	GetServingGroupInstanceID(modelServingName types.NamespacedName, groupName string) (string, bool)
+	EnsureRoleInstanceID(modelServingName types.NamespacedName, groupName, roleName, roleID, instanceID string) string
+	GetRoleInstanceID(modelServingName types.NamespacedName, groupName, roleName, roleID string) (string, bool)
 	// DumpCache returns a JSON dump of the current store cache representation, which is useful for debugging and monitoring purposes. The structure of the JSON will be a map of modelServing names to their ServingGroups, and each ServingGroup will include its roles and running pods.
 	DumpCache() ([]byte, error)
 }
@@ -65,6 +69,7 @@ type store struct {
 
 type ServingGroup struct {
 	Name        string
+	InstanceID  string
 	runningPods map[string]struct{} // Map of pod names in this ServingGroup
 	Revision    string
 	Status      ServingGroupStatus
@@ -73,6 +78,7 @@ type ServingGroup struct {
 
 type Role struct {
 	Name             string
+	InstanceID       string
 	Revision         string // Revision of the ServingGroup
 	RoleTemplateHash string // Revision of the Role, used for RoleRollingUpdate strategy
 	Status           RoleStatus
@@ -524,4 +530,90 @@ func (s *store) UpdateServingGroupRevision(modelServingName types.NamespacedName
 		return fmt.Errorf("failed to find ServingGroup %s in modelServing %s", groupName, modelServingName.Namespace+"/"+modelServingName.Name)
 	}
 	return nil
+}
+
+// EnsureServingGroupInstanceID sets instanceID when the ServingGroup has none and returns the effective ID.
+func (s *store) EnsureServingGroupInstanceID(modelServingName types.NamespacedName, groupName, instanceID string) string {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	groups, ok := s.servingGroup[modelServingName]
+	if !ok {
+		return instanceID
+	}
+	group, ok := groups[groupName]
+	if !ok {
+		return instanceID
+	}
+	if group.InstanceID == "" && instanceID != "" {
+		group.InstanceID = instanceID
+	}
+	return group.InstanceID
+}
+
+// GetServingGroupInstanceID returns the ServingGroup's instance ID and whether the ServingGroup exists.
+func (s *store) GetServingGroupInstanceID(modelServingName types.NamespacedName, groupName string) (string, bool) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	groups, ok := s.servingGroup[modelServingName]
+	if !ok {
+		return "", false
+	}
+	group, ok := groups[groupName]
+	if !ok {
+		return "", false
+	}
+	return group.InstanceID, true
+}
+
+// EnsureRoleInstanceID sets instanceID when the Role has none and returns the effective ID.
+func (s *store) EnsureRoleInstanceID(modelServingName types.NamespacedName, groupName, roleName, roleID, instanceID string) string {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	groups, ok := s.servingGroup[modelServingName]
+	if !ok {
+		return instanceID
+	}
+	group, ok := groups[groupName]
+	if !ok {
+		return instanceID
+	}
+	roles, ok := group.roles[roleName]
+	if !ok {
+		return instanceID
+	}
+	role, ok := roles[roleID]
+	if !ok {
+		return instanceID
+	}
+	if role.InstanceID == "" && instanceID != "" {
+		role.InstanceID = instanceID
+	}
+	return role.InstanceID
+}
+
+// GetRoleInstanceID returns the Role's instance ID and whether the Role exists.
+func (s *store) GetRoleInstanceID(modelServingName types.NamespacedName, groupName, roleName, roleID string) (string, bool) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	groups, ok := s.servingGroup[modelServingName]
+	if !ok {
+		return "", false
+	}
+	group, ok := groups[groupName]
+	if !ok {
+		return "", false
+	}
+	roles, ok := group.roles[roleName]
+	if !ok {
+		return "", false
+	}
+	role, ok := roles[roleID]
+	if !ok {
+		return "", false
+	}
+	return role.InstanceID, true
 }
