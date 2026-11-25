@@ -123,6 +123,16 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			return
 		}
 
+		// Gate concurrency: reject requests when the per-renderer in-flight
+		// limit is reached so the router can fall back to engine-side
+		// tokenization rather than piling requests against a saturated renderer.
+		if !s.manager.AcquireInFlight(payload.Model) {
+			writeError(w, http.StatusServiceUnavailable,
+				fmt.Sprintf("tokenizer for model %q is at capacity", payload.Model))
+			return
+		}
+		defer s.manager.ReleaseInFlight(payload.Model)
+
 		resp, err := s.client.Post(endpoint+path, "application/json", bytes.NewReader(body))
 		if err != nil {
 			klog.Warningf("Proxy to renderer for model %s failed: %v", payload.Model, err)

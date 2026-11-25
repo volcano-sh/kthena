@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -55,6 +56,7 @@ type RendererInfo struct {
 	Status    string `json:"status"`
 	Port      int    `json:"port"`
 	Restarts  int    `json:"restarts"`
+	InFlight  int64  `json:"inFlight"`
 	LastError string `json:"lastError"`
 }
 
@@ -75,6 +77,10 @@ type renderer struct {
 	// readyAt would not do: it keeps growing while the process is dead.
 	readyAt  time.Time
 	exitedAt time.Time
+
+	// inFlight counts requests currently being proxied to this renderer.
+	// Updated atomically; AcquireInFlight / ReleaseInFlight gate the proxy path.
+	inFlight atomic.Int64
 
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
@@ -200,6 +206,7 @@ func (m *RendererManager) Snapshot() []RendererInfo {
 			Status:    string(r.status),
 			Port:      r.port,
 			Restarts:  r.restarts,
+			InFlight:  r.inFlight.Load(),
 			LastError: r.lastErr,
 		})
 	}
@@ -404,5 +411,56 @@ func (m *RendererManager) restartCrashed() {
 		klog.Warningf("Restarting renderer for model %s (%d/%d)",
 			r.model, r.budgetUsed, m.config.RendererMaxRestarts)
 		go m.launch(r)
+	}
+}
+
+// AcquireInFlight atomically increments the in-flight counter for the renderer
+// serving model and returns true. If the per-renderer limit configured by
+// Config.RendererMaxInFlight is already reached (or the model has no ready
+// renderer), it returns false without changing the counter.
+// The caller must call ReleaseInFlight exactly once after the proxied request
+// completes or is abandoned.
+func (m *RendererManager) AcquireInFlight(model string) bool {
+	m.mu.Lock()
+	r, ok := m.renderers[model]
+	m.mu.Unlock()
+	if !ok {
+		return false
+	}
+	limit := int64(m.config.RendererMaxInFlight)
+	if limit <= 0 {
+		// No limit configured: always admit.
+		r.inFlight.Add(1)
+		return true
+	}
+	// CAS loop: increment only when below limit.
+	for {
+		cur := r.inFlight.Load()
+		if cur >= limit {
+			klog.V(4).Infof("AcquireInFlight: renderer for model %s at capacity (%d/%d)",
+				model, cur, limit)
+			return false
+		}
+		if r.inFlight.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+		// Another goroutine raced us; retry.
+	}
+}
+
+// ReleaseInFlight decrements the in-flight counter for the renderer serving
+// model. It is a no-op when the renderer no longer exists (e.g. it was
+// removed by SetModels between Acquire and Release).
+func (m *RendererManager) ReleaseInFlight(model string) {
+	m.mu.Lock()
+	r, ok := m.renderers[model]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	// Guard against spurious decrements (defensive; should not happen in
+	// normal use).
+	if r.inFlight.Load() > 0 {
+		r.inFlight.Add(-1)
 	}
 }

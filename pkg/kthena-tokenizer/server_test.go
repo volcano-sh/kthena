@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -158,4 +159,237 @@ func TestServerReadyzWaitsForSync(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+// newTestServerWithCfg builds a test server using an explicit Config so
+// non-default fields (e.g. RendererMaxInFlight) can be set.
+func newTestServerWithCfg(t *testing.T, backend *httptest.Server, cfg Config) *Server {
+	t.Helper()
+	u, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(u.Port())
+	require.NoError(t, err)
+	if cfg.ProxyTimeout == 0 {
+		cfg.ProxyTimeout = 5 * time.Second
+	}
+	m := NewRendererManager(cfg)
+	m.renderers["served"] = &renderer{model: "served", port: port, status: StatusReady}
+	return NewServer(cfg, m, staticReady(true))
+}
+
+// TestServerInFlightLimitRejectsConcurrentRequest verifies that with
+// RendererMaxInFlight=1 a second concurrent request is rejected with 503
+// while the first is still being proxied.
+func TestServerInFlightLimitRejectsConcurrentRequest(t *testing.T) {
+	// arrived is signalled by the backend when the first request arrives so
+	// we can send the second one only after the in-flight counter is 1.
+	arrived := make(chan struct{}, 1)
+	// hold gates the backend handler: the first request blocks until released.
+	hold := make(chan struct{})
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
+		<-hold
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tokens": [], "count": 0}`))
+	}))
+	defer backend.Close()
+
+	cfg := Config{ProxyTimeout: 5 * time.Second, RendererMaxInFlight: 1}
+	frontend := httptest.NewServer(newTestServerWithCfg(t, backend, cfg).Handler())
+	defer frontend.Close()
+
+	// First request: should be admitted (in-flight = 1).
+	firstStatus := make(chan int, 1)
+	go func() {
+		resp, err := http.Post(frontend.URL+"/tokenize", "application/json",
+			strings.NewReader(`{"model": "served", "prompt": "hello"}`))
+		if err != nil {
+			firstStatus <- -1
+			return
+		}
+		defer resp.Body.Close()
+		firstStatus <- resp.StatusCode
+	}()
+
+	// Wait until the first request has actually reached the backend and
+	// the in-flight counter is 1.
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request did not reach the backend within 5s")
+	}
+
+	// Second concurrent request must be rejected.
+	resp, err := http.Post(frontend.URL+"/tokenize", "application/json",
+		strings.NewReader(`{"model": "served", "prompt": "hello"}`))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode,
+		"second request must be rejected when at in-flight capacity")
+
+	// Release the first request; it must succeed.
+	close(hold)
+	select {
+	case status := <-firstStatus:
+		assert.Equal(t, http.StatusOK, status, "first request must succeed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request did not complete within 5s")
+	}
+}
+
+// TestServerInFlightLimitReleasedAfterResponse verifies that after a request
+// completes, the in-flight slot is released and the next request is admitted.
+func TestServerInFlightLimitReleasedAfterResponse(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tokens": [], "count": 0}`))
+	}))
+	defer backend.Close()
+
+	cfg := Config{ProxyTimeout: 5 * time.Second, RendererMaxInFlight: 1}
+	frontend := httptest.NewServer(newTestServerWithCfg(t, backend, cfg).Handler())
+	defer frontend.Close()
+
+	for i := 0; i < 3; i++ {
+		resp, err := http.Post(frontend.URL+"/tokenize", "application/json",
+			strings.NewReader(`{"model": "served", "prompt": "hi"}`))
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode,
+			"request %d should succeed after previous one completed", i+1)
+	}
+}
+
+// TestServerInFlightLimitZeroMeansUnlimited verifies that with
+// RendererMaxInFlight=0 (the default) all concurrent requests are admitted.
+func TestServerInFlightLimitZeroMeansUnlimited(t *testing.T) {
+	const concurrency = 10
+	var wg sync.WaitGroup
+	// hold all requests simultaneously.
+	hold := make(chan struct{})
+	var mu sync.Mutex
+	var codes []int
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-hold
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tokens": [], "count": 0}`))
+	}))
+	defer backend.Close()
+
+	cfg := Config{ProxyTimeout: 5 * time.Second, RendererMaxInFlight: 0}
+	frontend := httptest.NewServer(newTestServerWithCfg(t, backend, cfg).Handler())
+	defer frontend.Close()
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(frontend.URL+"/tokenize", "application/json",
+				strings.NewReader(`{"model": "served", "prompt": "hi"}`))
+			if err != nil {
+				mu.Lock()
+				codes = append(codes, -1)
+				mu.Unlock()
+				return
+			}
+			defer resp.Body.Close()
+			mu.Lock()
+			codes = append(codes, resp.StatusCode)
+			mu.Unlock()
+		}()
+	}
+
+	// Give all goroutines a moment to start and reach the backend.
+	time.Sleep(100 * time.Millisecond)
+	close(hold) // release all simultaneously
+	wg.Wait()
+
+	require.Len(t, codes, concurrency)
+	for i, code := range codes {
+		assert.Equal(t, http.StatusOK, code, "request %d must succeed with unlimited concurrency", i)
+	}
+}
+
+// TestManagerAcquireRelease is a unit test for AcquireInFlight and
+// ReleaseInFlight that exercises the limit enforcement and CAS semantics
+// without spinning up an HTTP server.
+func TestManagerAcquireRelease(t *testing.T) {
+	tests := []struct {
+		name        string
+		limit       int
+		acquireN    int
+		wantGranted int
+	}{
+		{name: "no_limit_admits_all", limit: 0, acquireN: 5, wantGranted: 5},
+		{name: "limit_1_admits_one", limit: 1, acquireN: 3, wantGranted: 1},
+		{name: "limit_3_admits_three", limit: 3, acquireN: 5, wantGranted: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{RendererMaxInFlight: tt.limit}
+			m := NewRendererManager(cfg)
+			m.renderers["m"] = &renderer{model: "m", status: StatusReady}
+
+			granted := 0
+			for i := 0; i < tt.acquireN; i++ {
+				if m.AcquireInFlight("m") {
+					granted++
+				}
+			}
+			assert.Equal(t, tt.wantGranted, granted)
+
+			// After releasing all, the same number should be grantable again.
+			for i := 0; i < granted; i++ {
+				m.ReleaseInFlight("m")
+			}
+			regrantable := 0
+			for i := 0; i < tt.wantGranted; i++ {
+				if m.AcquireInFlight("m") {
+					regrantable++
+				}
+			}
+			assert.Equal(t, tt.wantGranted, regrantable, "slots must be regranted after release")
+		})
+	}
+}
+
+// TestManagerAcquireUnknownModel verifies that AcquireInFlight returns false
+// for a model that has no registered renderer.
+func TestManagerAcquireUnknownModel(t *testing.T) {
+	cfg := Config{RendererMaxInFlight: 5}
+	m := NewRendererManager(cfg)
+	assert.False(t, m.AcquireInFlight("nonexistent"),
+		"AcquireInFlight must return false for unregistered model")
+}
+
+// TestManagerReleaseUnknownModel verifies that ReleaseInFlight is a no-op for
+// a model that has no registered renderer (no panic, no crash).
+func TestManagerReleaseUnknownModel(t *testing.T) {
+	cfg := Config{}
+	m := NewRendererManager(cfg)
+	require.NotPanics(t, func() { m.ReleaseInFlight("nonexistent") })
+}
+
+// TestManagerSnapshotIncludesInFlight verifies that the InFlight field in
+// RendererInfo reflects the current in-flight count.
+func TestManagerSnapshotIncludesInFlight(t *testing.T) {
+	cfg := Config{RendererMaxInFlight: 10}
+	m := NewRendererManager(cfg)
+	m.renderers["m"] = &renderer{model: "m", status: StatusReady}
+
+	require.True(t, m.AcquireInFlight("m"))
+	require.True(t, m.AcquireInFlight("m"))
+
+	infos := m.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, int64(2), infos[0].InFlight, "snapshot must report 2 in-flight requests")
+
+	m.ReleaseInFlight("m")
+	infos = m.Snapshot()
+	assert.Equal(t, int64(1), infos[0].InFlight, "snapshot must report 1 after one release")
 }
