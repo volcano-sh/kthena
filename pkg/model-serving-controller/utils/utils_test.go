@@ -575,3 +575,116 @@ func TestGetMaxSurgeForRole(t *testing.T) {
 		})
 	}
 }
+
+func TestParseModelServingPodName(t *testing.T) {
+	tests := []struct {
+		name         string
+		msName       string
+		podName      string
+		wantGroup    string
+		wantRole     string
+		wantRoleID   string
+		wantPodIndex int
+		wantOK       bool
+	}{
+		{
+			name:         "standard names",
+			msName:       "ms",
+			podName:      "ms-0-prefill-0-0",
+			wantGroup:    "ms-0",
+			wantRole:     "prefill",
+			wantRoleID:   "prefill-0",
+			wantPodIndex: 0,
+			wantOK:       true,
+		},
+		{
+			name:         "hyphenated modelServing and role names",
+			msName:       "my-llm-v1",
+			podName:      "my-llm-v1-12-decode-node-3-4",
+			wantGroup:    "my-llm-v1-12",
+			wantRole:     "decode-node",
+			wantRoleID:   "decode-node-3",
+			wantPodIndex: 4,
+			wantOK:       true,
+		},
+		{
+			name:    "different modelServing prefix",
+			msName:  "ms",
+			podName: "other-0-prefill-0-0",
+			wantOK:  false,
+		},
+		{
+			name:    "non-numeric group ordinal",
+			msName:  "ms",
+			podName: "ms-abc-prefill-0-0",
+			wantOK:  false,
+		},
+		{
+			name:    "leading zero group ordinal",
+			msName:  "ms",
+			podName: "ms-01-prefill-0-0",
+			wantOK:  false,
+		},
+		{
+			name:    "missing role segments",
+			msName:  "ms",
+			podName: "ms-0-0",
+			wantOK:  false,
+		},
+		{
+			name:    "empty role name",
+			msName:  "ms",
+			podName: "ms-0--0-0",
+			wantOK:  false,
+		},
+		{
+			name:    "non-numeric pod index",
+			msName:  "ms",
+			podName: "ms-0-prefill-0-xyz",
+			wantOK:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			group, role, roleID, podIdx, ok := ParseModelServingPodName(tt.msName, tt.podName)
+			assert.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.Equal(t, tt.wantGroup, group)
+				assert.Equal(t, tt.wantRole, role)
+				assert.Equal(t, tt.wantRoleID, roleID)
+				assert.Equal(t, tt.wantPodIndex, podIdx)
+			}
+		})
+	}
+}
+
+func TestExpectedPodLabels(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default"},
+	}
+	role := workloadv1alpha1.Role{
+		Name: "prefill",
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Metadata: &workloadv1alpha1.Metadata{
+				Labels: map[string]string{"app.kubernetes.io/component": "entry", "custom": "v1"},
+			},
+		},
+		WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+			Metadata: &workloadv1alpha1.Metadata{
+				Labels: map[string]string{"app.kubernetes.io/component": "worker"},
+			},
+		},
+	}
+
+	entryLabels := ExpectedPodLabels(role, ms, "test-ms-0", "prefill-0", 0, "rev-1", "hash-1")
+	assert.Equal(t, Entry, entryLabels[workloadv1alpha1.EntryLabelKey])
+	assert.Equal(t, "entry", entryLabels["app.kubernetes.io/component"])
+	assert.Equal(t, "v1", entryLabels["custom"])
+	assert.Equal(t, "rev-1", entryLabels[workloadv1alpha1.RevisionLabelKey])
+
+	workerLabels := ExpectedPodLabels(role, ms, "test-ms-0", "prefill-0", 1, "rev-1", "hash-1")
+	assert.NotContains(t, workerLabels, workloadv1alpha1.EntryLabelKey)
+	assert.Equal(t, "worker", workerLabels["app.kubernetes.io/component"])
+	assert.NotContains(t, workerLabels, "custom")
+}
