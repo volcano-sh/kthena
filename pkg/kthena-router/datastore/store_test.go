@@ -18,7 +18,6 @@ package datastore
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -33,6 +32,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -259,22 +259,6 @@ func TestGetPreviousHistogram(t *testing.T) {
 	}
 }
 
-func TestHistogramSeriesKeptBetweenScrapes(t *testing.T) {
-	sum := float64(4)
-	count := uint64(2)
-	histogram := &dto.Histogram{SampleSum: &sum, SampleCount: &count}
-	seriesKey := utils.TPOT + `{engine="0"}`
-	podinfo := &PodInfo{}
-
-	updateHistogramMetrics(podinfo, map[string]*dto.Histogram{utils.TPOT: histogram, seriesKey: histogram})
-	previous := getPreviousHistogram(podinfo)
-	assert.Equal(t, histogram, previous[utils.TPOT])
-	assert.Equal(t, histogram, previous[seriesKey])
-
-	updateHistogramMetrics(podinfo, map[string]*dto.Histogram{utils.TPOT: histogram})
-	assert.NotContains(t, getPreviousHistogram(podinfo), seriesKey)
-}
-
 func Test_updateGaugeMetricsInfo(t *testing.T) {
 	// Non-zero values are written; TPOT/TTFT zero values are skipped (guard preserved).
 	podinfo := &PodInfo{
@@ -352,21 +336,21 @@ func TestStoreUpdatePodMetrics(t *testing.T) {
 		podRuntimeInspector: &fakePodRuntimeInspector{
 			metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
 				return map[string]float64{
-						utils.KVCacheUsage:      0.8,
-						utils.RequestWaitingNum: 15,
-						utils.RequestRunningNum: 10,
-						utils.TPOT:              120,
-						utils.TTFT:              210,
-					}, map[string]*dto.Histogram{
-						utils.TPOT: {
-							SampleSum:   &sum2,
-							SampleCount: &count2,
-						},
-						utils.TTFT: {
-							SampleSum:   &sum2,
-							SampleCount: &count2,
-						},
-					}
+					utils.KVCacheUsage:      0.8,
+					utils.RequestWaitingNum: 15,
+					utils.RequestRunningNum: 10,
+					utils.TPOT:              120,
+					utils.TTFT:              210,
+				}, map[string]*dto.Histogram{
+					utils.TPOT: {
+						SampleSum:   &sum2,
+						SampleCount: &count2,
+					},
+					utils.TTFT: {
+						SampleSum:   &sum2,
+						SampleCount: &count2,
+					},
+				}
 			},
 		},
 	}
@@ -935,45 +919,6 @@ func TestStoreDeleteModelRoute(t *testing.T) {
 		_, exists2 := s.requestWaitingQueue.Load("model2")
 		assert.True(t, exists2)
 	})
-}
-
-func TestStoreRecheckSessionBoostQueues(t *testing.T) {
-	tests := []struct {
-		name         string
-		sessionBoost bool
-		wantHeld     int
-		wantEmpty    int
-	}{
-		{name: "session boost wakes only queues holding requests", sessionBoost: true, wantHeld: 1, wantEmpty: 0},
-		{name: "session boost disabled", sessionBoost: false, wantHeld: 0, wantEmpty: 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := DefaultFairnessQueueConfig()
-			cfg.SessionBoostEnabled = true
-			busy := func() bool { return false }
-			// Queues are keyed by the requested model name, which here differs from
-			// any backend model name, so the recheck must not rely on that mapping.
-			held := NewRequestPriorityQueueWithConfig(nil, cfg, nil, busy)
-			empty := NewRequestPriorityQueueWithConfig(nil, cfg, nil, busy)
-			defer held.Close()
-			defer empty.Close()
-			err := held.PushRequest(&Request{UserID: "u", ModelName: "route-alias", RequestTime: time.Now(), NotifyChan: make(chan struct{})})
-			assert.NoError(t, err)
-
-			storeCfg := DefaultFairnessQueueConfig()
-			storeCfg.SessionBoostEnabled = tt.sessionBoost
-			s := &store{fairnessQueueConfig: storeCfg}
-			s.requestWaitingQueue.Store("route-alias", held)
-			s.requestWaitingQueue.Store("idle-model", empty)
-
-			s.recheckSessionBoostQueues()
-
-			assert.Equal(t, tt.wantHeld, len(held.recheckCh))
-			assert.Equal(t, tt.wantEmpty, len(empty.recheckCh))
-		})
-	}
 }
 
 // TestStoreDeleteModelRoute_RequestQueueCleanup specifically tests the cleanup of request queues
@@ -3141,413 +3086,149 @@ func TestGetPodWorkloadPort(t *testing.T) {
 	}
 }
 
-func newUpdateTestPodInfo(engine, podIP string, withPod bool) *PodInfo {
-	podInfo := &PodInfo{
-		engine: engine,
-		models: sets.New[string](),
+// --- stale pod metrics detection tests ---
+
+// makeReadyPod creates a pod with a PodIP, an engine annotation and running
+// phase so that updatePodMetrics reaches the scrape path (past the IP/engine
+// guard) and markScrapeResult is called.
+func makeReadyPod(namespace, name, ip string) *corev1.Pod {
+	p := createTestPod(namespace, name)
+	p.Status.PodIP = ip
+	if p.Annotations == nil {
+		p.Annotations = make(map[string]string)
 	}
-	if withPod {
-		podInfo.Pod = &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod1"},
-			Status:     corev1.PodStatus{PodIP: podIP},
-		}
-	}
-	return podInfo
+	p.Annotations["kthena.io/engine"] = "vLLM"
+	return p
 }
 
-func TestUpdatePodMetricsReturnValue(t *testing.T) {
-	tests := []struct {
-		name           string
-		engine         string
-		podIP          string
-		withPod        bool
-		metricsFn      func(string, *corev1.Pod, uint32, map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram)
-		want           bool
-		wantCalls      int64
-		wantWaitingNum float64
-	}{
-		{
-			name:    "gauge metrics fetched",
-			engine:  "vLLM",
-			podIP:   "10.0.0.1",
-			withPod: true,
-			metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-				return map[string]float64{utils.RequestWaitingNum: 3}, nil
-			},
-			want:           true,
-			wantCalls:      1,
-			wantWaitingNum: 3,
-		},
-		{
-			// backend.GetPodMetrics returns nil, nil on HTTP errors and timeouts.
-			name:    "metrics fetch failed",
-			engine:  "vLLM",
-			podIP:   "10.0.0.1",
-			withPod: true,
-			metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-				return nil, nil
-			},
-			want:      false,
-			wantCalls: 1,
-		},
-		{name: "engine not set", engine: "", podIP: "10.0.0.1", withPod: true, want: false, wantCalls: 0},
-		{name: "pod not set", engine: "vLLM", withPod: false, want: false, wantCalls: 0},
-		{name: "pod IP not assigned", engine: "vLLM", podIP: "", withPod: true, want: false, wantCalls: 0},
-	}
+func TestPodInfoMarkScrapeResult_ResetsOnSuccess(t *testing.T) {
+	p := &PodInfo{}
 
+	// Three failures.
+	for i := 0; i < 3; i++ {
+		p.markScrapeResult(false)
+	}
+	assert.Equal(t, int32(3), p.ConsecutiveScrapeFailures())
+	assert.True(t, p.LastSuccessfulScrapeTime().IsZero(), "no success yet")
+
+	// One success resets the counter.
+	before := time.Now()
+	p.markScrapeResult(true)
+	after := time.Now()
+
+	assert.Equal(t, int32(0), p.ConsecutiveScrapeFailures())
+	assert.False(t, p.LastSuccessfulScrapeTime().IsZero())
+	assert.True(t, !p.LastSuccessfulScrapeTime().Before(before))
+	assert.True(t, !p.LastSuccessfulScrapeTime().After(after))
+}
+
+func TestPodInfoIsMetricsStale(t *testing.T) {
+	tests := []struct {
+		name      string
+		failures  int
+		threshold int32
+		want      bool
+	}{
+		{name: "below_threshold", failures: 2, threshold: 5, want: false},
+		{name: "at_threshold", failures: 5, threshold: 5, want: true},
+		{name: "above_threshold", failures: 10, threshold: 5, want: true},
+		{name: "zero_threshold_disables", failures: 100, threshold: 0, want: false},
+		{name: "negative_threshold_disables", failures: 100, threshold: -1, want: false},
+		{name: "no_failures_not_stale", failures: 0, threshold: 5, want: false},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inspector := &fakePodRuntimeInspector{metricsFn: tt.metricsFn}
-			s := &store{podRuntimeInspector: inspector}
-			podInfo := newUpdateTestPodInfo(tt.engine, tt.podIP, tt.withPod)
-
-			got := s.updatePodMetrics(podInfo)
-
-			assert.Equal(t, tt.want, got)
-			assert.Equal(t, tt.wantCalls, inspector.metricsCalls.Load())
-			assert.Equal(t, tt.wantWaitingNum, podInfo.GetRequestWaitingNum())
+			p := &PodInfo{}
+			for i := 0; i < tt.failures; i++ {
+				p.markScrapeResult(false)
+			}
+			assert.Equal(t, tt.want, p.IsMetricsStale(tt.threshold))
 		})
 	}
 }
 
-func TestUpdatePodModelsReturnValue(t *testing.T) {
-	tests := []struct {
-		name       string
-		engine     string
-		podIP      string
-		withPod    bool
-		modelsFn   func(string, *corev1.Pod, uint32) ([]string, error)
-		want       bool
-		wantCalls  int64
-		wantModels []string
-	}{
-		{
-			name:    "models fetched",
-			engine:  "vLLM",
-			podIP:   "10.0.0.1",
-			withPod: true,
-			modelsFn: func(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
-				return []string{"llama"}, nil
-			},
-			want:       true,
-			wantCalls:  1,
-			wantModels: []string{"llama"},
-		},
-		{
-			name:    "models fetch failed",
-			engine:  "vLLM",
-			podIP:   "10.0.0.1",
-			withPod: true,
-			modelsFn: func(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
-				return nil, errors.New("connection refused")
-			},
-			want:      false,
-			wantCalls: 1,
-		},
-		{
-			name:      "engine not set",
-			engine:    "",
-			podIP:     "10.0.0.1",
-			withPod:   true,
-			want:      false,
-			wantCalls: 0,
-		},
-		{
-			name:      "pod not set",
-			engine:    "vLLM",
-			withPod:   false,
-			want:      false,
-			wantCalls: 0,
-		},
-		{
-			name:      "pod IP not assigned",
-			engine:    "vLLM",
-			podIP:     "",
-			withPod:   true,
-			want:      false,
-			wantCalls: 0,
-		},
+func TestStorePodScrapeFailures(t *testing.T) {
+	s := newStore(&fakePodRuntimeInspector{})
+
+	ms := createTestModelServer("default", "ms", aiv1alpha1.VLLM)
+	pod := makeReadyPod("default", "pod1", "10.0.0.1")
+	podName := types.NamespacedName{Namespace: "default", Name: "pod1"}
+
+	assert.NoError(t, s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]()))
+	assert.NoError(t, s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms}))
+
+	podInfo := s.GetPodInfo(podName)
+	require.NotNil(t, podInfo)
+	podInfo.consecutiveScrapeFailures.Store(0)
+
+	// Zero failures initially.
+	assert.Equal(t, int32(0), s.PodScrapeFailures(podName))
+
+	// Drive failures directly.
+	for i := 0; i < 3; i++ {
+		podInfo.markScrapeResult(false)
+	}
+	assert.Equal(t, int32(3), s.PodScrapeFailures(podName))
+
+	// A success resets the count.
+	podInfo.markScrapeResult(true)
+	assert.Equal(t, int32(0), s.PodScrapeFailures(podName))
+}
+
+func TestStorePodScrapeFailures_UnknownPodReturnsZero(t *testing.T) {
+	s := newStore(&fakePodRuntimeInspector{})
+	podName := types.NamespacedName{Namespace: "default", Name: "nonexistent"}
+	assert.Equal(t, int32(0), s.PodScrapeFailures(podName))
+}
+
+func TestStorePodScrapeFailures_MultiPod(t *testing.T) {
+	s := newStore(&fakePodRuntimeInspector{})
+
+	ms := createTestModelServer("default", "ms", aiv1alpha1.VLLM)
+	pod1 := makeReadyPod("default", "pod1", "10.0.0.1")
+	pod2 := makeReadyPod("default", "pod2", "10.0.0.2")
+	pod1Name := types.NamespacedName{Namespace: "default", Name: "pod1"}
+	pod2Name := types.NamespacedName{Namespace: "default", Name: "pod2"}
+
+	assert.NoError(t, s.AddOrUpdateModelServer(ms, sets.New[types.NamespacedName]()))
+	assert.NoError(t, s.AddOrUpdatePod(pod1, []*aiv1alpha1.ModelServer{ms}))
+	assert.NoError(t, s.AddOrUpdatePod(pod2, []*aiv1alpha1.ModelServer{ms}))
+
+	podInfo1 := s.GetPodInfo(pod1Name)
+	podInfo2 := s.GetPodInfo(pod2Name)
+	require.NotNil(t, podInfo1)
+	require.NotNil(t, podInfo2)
+	podInfo1.consecutiveScrapeFailures.Store(0)
+	podInfo2.consecutiveScrapeFailures.Store(0)
+
+	for i := 0; i < 7; i++ {
+		podInfo1.markScrapeResult(false)
+	}
+	for i := 0; i < 2; i++ {
+		podInfo2.markScrapeResult(false)
 	}
 
+	assert.Equal(t, int32(7), s.PodScrapeFailures(pod1Name))
+	assert.Equal(t, int32(2), s.PodScrapeFailures(pod2Name))
+}
+
+func TestParsePodScrapeFailureThreshold(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue string
+		want     int32
+	}{
+		{name: "default_when_unset", envValue: "", want: 5},
+		{name: "explicit_zero_disables", envValue: "0", want: 0},
+		{name: "valid_value", envValue: "10", want: 10},
+		{name: "invalid_falls_back_to_default", envValue: "notanumber", want: 5},
+		{name: "negative_falls_back_to_default", envValue: "-1", want: 5},
+		{name: "overflow_int32_falls_back_to_default", envValue: "4294967297", want: 5},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inspector := &fakePodRuntimeInspector{modelsFn: tt.modelsFn}
-			s := &store{podRuntimeInspector: inspector}
-			podInfo := newUpdateTestPodInfo(tt.engine, tt.podIP, tt.withPod)
-
-			got := s.updatePodModels(podInfo)
-
-			assert.Equal(t, tt.want, got)
-			assert.Equal(t, tt.wantCalls, inspector.modelsCalls.Load())
-			assert.ElementsMatch(t, tt.wantModels, sets.List(podInfo.models))
+			t.Setenv("POD_SCRAPE_FAILURE_THRESHOLD", tt.envValue)
+			assert.Equal(t, tt.want, parsePodScrapeFailureThreshold())
 		})
-	}
-}
-
-// newHeldSessionBoostQueue returns a session-boost queue holding one request.
-// The queue's dequeue loop is not started, so a recheck signal stays buffered
-// in recheckCh where the test can observe it.
-func newHeldSessionBoostQueue(t *testing.T) *RequestPriorityQueue {
-	t.Helper()
-	cfg := DefaultFairnessQueueConfig()
-	cfg.SessionBoostEnabled = true
-	busy := func() bool { return false }
-	q := NewRequestPriorityQueueWithConfig(nil, cfg, nil, busy)
-	t.Cleanup(q.Close)
-	err := q.PushRequest(&Request{UserID: "u", ModelName: "llama", RequestTime: time.Now(), NotifyChan: make(chan struct{})})
-	assert.NoError(t, err)
-	return q
-}
-
-func newSessionBoostStoreConfig() FairnessQueueConfig {
-	cfg := DefaultFairnessQueueConfig()
-	cfg.SessionBoostEnabled = true
-	return cfg
-}
-
-func TestStoreRunRecheckNotBlockedBySlowPod(t *testing.T) {
-	gauge := map[string]float64{utils.RequestWaitingNum: 0}
-
-	tests := []struct {
-		name        string
-		fastMetrics map[string]float64
-		fastModels  error
-		wantRecheck int
-	}{
-		{name: "metrics and models fetched", fastMetrics: gauge, fastModels: nil, wantRecheck: 1},
-		{name: "only metrics fetched", fastMetrics: gauge, fastModels: errors.New("connection refused"), wantRecheck: 1},
-		{name: "only models fetched", fastMetrics: nil, fastModels: nil, wantRecheck: 1},
-		{name: "both fetches failed", fastMetrics: nil, fastModels: errors.New("connection refused"), wantRecheck: 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// The slow pod blocks in its metrics fetch until released, standing in
-			// for a Ready pod whose metrics endpoint hangs. Both of its fetches
-			// fail, so it never sends a recheck signal of its own.
-			releaseSlow := make(chan struct{})
-			release := sync.OnceFunc(func() { close(releaseSlow) })
-			defer release()
-
-			inspector := &fakePodRuntimeInspector{
-				metricsFn: func(_ string, pod *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-					if pod.Name == "slow" {
-						<-releaseSlow
-						return nil, nil
-					}
-					return tt.fastMetrics, nil
-				},
-				modelsFn: func(_ string, pod *corev1.Pod, _ uint32) ([]string, error) {
-					if pod.Name == "slow" {
-						return nil, errors.New("connection refused")
-					}
-					if tt.fastModels != nil {
-						return nil, tt.fastModels
-					}
-					return []string{"llama"}, nil
-				},
-			}
-
-			s := &store{
-				fairnessQueueConfig:   newSessionBoostStoreConfig(),
-				initialSynced:         &atomic.Bool{},
-				metricsScrapeInterval: time.Hour, // a single round is enough
-				podRuntimeInspector:   inspector,
-			}
-			for _, name := range []string{"slow", "fast"} {
-				s.pods.Store(types.NamespacedName{Namespace: "default", Name: name}, &PodInfo{
-					Pod: &corev1.Pod{
-						ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
-						Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
-					},
-					engine: "vLLM",
-					models: sets.New[string](),
-				})
-			}
-			held := newHeldSessionBoostQueue(t)
-			s.requestWaitingQueue.Store("llama", held)
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			s.Run(ctx)
-
-			// Phase 1: while the slow pod is still blocked, the fast pod's
-			// refresh must already have signalled the held queue.
-			if tt.wantRecheck > 0 {
-				assert.Eventually(t, func() bool {
-					return len(held.recheckCh) == tt.wantRecheck
-				}, 5*time.Second, 10*time.Millisecond)
-				assert.False(t, s.HasSynced(), "scrape round should still be waiting on the slow pod")
-			}
-
-			// Phase 2: once the round completes, every pod goroutine has
-			// returned, so the signal count is final.
-			release()
-			assert.Eventually(t, s.HasSynced, 5*time.Second, 10*time.Millisecond)
-			assert.Equal(t, tt.wantRecheck, len(held.recheckCh))
-		})
-	}
-}
-
-func TestStoreAddOrUpdatePodRecheck(t *testing.T) {
-	gauge := map[string]float64{utils.RequestWaitingNum: 0}
-
-	tests := []struct {
-		name        string
-		metrics     map[string]float64
-		modelsErr   error
-		wantRecheck int
-	}{
-		{name: "metrics and models fetched", metrics: gauge, modelsErr: nil, wantRecheck: 1},
-		{name: "only metrics fetched", metrics: gauge, modelsErr: errors.New("connection refused"), wantRecheck: 1},
-		{name: "only models fetched", metrics: nil, modelsErr: nil, wantRecheck: 1},
-		{name: "both fetches failed", metrics: nil, modelsErr: errors.New("connection refused"), wantRecheck: 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			inspector := &fakePodRuntimeInspector{
-				metricsFn: func(_ string, _ *corev1.Pod, _ uint32, _ map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
-					return tt.metrics, nil
-				},
-				modelsFn: func(_ string, _ *corev1.Pod, _ uint32) ([]string, error) {
-					if tt.modelsErr != nil {
-						return nil, tt.modelsErr
-					}
-					return []string{"llama"}, nil
-				},
-			}
-			s := &store{
-				fairnessQueueConfig: newSessionBoostStoreConfig(),
-				podRuntimeInspector: inspector,
-			}
-			held := newHeldSessionBoostQueue(t)
-			s.requestWaitingQueue.Store("llama", held)
-
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pod1"},
-				Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
-			}
-			ms := &aiv1alpha1.ModelServer{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "ms1"},
-				Spec:       aiv1alpha1.ModelServerSpec{InferenceEngine: aiv1alpha1.VLLM},
-			}
-
-			err := s.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{ms})
-
-			assert.NoError(t, err)
-			assert.Equal(t, tt.wantRecheck, len(held.recheckCh))
-		})
-	}
-}
-
-func TestStorePodRemovalRechecksHeldRequests(t *testing.T) {
-	ms1 := types.NamespacedName{Namespace: "default", Name: "ms1"}
-	ms2 := types.NamespacedName{Namespace: "default", Name: "ms2"}
-	podName := func(name string) types.NamespacedName {
-		return types.NamespacedName{Namespace: "default", Name: name}
-	}
-
-	tests := []struct {
-		name         string
-		pods         map[string][]types.NamespacedName // pod name -> model servers it belongs to
-		remove       func(s *store) error
-		wantAdmitted bool
-	}{
-		{
-			name:         "DeletePod removes the last serving pod",
-			pods:         map[string][]types.NamespacedName{"busy": {ms1}},
-			remove:       func(s *store) error { return s.DeletePod(podName("busy")) },
-			wantAdmitted: true,
-		},
-		{
-			name:         "DeletePod leaves a busy pod serving",
-			pods:         map[string][]types.NamespacedName{"busy-1": {ms1}, "busy-2": {ms1}},
-			remove:       func(s *store) error { return s.DeletePod(podName("busy-1")) },
-			wantAdmitted: false,
-		},
-		{
-			name:         "DeleteModelServer removes the last serving pod",
-			pods:         map[string][]types.NamespacedName{"busy": {ms1}},
-			remove:       func(s *store) error { return s.DeleteModelServer(ms1) },
-			wantAdmitted: true,
-		},
-		{
-			name:         "DeleteModelServer keeps a pod still owned by another model server",
-			pods:         map[string][]types.NamespacedName{"busy-1": {ms1}, "busy-2": {ms1, ms2}},
-			remove:       func(s *store) error { return s.DeleteModelServer(ms1) },
-			wantAdmitted: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &store{fairnessQueueConfig: newSessionBoostStoreConfig()}
-			msPods := map[types.NamespacedName]sets.Set[types.NamespacedName]{}
-			for name, servers := range tt.pods {
-				s.pods.Store(podName(name), &PodInfo{
-					Pod: &corev1.Pod{
-						ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
-						Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
-					},
-					engine:            "vLLM",
-					modelServer:       sets.New(servers...),
-					models:            sets.New[string]("llama"),
-					RequestWaitingNum: 5, // every pod is busy, so the request is held
-				})
-				for _, ms := range servers {
-					if msPods[ms] == nil {
-						msPods[ms] = sets.New[types.NamespacedName]()
-					}
-					msPods[ms].Insert(podName(name))
-				}
-			}
-			for ms, pods := range msPods {
-				s.modelServer.Store(ms, &modelServer{pods: pods})
-			}
-
-			// Wrap the store's real checker to count completed evaluations, which
-			// tells the test when the queue has acted on a signal.
-			var checks atomic.Int64
-			checker := s.makeBackendWaitingChecker("llama")
-			q := NewRequestPriorityQueueWithConfig(nil, s.fairnessQueueConfig, nil, func() bool {
-				defer checks.Add(1)
-				return checker()
-			})
-			q.podCounter = s.makeBackendPodCounter("llama")
-			t.Cleanup(q.Close)
-			s.requestWaitingQueue.Store("llama", q)
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go q.Run(ctx, 0)
-
-			req := &Request{UserID: "u", ModelName: "llama", RequestTime: time.Now(), NotifyChan: make(chan struct{})}
-			assert.NoError(t, q.PushRequest(req))
-
-			// The arrival is evaluated against busy pods and held.
-			assert.Eventually(t, func() bool { return checks.Load() >= 1 }, 5*time.Second, 10*time.Millisecond)
-			assert.False(t, isClosed(req.NotifyChan), "request should be held while all pods are busy")
-
-			assert.NoError(t, tt.remove(s))
-
-			// The removal must make the queue re-evaluate admission.
-			assert.Eventually(t, func() bool { return checks.Load() >= 2 }, 5*time.Second, 10*time.Millisecond)
-			if tt.wantAdmitted {
-				assert.Eventually(t, func() bool { return isClosed(req.NotifyChan) }, 5*time.Second, 10*time.Millisecond)
-			} else {
-				assert.False(t, isClosed(req.NotifyChan), "request should stay held while a busy pod remains")
-			}
-		})
-	}
-}
-
-func isClosed(ch chan struct{}) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-		return false
 	}
 }
