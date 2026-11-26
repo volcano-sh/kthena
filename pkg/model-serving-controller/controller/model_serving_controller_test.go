@@ -224,7 +224,7 @@ func TestCreateOrUpdatePodGroupByServingGroupRequeue(t *testing.T) {
 	}
 
 	err := controller.createOrUpdatePodGroupByServingGroup(context.Background(), ms, "ms-0")
-	assert.NoError(t, err)
+	assert.ErrorContains(t, err, "retry")
 	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
 

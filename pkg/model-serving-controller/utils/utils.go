@@ -145,6 +145,9 @@ func applyManagedPodLabels(pod *corev1.Pod, roleName, msName, groupName, roleID,
 	}
 	delete(pod.Labels, workloadv1alpha1.GroupInstanceIDLabelKey)
 	delete(pod.Labels, workloadv1alpha1.RoleInstanceIDLabelKey)
+	if pod.Annotations != nil {
+		delete(pod.Annotations, workloadv1alpha1.DeletingAnnotationKey)
+	}
 }
 
 // NewInstanceID generates a random 16-char lowercase hex identifier suitable as a Kubernetes label value.

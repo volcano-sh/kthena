@@ -140,4 +140,30 @@ func TestPodIdentityValidatorRejectsImmutableLabelMutations(t *testing.T) {
 		resp := sendPodAdmissionUpdate(t, validator, oldPod, newPod)
 		assert.True(t, resp.Allowed)
 	})
+
+	t.Run("removing controlling ModelServing ownerReference is rejected", func(t *testing.T) {
+		oldPod := baseManagedPod()
+		newPod := oldPod.DeepCopy()
+		newPod.OwnerReferences = nil
+		resp := sendPodAdmissionUpdate(t, validator, oldPod, newPod)
+		assert.False(t, resp.Allowed)
+		require.NotNil(t, resp.Result)
+		assert.Contains(t, resp.Result.Message, "ownerReferences")
+	})
+
+	t.Run("replacing controlling ModelServing ownerReference UID is rejected", func(t *testing.T) {
+		oldPod := baseManagedPod()
+		newPod := oldPod.DeepCopy()
+		newPod.OwnerReferences[0].UID = "other-ms-uid"
+		resp := sendPodAdmissionUpdate(t, validator, oldPod, newPod)
+		assert.False(t, resp.Allowed)
+	})
+
+	t.Run("attaching ModelServing controller ownerReference to unmanaged Pod is rejected", func(t *testing.T) {
+		oldPod := baseManagedPod()
+		oldPod.OwnerReferences = nil
+		newPod := baseManagedPod()
+		resp := sendPodAdmissionUpdate(t, validator, oldPod, newPod)
+		assert.False(t, resp.Allowed)
+	})
 }

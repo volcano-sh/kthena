@@ -19,6 +19,7 @@ package controller
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -27,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
@@ -36,6 +38,11 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
+)
+
+const (
+	deletingScopeServingGroup = "serving-group"
+	deletingScopeRole         = "role"
 )
 
 // finishPendingDeletions retries failed API requests before any new capacity can
@@ -237,13 +244,16 @@ func (c *ModelServingController) stableCapacityFillsOrphanSlot(ctx context.Conte
 
 // deleteInstancePods submits named, UID-fenced deletions for controlled Pods matching matchInstance
 // in deterministic order (entry Pod "-0" first, followed by workers) without relying on any
-// in-memory deletion target map.
+// in-memory deletion target map. When deleting multiple non-terminating Pods, it stamps a durable
+// DeletingAnnotationKey with deletingScope on the tail Pod first so controller restarts recover
+// the exact teardown scope regardless of RecoveryPolicy or partial multi-Role progress.
 func deleteInstancePods(
 	ctx context.Context,
 	client kubernetes.Interface,
 	ms *workload.ModelServing,
 	selector labels.Selector,
 	matchInstance func(*corev1.Pod) bool,
+	deletingScope string,
 ) ([]string, error) {
 	if client == nil || ms == nil || selector == nil {
 		return nil, fmt.Errorf("Pod deletion requires Kubernetes client, ModelServing and selector")
@@ -269,6 +279,34 @@ func deleteInstancePods(
 	})
 	slices.Sort(replacements)
 
+	var nonTerminating []*corev1.Pod
+	alreadyStamped := false
+	for _, pod := range targets {
+		if pod.Annotations[workload.DeletingAnnotationKey] == deletingScope {
+			alreadyStamped = true
+		}
+		if pod.DeletionTimestamp == nil {
+			nonTerminating = append(nonTerminating, pod)
+		}
+	}
+	if deletingScope != "" && len(nonTerminating) >= 2 && !alreadyStamped {
+		anchor := nonTerminating[len(nonTerminating)-1]
+		patch, marshalErr := json.Marshal(map[string]any{
+			"metadata": map[string]any{
+				"uid": anchor.UID,
+				"annotations": map[string]string{
+					workload.DeletingAnnotationKey: deletingScope,
+				},
+			},
+		})
+		if marshalErr == nil {
+			if _, patchErr := pods.Patch(ctx, anchor.Name, types.MergePatchType, patch, metav1.PatchOptions{}); patchErr != nil &&
+				!apierrors.IsNotFound(patchErr) && !apierrors.IsInvalid(patchErr) && !apierrors.IsConflict(patchErr) {
+				return nil, fmt.Errorf("mark Pod %s/%s deleting: %w", ms.Namespace, anchor.Name, patchErr)
+			}
+		}
+	}
+
 	for _, pod := range targets {
 		if pod.DeletionTimestamp != nil {
 			continue
@@ -282,13 +320,13 @@ func deleteInstancePods(
 }
 
 func isPodMarkedDeleting(pod *corev1.Pod) bool {
-	return pod != nil && pod.DeletionTimestamp != nil
+	return pod != nil && (pod.DeletionTimestamp != nil || pod.Annotations[workload.DeletingAnnotationKey] != "")
 }
 
-func (c *ModelServingController) resolveGroupInstanceIDForCreate(ms *workload.ModelServing, groupName string) string {
+func (c *ModelServingController) resolveGroupInstanceIDForCreate(ctx context.Context, ms *workload.ModelServing, groupName string) (string, error) {
 	nsn := utils.GetNamespaceName(ms)
 	if id, ok := c.store.GetServingGroupInstanceID(nsn, groupName); ok && id != "" {
-		return id
+		return id, nil
 	}
 	if c.podsInformer != nil {
 		if pods, err := c.getPodsByIndex(GroupNameKey, fmt.Sprintf("%s/%s", ms.Namespace, groupName)); err == nil {
@@ -296,7 +334,7 @@ func (c *ModelServingController) resolveGroupInstanceIDForCreate(ms *workload.Mo
 				if utils.IsControlledByModelServing(pod, ms) && !isPodMarkedDeleting(pod) {
 					id := utils.GetGroupInstanceID(pod)
 					c.store.EnsureServingGroupInstanceID(nsn, groupName, id)
-					return id
+					return id, nil
 				}
 			}
 		}
@@ -307,14 +345,80 @@ func (c *ModelServingController) resolveGroupInstanceIDForCreate(ms *workload.Mo
 				if pg.Name == groupName && utils.IsControlledByModelServing(pg, ms) && pg.DeletionTimestamp == nil {
 					id := utils.GetGroupInstanceID(pg)
 					c.store.EnsureServingGroupInstanceID(nsn, groupName, id)
-					return id
+					return id, nil
 				}
 			}
 		}
 	}
+	if c.kubeClientSet != nil && len(ms.Spec.Plugins) > 0 {
+		svcList, err := c.kubeClientSet.CoreV1().Services(ms.Namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: labels.Set{
+				workload.ModelServingNameLabelKey: ms.Name,
+				workload.GroupNameLabelKey:        groupName,
+			}.String(),
+		})
+		if err != nil {
+			return "", fmt.Errorf("list Services for ServingGroup %s identity check: %w", groupName, err)
+		}
+		var managed []*corev1.Service
+		gids := make(map[string]struct{})
+		for i := range svcList.Items {
+			svc := &svcList.Items[i]
+			svcGroup, _, _, ok := plugins.ManagedHeadlessServiceIdentity(svc, ms)
+			if !ok || svcGroup != groupName {
+				continue
+			}
+			if svc.DeletionTimestamp != nil {
+				c.enqueueModelServingAfter(ms, enqueueAfter)
+				return "", fmt.Errorf("Headless Service %s/%s in ServingGroup %s is terminating", ms.Namespace, svc.Name, groupName)
+			}
+			managed = append(managed, svc)
+			gids[utils.GetGroupInstanceID(svc)] = struct{}{}
+		}
+		if len(gids) == 1 {
+			for gid := range gids {
+				c.store.EnsureServingGroupInstanceID(nsn, groupName, gid)
+				return gid, nil
+			}
+		}
+		if len(gids) > 1 {
+			// Conflicting surviving Services with no active Pods/PodGroup in cache: verify zero live Pods, then drain stale Services.
+			livePods, listErr := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: labels.Set{workload.GroupNameLabelKey: groupName}.String(),
+			})
+			if listErr != nil {
+				return "", fmt.Errorf("list Pods for ServingGroup %s identity check: %w", groupName, listErr)
+			}
+			for i := range livePods.Items {
+				pod := &livePods.Items[i]
+				if utils.IsControlledByModelServing(pod, ms) && !isPodMarkedDeleting(pod) {
+					gid := utils.GetGroupInstanceID(pod)
+					c.store.EnsureServingGroupInstanceID(nsn, groupName, gid)
+					return gid, nil
+				}
+			}
+			if err := c.deleteStaleManagedServices(ctx, ms, managed); err != nil {
+				return "", err
+			}
+			c.enqueueModelServingAfter(ms, enqueueAfter)
+			return "", fmt.Errorf("drained conflicting podless Headless Services for ServingGroup %s; retrying", groupName)
+		}
+	}
 	id := utils.NewInstanceID()
 	c.store.EnsureServingGroupInstanceID(nsn, groupName, id)
-	return id
+	return id, nil
+}
+
+func (c *ModelServingController) deleteStaleManagedServices(ctx context.Context, ms *workload.ModelServing, services []*corev1.Service) error {
+	for _, svc := range services {
+		uid := svc.UID
+		if err := c.kubeClientSet.CoreV1().Services(ms.Namespace).Delete(ctx, svc.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid},
+		}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete stale Headless Service %s/%s: %w", ms.Namespace, svc.Name, err)
+		}
+	}
+	return nil
 }
 
 func (c *ModelServingController) resolveInstanceIDsForRoleCreate(
@@ -323,9 +427,11 @@ func (c *ModelServingController) resolveInstanceIDsForRoleCreate(
 	groupName, roleName, roleID string,
 ) (string, string, error) {
 	nsn := utils.GetNamespaceName(ms)
-	groupInstanceID := podgroupmanager.GroupInstanceIDFromContext(ctx)
-	if groupInstanceID == "" {
-		groupInstanceID, _ = c.store.GetServingGroupInstanceID(nsn, groupName)
+	groupInstanceID, groupIDSet := podgroupmanager.GroupInstanceIDSpecified(ctx)
+	if !groupIDSet {
+		if id, ok := c.store.GetServingGroupInstanceID(nsn, groupName); ok && id != "" {
+			groupInstanceID, groupIDSet = id, true
+		}
 	}
 	roleInstanceID, roleExists := c.store.GetRoleInstanceID(nsn, groupName, roleName, roleID)
 
@@ -336,7 +442,11 @@ func (c *ModelServingController) resolveInstanceIDsForRoleCreate(
 				if !utils.IsControlledByModelServing(pod, ms) {
 					continue
 				}
-				if isPodMarkedDeleting(pod) {
+				if pod.Annotations[workload.DeletingAnnotationKey] != "" {
+					c.enqueueModelServingAfter(ms, enqueueAfter)
+					return "", "", fmt.Errorf("Role %s/%s in ServingGroup %s still has deleting Pod %s", roleName, roleID, groupName, pod.Name)
+				}
+				if pod.DeletionTimestamp != nil {
 					if !roleExists || (roleInstanceID != "" && utils.GetRoleInstanceID(pod) != roleInstanceID) {
 						c.enqueueModelServingAfter(ms, enqueueAfter)
 						return "", "", fmt.Errorf("Role %s/%s in ServingGroup %s still has terminating Pod %s", roleName, roleID, groupName, pod.Name)
@@ -365,7 +475,11 @@ func (c *ModelServingController) resolveInstanceIDsForRoleCreate(
 			if !utils.IsControlledByModelServing(pod, ms) {
 				continue
 			}
-			if isPodMarkedDeleting(pod) {
+			if pod.Annotations[workload.DeletingAnnotationKey] != "" {
+				c.enqueueModelServingAfter(ms, enqueueAfter)
+				return "", "", fmt.Errorf("Role %s/%s in ServingGroup %s still has deleting Pod %s", roleName, roleID, groupName, pod.Name)
+			}
+			if pod.DeletionTimestamp != nil {
 				if !roleExists {
 					c.enqueueModelServingAfter(ms, enqueueAfter)
 					return "", "", fmt.Errorf("Role %s/%s in ServingGroup %s still has terminating Pod %s", roleName, roleID, groupName, pod.Name)
@@ -388,22 +502,48 @@ func (c *ModelServingController) resolveInstanceIDsForRoleCreate(
 
 	if roleInstanceID == "" && c.kubeClientSet != nil && len(ms.Spec.Plugins) > 0 {
 		entryName := utils.GeneratePodName(groupName, roleID, 0)
-		if svc, err := c.kubeClientSet.CoreV1().Services(ms.Namespace).Get(ctx, entryName, metav1.GetOptions{}); err == nil {
+		var managedSvcs []*corev1.Service
+		for _, svcName := range []string{entryName, plugins.DiscoveryServiceName(entryName)} {
+			svc, err := c.kubeClientSet.CoreV1().Services(ms.Namespace).Get(ctx, svcName, metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			if err != nil {
+				return "", "", fmt.Errorf("get Headless Service %s/%s for Role %s/%s identity check: %w", ms.Namespace, svcName, roleName, roleID, err)
+			}
 			if svcGroup, svcRole, svcID, ok := plugins.ManagedHeadlessServiceIdentity(svc, ms); ok && svcGroup == groupName && svcRole == roleName && svcID == roleID {
 				if svc.DeletionTimestamp != nil {
 					c.enqueueModelServingAfter(ms, enqueueAfter)
-					return "", "", fmt.Errorf("Headless Service %s/%s is terminating", ms.Namespace, entryName)
+					return "", "", fmt.Errorf("Headless Service %s/%s is terminating", ms.Namespace, svcName)
 				}
-				gid := utils.GetGroupInstanceID(svc)
-				rid := utils.GetRoleInstanceID(svc)
-				c.store.EnsureServingGroupInstanceID(nsn, groupName, gid)
-				c.store.EnsureRoleInstanceID(nsn, groupName, roleName, roleID, rid)
-				return gid, rid, nil
+				managedSvcs = append(managedSvcs, svc)
 			}
+		}
+		if len(managedSvcs) > 0 {
+			firstGID := utils.GetGroupInstanceID(managedSvcs[0])
+			firstRID := utils.GetRoleInstanceID(managedSvcs[0])
+			consistent := !groupIDSet || firstGID == groupInstanceID
+			for _, svc := range managedSvcs[1:] {
+				if utils.GetGroupInstanceID(svc) != firstGID || utils.GetRoleInstanceID(svc) != firstRID {
+					consistent = false
+					break
+				}
+			}
+			if !consistent {
+				// Zero live Pods exist in this slot (verified above); drain mismatched/inconsistent stale Services before creating replacement Pods.
+				if err := c.deleteStaleManagedServices(ctx, ms, managedSvcs); err != nil {
+					return "", "", err
+				}
+				c.enqueueModelServingAfter(ms, enqueueAfter)
+				return "", "", fmt.Errorf("drained stale Headless Services for Role %s/%s in ServingGroup %s before recreation", roleName, roleID, groupName)
+			}
+			c.store.EnsureServingGroupInstanceID(nsn, groupName, firstGID)
+			c.store.EnsureRoleInstanceID(nsn, groupName, roleName, roleID, firstRID)
+			return firstGID, firstRID, nil
 		}
 	}
 
-	if groupInstanceID == "" {
+	if !groupIDSet {
 		hasLegacyGroupObject := false
 		if c.podsInformer != nil {
 			if groupPods, err := c.getPodsByIndex(GroupNameKey, fmt.Sprintf("%s/%s", ms.Namespace, groupName)); err == nil {
@@ -479,13 +619,14 @@ func (c *ModelServingController) captureGroupInstanceIDsFromCache(ms *workload.M
 }
 
 // recoverDeletingUnitsOnSync reconstructs Deleting store states during initial controller
-// sync from two durable signals:
-//  1. Terminating Pods (DeletionTimestamp != nil)
-//  2. Partially-deleted Roles where worker Pods survive after the entry Pod ("-0") was
-//     already deleted (entry Pod is always created first and deleted first).
+// sync from durable signals:
+//  1. Explicit controller teardown tombstones (DeletingAnnotationKey: "serving-group" | "role")
+//  2. Terminating Pods (DeletionTimestamp != nil)
+//  3. Partially-deleted multi-Pod Roles under Recreate policies whose entry Pod ("-0") has
+//     already disappeared while worker Pods survive.
 func (c *ModelServingController) recoverDeletingUnitsOnSync(allPods []*corev1.Pod) {
 	for _, pod := range allPods {
-		if pod.DeletionTimestamp == nil {
+		if !isPodMarkedDeleting(pod) {
 			continue
 		}
 		ms, servingGroupName, err := c.getModelServingByChildResource(pod)
@@ -511,11 +652,19 @@ func (c *ModelServingController) recoverDeletingUnitsOnSync(allPods []*corev1.Po
 		if roleName != "" && roleID != "" {
 			c.store.EnsureRoleInstanceID(nsn, servingGroupName, roleName, roleID, podRID)
 		}
-		c.markUnitDeletingByRecoveryPolicy(ms, servingGroupName, roleName, roleID)
+		switch pod.Annotations[workload.DeletingAnnotationKey] {
+		case deletingScopeServingGroup:
+			c.markServingGroupDeleting(ms, servingGroupName)
+		case deletingScopeRole:
+			c.markRoleDeleting(ms, servingGroupName, roleName, roleID)
+		default:
+			c.markUnitDeletingByRecoveryPolicy(ms, servingGroupName, roleName, roleID)
+		}
 	}
 
-	// Detect partially-deleted multi-Pod units whose entry Pod ("-0") has already disappeared
-	// while worker Pods remain without DeletionTimestamp.
+	// Fallback for unannotated multi-Pod units under Recreate policies whose entry Pod ("-0")
+	// already disappeared while worker Pods remain. RecoveryPolicy=None relies on explicit
+	// DeletingAnnotationKey above so single-Pod entry loss still refills normally.
 	type roleUnitKey struct {
 		ns, msName, group, role, roleID, rid string
 	}
@@ -526,11 +675,14 @@ func (c *ModelServingController) recoverDeletingUnitsOnSync(allPods []*corev1.Po
 	}
 	observed := make(map[roleUnitKey]*roleObservation)
 	for _, pod := range allPods {
-		if pod.DeletionTimestamp != nil {
+		if isPodMarkedDeleting(pod) {
 			continue
 		}
 		ms, groupName, err := c.getModelServingByChildResource(pod)
 		if err != nil || c.shouldSkipHandling(ms, groupName, pod) {
+			continue
+		}
+		if ms.Spec.RecoveryPolicy == workload.NoneRestartPolicy {
 			continue
 		}
 		roleName, roleID := utils.GetRoleName(pod), utils.GetRoleID(pod)
@@ -556,20 +708,28 @@ func (c *ModelServingController) recoverDeletingUnitsOnSync(allPods []*corev1.Po
 	}
 }
 
+func (c *ModelServingController) markServingGroupDeleting(ms *workload.ModelServing, servingGroupName string) {
+	c.clearGroupRunningPods(ms, servingGroupName)
+	if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupDeleting); err != nil {
+		klog.Warningf("failed to recover Deleting status for ServingGroup %s: %v", servingGroupName, err)
+	}
+}
+
+func (c *ModelServingController) markRoleDeleting(ms *workload.ModelServing, servingGroupName, roleName, roleID string) {
+	if roleName == "" || roleID == "" {
+		return
+	}
+	if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, datastore.RoleDeleting); err != nil {
+		klog.Warningf("failed to recover Deleting status for Role %s/%s: %v", roleName, roleID, err)
+	}
+}
+
 func (c *ModelServingController) markUnitDeletingByRecoveryPolicy(ms *workload.ModelServing, servingGroupName, roleName, roleID string) {
-	nsn := utils.GetNamespaceName(ms)
 	switch ms.Spec.RecoveryPolicy {
 	case workload.ServingGroupRecreate:
-		c.clearGroupRunningPods(ms, servingGroupName)
-		if err := c.store.UpdateServingGroupStatus(nsn, servingGroupName, datastore.ServingGroupDeleting); err != nil {
-			klog.Warningf("failed to recover Deleting status for ServingGroup %s: %v", servingGroupName, err)
-		}
+		c.markServingGroupDeleting(ms, servingGroupName)
 	case workload.RoleRecreate:
-		if roleName != "" && roleID != "" {
-			if err := c.store.UpdateRoleStatus(nsn, servingGroupName, roleName, roleID, datastore.RoleDeleting); err != nil {
-				klog.Warningf("failed to recover Deleting status for Role %s/%s: %v", roleName, roleID, err)
-			}
-		}
+		c.markRoleDeleting(ms, servingGroupName, roleName, roleID)
 	}
 }
 

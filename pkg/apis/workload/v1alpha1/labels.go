@@ -39,4 +39,6 @@ const (
 
 	// InPlaceUpdateStateAnnotationKey is the pod annotation that records in-place update state.
 	InPlaceUpdateStateAnnotationKey = "modelserving.volcano.sh/inplace-update-state"
+	// DeletingAnnotationKey records controller-initiated teardown scope ("serving-group" or "role") on a Pod.
+	DeletingAnnotationKey = "modelserving.volcano.sh/deleting"
 )

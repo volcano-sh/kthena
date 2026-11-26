@@ -338,7 +338,7 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 	}
 	klog.V(4).Infof("updatePod: %s/%s, %v", newPod.Namespace, newPod.Name, newPod.Status.Phase)
 
-	if newPod.DeletionTimestamp != nil {
+	if newPod.DeletionTimestamp != nil || newPod.Annotations[workloadv1alpha1.DeletingAnnotationKey] != "" {
 		// If the pod is being deleted, we do not need to handle it.
 		// After deleted，following work will be done in deletePod.
 		return
@@ -348,7 +348,7 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 	// store: it would bring back a ServingGroup that was already deleted, with
 	// the revision of its former Pod. The check narrows that window but does
 	// not close it, because the handling below makes API calls.
-	if current, err := c.podsLister.Pods(newPod.Namespace).Get(newPod.Name); err != nil || current.UID != newPod.UID || current.DeletionTimestamp != nil {
+	if current, err := c.podsLister.Pods(newPod.Namespace).Get(newPod.Name); err != nil || current.UID != newPod.UID || current.DeletionTimestamp != nil || current.Annotations[workloadv1alpha1.DeletingAnnotationKey] != "" {
 		klog.V(2).Infof("ignoring the event of pod %s/%s (uid %s): it is gone, replaced or terminating", newPod.Namespace, newPod.Name, newPod.UID)
 		return
 	}
@@ -516,6 +516,9 @@ func (c *ModelServingController) recreatedSinceDeletion(ms *workloadv1alpha1.Mod
 			return false
 		}
 		podInstanceID := instanceIDOf(pod)
+		if deletedInstanceID != "" && podInstanceID == deletedInstanceID {
+			return false
+		}
 		if (deletedInstanceID == "" && podInstanceID == "") || podInstanceID == deletedInstanceID {
 			allDistinctInstanceID = false
 		}
@@ -783,7 +786,7 @@ func (c *ModelServingController) syncAll() {
 	}
 
 	for _, pod := range pods {
-		if pod.DeletionTimestamp != nil {
+		if isPodMarkedDeleting(pod) {
 			continue
 		}
 		c.addPod(pod)
@@ -1021,7 +1024,11 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 			return false
 		}
 		groupName := utils.GenerateServingGroupName(ms.Name, ordinal)
-		groupInstanceID := c.resolveGroupInstanceIDForCreate(ms, groupName)
+		groupInstanceID, err := c.resolveGroupInstanceIDForCreate(ctx, ms, groupName)
+		if err != nil {
+			scaleUpErr = err
+			return false
+		}
 		groupCtx := podgroupmanager.WithGroupInstanceID(ctx, groupInstanceID)
 		if err := c.createOrUpdatePodGroupByServingGroup(groupCtx, workload, groupName); err != nil {
 			scaleUpErr = err
@@ -1109,11 +1116,27 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 						errs = append(errs, historyErr)
 						continue
 					}
+					// If an old PodGroup still occupies this group name, drain the old
+					// ServingGroup incarnation with its original instance ID before switching IDs.
+					if c.podGroupManager != nil && c.podGroupManager.HasPodGroupCRD() {
+						if pgs, pgErr := c.getPodGroupsByIndex(GroupNameKey, fmt.Sprintf("%s/%s", ms.Namespace, group.Name)); pgErr == nil && len(pgs) > 0 {
+							if err := c.deleteServingGroup(ctx, ms, group.Name); err != nil {
+								errs = append(errs, err)
+							}
+							continue
+						}
+					}
 					// The whole unit may select a different worker layout. Align
 					// its gang requirements before creating the replacement Pods.
 					freshGroupInstanceID := utils.NewInstanceID()
 					groupCtx := podgroupmanager.WithGroupInstanceID(ctx, freshGroupInstanceID)
 					if err := c.createOrUpdatePodGroupByServingGroup(groupCtx, workload, group.Name); err != nil {
+						if errors.Is(err, podgroupmanager.ErrPodGroupInstanceMismatch) {
+							if delErr := c.deleteServingGroup(ctx, ms, group.Name); delErr != nil {
+								errs = append(errs, delErr)
+							}
+							continue
+						}
 						errs = append(errs, err)
 						continue
 					}
@@ -1721,7 +1744,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	replacements, deleteErr := deleteInstancePods(ctx, c.kubeClientSet, ms, selector, func(pod *corev1.Pod) bool {
 		return utils.GetRoleInstanceID(pod) == roleInstanceID &&
 			(groupInstanceID == "" || utils.GetGroupInstanceID(pod) == groupInstanceID)
-	})
+	}, deletingScopeRole)
 	if deleteErr != nil {
 		klog.Errorf("failed to delete pods of role %s/%s: %v", groupName, roleID, deleteErr)
 		return deleteErr
@@ -3428,7 +3451,7 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 	})
 	replacements, err := deleteInstancePods(ctx, c.kubeClientSet, ms, selector, func(pod *corev1.Pod) bool {
 		return utils.GetGroupInstanceID(pod) == groupInstanceID
-	})
+	}, deletingScopeServingGroup)
 	if err != nil {
 		return fmt.Errorf("failed to delete pods of ServingGroup %s: %v", servingGroupName, err)
 	}
@@ -3457,7 +3480,7 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 }
 
 func (c *ModelServingController) createOrUpdatePodGroupByServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
-	if podgroupmanager.GroupInstanceIDFromContext(ctx) == "" {
+	if _, specified := podgroupmanager.GroupInstanceIDSpecified(ctx); !specified {
 		if groupInstanceID, ok := c.store.GetServingGroupInstanceID(utils.GetNamespaceName(ms), servingGroupName); ok && groupInstanceID != "" {
 			ctx = podgroupmanager.WithGroupInstanceID(ctx, groupInstanceID)
 		}
@@ -3477,7 +3500,7 @@ func (c *ModelServingController) createOrUpdatePodGroupByServingGroup(ctx contex
 		if retryAfter > 0 {
 			klog.V(2).Infof("Retry syncing modelserving %s after %v: %v", servingGroupName, retryAfter, err)
 			c.enqueueModelServingAfter(ms, retryAfter)
-			return nil
+			return err
 		}
 		return fmt.Errorf("failed to update PodGroup for ServingGroup %s: %v", servingGroupName, err)
 	}

@@ -322,6 +322,11 @@ func TestCoordinatedScaleDownRetainsHistorySafetyForTheSurvivingGroup(t *testing
 				if action.GetResource().Resource != "pods" || action.GetVerb() == "list" || action.GetVerb() == "get" {
 					continue
 				}
+				if patch, ok := action.(clienttesting.PatchAction); ok {
+					require.Contains(t, patch.GetName(), discarded+"-", "deleting tombstone must only target the excess group")
+					require.Contains(t, string(patch.GetPatch()), api.DeletingAnnotationKey)
+					continue
+				}
 				deletion, ok := action.(clienttesting.DeleteAction)
 				require.True(t, ok, "only the selected excess group may have a Pod mutation; got %s", action.GetVerb())
 				require.Contains(t, deletion.GetName(), discarded+"-")

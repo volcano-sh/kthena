@@ -28,7 +28,9 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
+	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,9 +39,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	kt "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	volcanofake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
+	volcanolister "volcano.sh/apis/pkg/client/listers/scheduling/v1beta1"
 )
 
 func auxiliaryFixture(t *testing.T) (*ModelServingController, *kubefake.Clientset, *workload.ModelServing, *corev1.Service) {
@@ -594,4 +599,393 @@ func TestRestartWithTerminatingPodWaitsBeforeCreatingReplacement(t *testing.T) {
 		require.False(t, action.GetVerb() == "create" && action.GetResource().Resource == "pods",
 			"controller must not create a replacement Pod while the previous instance is still terminating")
 	}
+}
+
+func TestRestartMidMultiRoleGroupDeleteRecoversWholeGroupDeleting(t *testing.T) {
+	ctx := context.Background()
+	ms := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "multi-ms", Namespace: "default", UID: "ms-uid"},
+		Spec: workload.ModelServingSpec{
+			Replicas:       ptr.To[int32](1),
+			RecoveryPolicy: workload.RoleRecreate,
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{
+					{
+						Name:          "a-role",
+						Replicas:      ptr.To[int32](1),
+						EntryTemplate: workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+					},
+					{
+						Name:          "b-role",
+						Replicas:      ptr.To[int32](1),
+						EntryTemplate: workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+					},
+				},
+			},
+		},
+	}
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset(ms)
+	leader1, err := NewModelServingController(kubeClient, kthenaClient, volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+	require.NoError(t, leader1.modelServingsInformer.GetIndexer().Add(ms))
+	require.NoError(t, leader1.syncModelServing(ctx, "default/multi-ms"))
+
+	pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 2)
+	for i := range pods.Items {
+		pod := pods.Items[i].DeepCopy()
+		pod.UID = types.UID(pod.Name + "-uid")
+		_, err = kubeClient.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		require.NoError(t, leader1.podsInformer.GetIndexer().Add(pod))
+	}
+
+	// Simulate whole-group delete removing all Pods of a-role, then failing before deleting b-role.
+	kubeClient.PrependReactor("delete", "pods", func(a kt.Action) (bool, runtime.Object, error) {
+		if strings.Contains(a.(kt.DeleteAction).GetName(), "b-role") {
+			return true, nil, apierrors.NewServiceUnavailable("injected crash before b-role")
+		}
+		return false, nil, nil
+	})
+	require.ErrorContains(t, leader1.deleteServingGroup(ctx, ms, "multi-ms-0"), "injected crash before b-role")
+
+	// Restart into a fresh controller; only b-role's Pod remains, carrying the whole-group tombstone.
+	leader2, err := NewModelServingController(kubeClient, kthenaClient, volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+	require.NoError(t, leader2.modelServingsInformer.GetIndexer().Add(ms))
+	remaining, err := kubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, remaining.Items, 1)
+	require.Equal(t, deletingScopeServingGroup, remaining.Items[0].Annotations[workload.DeletingAnnotationKey])
+	require.NoError(t, leader2.podsInformer.GetIndexer().Add(&remaining.Items[0]))
+
+	leader2.syncAll()
+	require.Equal(t, datastore.ServingGroupDeleting, leader2.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "multi-ms-0"),
+		"whole-group deletion tombstone must recover ServingGroupDeleting even under RoleRecreate when only complete Roles survive")
+}
+
+func TestRestartMidRoleDeleteUnderNonePolicyRecoversDeletingWhilePreservingSinglePodRepair(t *testing.T) {
+	ctx := context.Background()
+	ms := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "none-ms", Namespace: "default", UID: "ms-uid"},
+		Spec: workload.ModelServingSpec{
+			Replicas:       ptr.To[int32](1),
+			RecoveryPolicy: workload.NoneRestartPolicy,
+			Template: workload.ServingGroup{
+				Roles: []workload.Role{{
+					Name:           "infer",
+					Replicas:       ptr.To[int32](1),
+					WorkerReplicas: 1,
+					EntryTemplate:  workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+					WorkerTemplate: &workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+				}},
+			},
+		},
+	}
+
+	t.Run("explicit controller teardown recovers RoleDeleting", func(t *testing.T) {
+		kubeClient := kubefake.NewSimpleClientset()
+		kthenaClient := kthenafake.NewSimpleClientset(ms)
+		leader1, err := NewModelServingController(kubeClient, kthenaClient, volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+		require.NoError(t, err)
+		require.NoError(t, leader1.modelServingsInformer.GetIndexer().Add(ms))
+		require.NoError(t, leader1.syncModelServing(ctx, "default/none-ms"))
+
+		pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+		require.NoError(t, err)
+		for i := range pods.Items {
+			pod := pods.Items[i].DeepCopy()
+			pod.UID = types.UID(pod.Name + "-uid")
+			_, err = kubeClient.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			require.NoError(t, leader1.podsInformer.GetIndexer().Add(pod))
+		}
+		kubeClient.PrependReactor("delete", "pods", func(a kt.Action) (bool, runtime.Object, error) {
+			if strings.HasSuffix(a.(kt.DeleteAction).GetName(), "-1") {
+				return true, nil, apierrors.NewServiceUnavailable("fail worker")
+			}
+			return false, nil, nil
+		})
+		require.ErrorContains(t, leader1.DeleteRole(ctx, ms, "none-ms-0", "infer", "infer-0"), "fail worker")
+
+		leader2, err := NewModelServingController(kubeClient, kthenaClient, volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+		require.NoError(t, err)
+		require.NoError(t, leader2.modelServingsInformer.GetIndexer().Add(ms))
+		remaining, err := kubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, remaining.Items, 1)
+		require.NoError(t, leader2.podsInformer.GetIndexer().Add(&remaining.Items[0]))
+
+		leader2.syncAll()
+		require.Equal(t, datastore.RoleDeleting, leader2.store.GetRoleStatus(utils.GetNamespaceName(ms), "none-ms-0", "infer", "infer-0"))
+	})
+
+	t.Run("accidental entry loss without tombstone stays repairable", func(t *testing.T) {
+		worker := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "none-ms-0-infer-0-1",
+				Namespace:       ms.Namespace,
+				UID:             "worker-uid",
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)},
+				Labels: map[string]string{
+					workload.ModelServingNameLabelKey: ms.Name,
+					workload.GroupNameLabelKey:        "none-ms-0",
+					workload.GroupInstanceIDLabelKey:  "gid-1",
+					workload.RoleLabelKey:             "infer",
+					workload.RoleIDKey:                "infer-0",
+					workload.RoleInstanceIDLabelKey:   "rid-1",
+				},
+			},
+		}
+		kubeClient := kubefake.NewSimpleClientset(worker)
+		kthenaClient := kthenafake.NewSimpleClientset(ms)
+		leader2, err := NewModelServingController(kubeClient, kthenaClient, volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+		require.NoError(t, err)
+		require.NoError(t, leader2.modelServingsInformer.GetIndexer().Add(ms))
+		require.NoError(t, leader2.podsInformer.GetIndexer().Add(worker))
+
+		leader2.syncAll()
+		require.NotEqual(t, datastore.RoleDeleting, leader2.store.GetRoleStatus(utils.GetNamespaceName(ms), "none-ms-0", "infer", "infer-0"))
+	})
+}
+
+func TestSurvivingDiscoveryOrLegacyServiceKeepsGroupAndRoleIDsConsistent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("surviving discovery-only Service is recovered without deadlock", func(t *testing.T) {
+		ms := &workload.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{Name: "disc-ms", Namespace: "default", UID: "ms-uid"},
+			Spec: workload.ModelServingSpec{
+				Replicas: ptr.To[int32](1),
+				Plugins:  []workload.PluginSpec{{Name: plugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}},
+				Template: workload.ServingGroup{
+					Roles: []workload.Role{{
+						Name:           "infer",
+						Replicas:       ptr.To[int32](1),
+						WorkerReplicas: 1,
+						EntryTemplate:  workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+						WorkerTemplate: &workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+					}},
+				},
+			},
+		}
+		entryName := utils.GeneratePodName("disc-ms-0", "infer-0", 0)
+		discoverySvc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            plugins.DiscoveryServiceName(entryName),
+				Namespace:       ms.Namespace,
+				UID:             "disc-uid",
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)},
+				Labels: map[string]string{
+					workload.ModelServingNameLabelKey:     ms.Name,
+					workload.GroupNameLabelKey:            "disc-ms-0",
+					workload.GroupInstanceIDLabelKey:      "gid-old",
+					workload.RoleLabelKey:                 "infer",
+					workload.RoleIDKey:                    "infer-0",
+					workload.RoleInstanceIDLabelKey:       "rid-old",
+					plugins.HeadlessServicePluginLabelKey: plugins.HeadlessServicePluginName,
+				},
+			},
+			Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
+		}
+		kubeClient := kubefake.NewSimpleClientset(discoverySvc)
+		c, err := NewModelServingController(kubeClient, kthenafake.NewSimpleClientset(ms), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+		require.NoError(t, err)
+		require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms))
+
+		require.NoError(t, c.syncModelServing(ctx, "default/disc-ms"))
+		pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, pods.Items, 2)
+		for _, pod := range pods.Items {
+			require.Equal(t, "gid-old", pod.Labels[workload.GroupInstanceIDLabelKey])
+			require.Equal(t, "rid-old", pod.Labels[workload.RoleInstanceIDLabelKey])
+		}
+		storeGID, ok := c.store.GetServingGroupInstanceID(utils.GetNamespaceName(ms), "disc-ms-0")
+		require.True(t, ok)
+		require.Equal(t, "gid-old", storeGID)
+	})
+
+	t.Run("legacy unlabeled Service keeps store and Pods consistent for later deletion", func(t *testing.T) {
+		ms := &workload.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{Name: "legacy-ms", Namespace: "default", UID: "ms-uid"},
+			Spec: workload.ModelServingSpec{
+				Replicas: ptr.To[int32](1),
+				Plugins:  []workload.PluginSpec{{Name: plugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}},
+				Template: workload.ServingGroup{
+					Roles: []workload.Role{{
+						Name:           "infer",
+						Replicas:       ptr.To[int32](1),
+						WorkerReplicas: 0,
+						EntryTemplate:  workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+						WorkerTemplate: &workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+					}},
+				},
+			},
+		}
+		entryName := utils.GeneratePodName("legacy-ms-0", "infer-0", 0)
+		legacySvc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            entryName,
+				Namespace:       ms.Namespace,
+				UID:             "legacy-svc-uid",
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)},
+				Labels: map[string]string{
+					workload.ModelServingNameLabelKey: ms.Name,
+					workload.GroupNameLabelKey:        "legacy-ms-0",
+					workload.RoleLabelKey:             "infer",
+					workload.RoleIDKey:                "infer-0",
+				},
+			},
+			Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone},
+		}
+		kubeClient := kubefake.NewSimpleClientset(legacySvc)
+		c, err := NewModelServingController(kubeClient, kthenafake.NewSimpleClientset(ms), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+		require.NoError(t, err)
+		require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms))
+
+		require.NoError(t, c.syncModelServing(ctx, "default/legacy-ms"))
+		storeGID, ok := c.store.GetServingGroupInstanceID(utils.GetNamespaceName(ms), "legacy-ms-0")
+		require.True(t, ok)
+		require.Empty(t, storeGID, "store must preserve empty legacy groupInstanceID to match Pods")
+		require.NoError(t, c.deleteServingGroup(ctx, ms, "legacy-ms-0"))
+		pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+		require.NoError(t, err)
+		require.Empty(t, pods.Items, "fenced group deletion must delete Pods matching legacy empty groupInstanceID")
+	})
+
+	t.Run("multi-role retry after entry Pod failure keeps one consistent group ID", func(t *testing.T) {
+		ms := &workload.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{Name: "pair-ms", Namespace: "default", UID: "ms-uid"},
+			Spec: workload.ModelServingSpec{
+				Replicas: ptr.To[int32](1),
+				Plugins:  []workload.PluginSpec{{Name: plugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}},
+				Template: workload.ServingGroup{
+					Roles: []workload.Role{
+						{
+							Name:           "prefill",
+							Replicas:       ptr.To[int32](1),
+							EntryTemplate:  workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+							WorkerTemplate: &workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+						},
+						{
+							Name:           "decode",
+							Replicas:       ptr.To[int32](1),
+							EntryTemplate:  workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+							WorkerTemplate: &workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}}},
+						},
+					},
+				},
+			},
+		}
+		kubeClient := kubefake.NewSimpleClientset()
+		failFirstPod := true
+		kubeClient.PrependReactor("create", "pods", func(kt.Action) (bool, runtime.Object, error) {
+			if failFirstPod {
+				failFirstPod = false
+				return true, nil, apierrors.NewServiceUnavailable("transient entry Pod create failure")
+			}
+			return false, nil, nil
+		})
+		c, err := NewModelServingController(kubeClient, kthenafake.NewSimpleClientset(ms), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+		require.NoError(t, err)
+		require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms))
+
+		require.ErrorContains(t, c.syncModelServing(ctx, "default/pair-ms"), "transient entry Pod create failure")
+		require.NoError(t, c.syncModelServing(ctx, "default/pair-ms"))
+		pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, pods.Items, 2)
+		gid0 := pods.Items[0].Labels[workload.GroupInstanceIDLabelKey]
+		gid1 := pods.Items[1].Labels[workload.GroupInstanceIDLabelKey]
+		require.NotEmpty(t, gid0)
+		require.Equal(t, gid0, gid1, "all Roles in the ServingGroup must share one authoritative groupInstanceID")
+	})
+}
+
+func TestRecreatedSinceDeletionShortCircuitsMatchingInstanceIDWithinSameSecond(t *testing.T) {
+	c, _, ms, _ := auxiliaryFixture(t)
+	ms.Spec.RecoveryPolicy = workload.RoleRecreate
+	now := metav1.Now()
+	surviving := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "cleanup-0-infer-0-1",
+			Namespace:         ms.Namespace,
+			UID:               "worker-uid",
+			CreationTimestamp: now,
+			OwnerReferences:   []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)},
+			Labels: map[string]string{
+				workload.ModelServingNameLabelKey: ms.Name,
+				workload.GroupNameLabelKey:        "cleanup-0",
+				workload.GroupInstanceIDLabelKey:  "gid-1",
+				workload.RoleLabelKey:             "infer",
+				workload.RoleIDKey:                "infer-0",
+				workload.RoleInstanceIDLabelKey:   "rid-1",
+			},
+		},
+	}
+	require.NoError(t, c.podsInformer.GetIndexer().Add(surviving))
+
+	deleted := surviving.DeepCopy()
+	deleted.Name = "cleanup-0-infer-0-0"
+	deleted.UID = "entry-uid"
+	deleted.DeletionTimestamp = &now
+	require.False(t, c.recreatedSinceDeletion(ms, "cleanup-0", deleted),
+		"a surviving Pod with the same non-empty roleInstanceID proves the Role was not recreated even within the same second")
+}
+
+func TestEmptyGroupRevisionSwitchDrainsOldPodGroupBeforeSwitchingID(t *testing.T) {
+	ctx := context.Background()
+	oldMS := appliedHistoryWorkload(workload.ServingGroupRollingUpdate, "image:v1", 0)
+	newMS := appliedHistoryWorkload(workload.ServingGroupRollingUpdate, "image:v2", 1)
+	oldMS.Spec.SchedulerName, newMS.Spec.SchedulerName = "volcano", "volcano"
+	groupName := utils.GenerateServingGroupName(newMS.Name, 0)
+
+	oldPG := &schedulingv1beta1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            groupName,
+			Namespace:       newMS.Namespace,
+			UID:             "old-pg-uid",
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(newMS, workload.ModelServingKind)},
+			Labels: map[string]string{
+				workload.ModelServingNameLabelKey: newMS.Name,
+				workload.GroupNameLabelKey:        groupName,
+				workload.GroupInstanceIDLabelKey:  "gid-old",
+			},
+		},
+	}
+
+	kubeClient := kubefake.NewSimpleClientset()
+	kthenaClient := kthenafake.NewSimpleClientset(newMS)
+	volcanoClient := volcanofake.NewSimpleClientset(oldPG)
+	apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+
+	c, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	require.NoError(t, err)
+	pgMgr := podgroupmanager.NewManager(kubeClient, volcanoClient, apiextClient, nil)
+	pgInformer := cache.NewSharedIndexInformer(&cache.ListWatch{}, &schedulingv1beta1.PodGroup{}, 0, cache.Indexers{
+		GroupNameKey: utils.GroupNameIndexFunc,
+	})
+	require.NoError(t, pgInformer.GetIndexer().Add(oldPG))
+	pgMgr.PodGroupInformer = pgInformer
+	pgMgr.PodGroupLister = volcanolister.NewPodGroupLister(pgInformer.GetIndexer())
+	c.podGroupManager = pgMgr
+
+	recordTestRevision(t, kubeClient, oldMS, "old")
+	recordTestRevision(t, kubeClient, newMS, "new")
+	nsn := utils.GetNamespaceName(newMS)
+	c.store.AddServingGroup(nsn, 0, "old")
+	c.store.EnsureServingGroupInstanceID(nsn, groupName, "gid-old")
+
+	// Empty group switching revisions while old PodGroup still exists must drain the old PodGroup
+	// using its original instance ID and UID instead of creating Pods against it.
+	require.NoError(t, c.syncRoleReplicas(c.withRevisionHistory(ctx, newMS), newMS, "new", nil))
+	pods, err := kubeClient.CoreV1().Pods(newMS.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Empty(t, pods.Items, "must not create Pods while old PodGroup is still draining")
+	require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(nsn, groupName))
+	_, err = volcanoClient.SchedulingV1beta1().PodGroups(newMS.Namespace).Get(ctx, groupName, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err), "old PodGroup must be deleted with its original instance ID and UID")
 }

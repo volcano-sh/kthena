@@ -92,17 +92,37 @@ func parseOldPodForUpdate(ar *admissionv1.AdmissionReview) (*corev1.Pod, error) 
 	return &oldPod, nil
 }
 
-func isControlledByAnyModelServing(pod *corev1.Pod) bool {
+func modelServingControllerOwner(pod *corev1.Pod) *metav1.OwnerReference {
 	if pod == nil {
-		return false
+		return nil
 	}
 	owner := metav1.GetControllerOf(pod)
-	return owner != nil &&
-		owner.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() &&
-		owner.Kind == workloadv1alpha1.ModelServingKind.Kind
+	if owner == nil ||
+		owner.APIVersion != workloadv1alpha1.SchemeGroupVersion.String() ||
+		owner.Kind != workloadv1alpha1.ModelServingKind.Kind {
+		return nil
+	}
+	return owner
+}
+
+func isControlledByAnyModelServing(pod *corev1.Pod) bool {
+	return modelServingControllerOwner(pod) != nil
+}
+
+func ownerRefsEqual(a, b *metav1.OwnerReference) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.APIVersion == b.APIVersion &&
+		a.Kind == b.Kind &&
+		a.Name == b.Name &&
+		a.UID == b.UID
 }
 
 func validatePodIdentityImmutable(oldPod, newPod *corev1.Pod) (bool, string) {
+	if !ownerRefsEqual(modelServingControllerOwner(oldPod), modelServingControllerOwner(newPod)) {
+		return false, "metadata.ownerReferences controlling ModelServing reference is immutable on ModelServing Pods"
+	}
 	for _, key := range immutablePodIdentityLabels {
 		oldVal, oldOK := oldPod.Labels[key]
 		newVal, newOK := newPod.Labels[key]
