@@ -100,7 +100,6 @@ func prefillerProxy(req *http.Request, timeout time.Duration, rt http.RoundTripp
 // c.Writer immediately would make c.Writer.Written() true and stop the retry loop on the very
 // first failed attempt. The caller decides when to call WriteTo — only once retries are
 // exhausted (or not retryable) and this is the response that will actually reach the client.
-// Currently only constructed for the OpenAI Responses API path; see decoderProxy.
 type DecodeUpstreamError struct {
 	StatusCode int
 	Header     http.Header
@@ -126,21 +125,16 @@ func decoderProxy(c *gin.Context, req *http.Request, timeout time.Duration, rt h
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if isResponsesRequest(c, req) {
-			// Chat Completions falls through without forwarding anything here
-			// (unchanged, pre-existing behavior). For Responses, capture the
-			// upstream status/headers/body instead of writing them now: the PD
-			// retry loop (proxyToPDDisaggregated) still needs the chance to try
-			// another prefill/decode pair, which it can only do while c.Writer
-			// stays unwritten. The caller forwards this via WriteTo once it
-			// decides no further retry will happen.
-			body, readErr := io.ReadAll(resp.Body)
-			if readErr != nil {
-				return 0, fmt.Errorf("failed to read decode error response with status %d: %w", resp.StatusCode, readErr)
-			}
-			return 0, &DecodeUpstreamError{StatusCode: resp.StatusCode, Header: resp.Header.Clone(), Body: body}
+		// Capture the upstream status/headers/body instead of writing them now:
+		// the PD retry loop (proxyToPDDisaggregated) still needs the chance to try
+		// another prefill/decode pair, which it can only do while c.Writer stays
+		// unwritten. The caller forwards this via WriteTo once it decides no
+		// further retry will happen.
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return 0, fmt.Errorf("failed to read decode error response with status %d: %w", resp.StatusCode, readErr)
 		}
-		return 0, fmt.Errorf("decode request failed with status %d", resp.StatusCode)
+		return 0, &DecodeUpstreamError{StatusCode: resp.StatusCode, Header: resp.Header.Clone(), Body: body}
 	}
 
 	copyResponseHeaders(c, resp.Header)

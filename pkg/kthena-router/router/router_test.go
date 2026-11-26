@@ -3719,6 +3719,105 @@ func TestDoRequestHonorsTimeout(t *testing.T) {
 	assert.GreaterOrEqual(t, elapsed, 250*time.Millisecond, "should not fail before the timeout")
 }
 
+// TestDoRequest_Non2xxReturnsDecodeUpstreamError verifies a non-2xx decode
+// response is returned as *connectors.DecodeUpstreamError carrying the body, so
+// the retry loop can forward the real status/body instead of masking it as 503.
+func TestDoRequest_Non2xxReturnsDecodeUpstreamError(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"maximum context length exceeded"}`)
+	}))
+	defer backend.Close()
+
+	host, port := splitHostPort(t, backend.URL)
+	req, err := http.NewRequest(http.MethodPost, backend.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	require.NoError(t, err)
+
+	resp, err := doRequest(req, host, port, 0, proxyTransport)
+	require.NotNil(t, resp)
+
+	var decodeErr *connectors.DecodeUpstreamError
+	require.ErrorAs(t, err, &decodeErr, "non-2xx must be a *DecodeUpstreamError so it can be forwarded")
+	assert.Equal(t, http.StatusBadRequest, decodeErr.StatusCode)
+	assert.Contains(t, string(decodeErr.Body), "maximum context length exceeded")
+}
+
+// TestProxy_ForwardsUpstream4xx verifies a deterministic 4xx from the decode
+// upstream is forwarded to the client (status + body) without retrying other
+// pods, instead of being retried into a 503.
+func TestProxy_ForwardsUpstream4xx(t *testing.T) {
+	var receivedBodies []string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/metrics":
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			return
+		case "/v1/models":
+			fmt.Fprint(w, `{"data":[]}`)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		receivedBodies = append(receivedBodies, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"maximum context length exceeded"}`)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendIP := backendURL.Hostname()
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", common.NewTransportRegistry())
+
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-4xx", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("base-model"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-4xx-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-4xx-2", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-4xx", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "4xx-model",
+			Rules: []*aiv1alpha1.Rule{
+				{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-4xx"}}},
+			},
+		},
+	}
+
+	store.AddOrUpdateModelServer(modelServer, sets.New(
+		types.NamespacedName{Name: "pod-4xx-1", Namespace: "default"},
+		types.NamespacedName{Name: "pod-4xx-2", Namespace: "default"},
+	))
+	store.AddOrUpdatePod(pod1, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdatePod(pod2, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdateModelRoute(modelRoute)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"4xx-model","prompt":"hi"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, "must forward the upstream 400, not retry into 503")
+	assert.Contains(t, w.Body.String(), "maximum context length exceeded")
+	assert.Len(t, receivedBodies, 1, "a deterministic 4xx must not be retried across pods")
+}
+
 // With no timeout configured the request is bounded only by its context
 func TestDoRequestWithoutTimeoutStillWaits(t *testing.T) {
 	release := make(chan struct{})

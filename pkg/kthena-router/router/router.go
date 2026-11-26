@@ -1069,6 +1069,13 @@ func (r *Router) proxy(
 			if c.Writer.Written() {
 				return err
 			}
+			var upstreamErr *connectors.DecodeUpstreamError
+			if errors.As(err, &upstreamErr) &&
+				upstreamErr.StatusCode >= 400 && upstreamErr.StatusCode < 500 {
+				// 4xx is deterministic: forward it without retrying another pod.
+				upstreamErr.WriteTo(c)
+				return upstreamErr
+			}
 			continue
 		}
 		// record in prefix cache
@@ -1540,7 +1547,11 @@ func doRequest(
 		resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp, fmt.Errorf("http resp error, http code is %d", resp.StatusCode)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return resp, fmt.Errorf("failed to read decode error response with status %d: %w", resp.StatusCode, readErr)
+		}
+		return resp, &connectors.DecodeUpstreamError{StatusCode: resp.StatusCode, Header: resp.Header.Clone(), Body: body}
 	}
 	return resp, nil
 }
@@ -1650,6 +1661,11 @@ func (r *Router) proxyToPDDisaggregated(
 			}
 			var responsesErr *connectors.DecodeUpstreamError
 			if errors.As(err, &responsesErr) {
+				// 4xx is deterministic: forward it without retrying another pair.
+				if responsesErr.StatusCode >= 400 && responsesErr.StatusCode < 500 {
+					responsesErr.WriteTo(c)
+					return responsesErr
+				}
 				lastResponsesErr = responsesErr
 			}
 			continue
@@ -1675,12 +1691,9 @@ func (r *Router) proxyToPDDisaggregated(
 	}
 
 	if !c.Writer.Written() {
-		// Every retry failed. If at least one attempt got a real (non-2xx) Responses
-		// upstream response rather than a connection-level failure, forward that
-		// response's actual status/headers/body instead of a generic 500 — this is
-		// the last one observed, matching the existing "last attempt wins" behavior
-		// implicit in this loop (accesslog.SetUpstreamInfo etc. also reflect only
-		// the final attempt).
+		// Every retry failed. Forward the last 5xx/connection response's actual
+		// status/headers/body instead of a generic 500. 4xx is forwarded earlier,
+		// so lastResponsesErr only holds 5xx here.
 		if lastResponsesErr != nil {
 			lastResponsesErr.WriteTo(c)
 			return lastResponsesErr

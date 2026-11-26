@@ -1053,8 +1053,11 @@ func TestDecoderProxy(t *testing.T) {
 				if tt.errorContains != "" {
 					assert.Contains(t, err.Error(), tt.errorContains)
 				}
-				// Unchanged pre-existing behavior for non-Responses paths: nothing
-				// is forwarded to the client on a non-2xx decode response.
+				// decoderProxy must not write; it returns *DecodeUpstreamError so
+				// the caller can forward the real upstream status/body.
+				var respErr *DecodeUpstreamError
+				require.ErrorAs(t, err, &respErr)
+				assert.Equal(t, tt.statusCode, respErr.StatusCode)
 				assert.Equal(t, http.StatusOK, w.Code)
 				assert.Empty(t, w.Body.String())
 			} else {
