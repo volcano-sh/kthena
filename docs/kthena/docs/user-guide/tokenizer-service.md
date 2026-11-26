@@ -125,6 +125,8 @@ Service environment variables (advanced, set via `extraEnv`):
 | `RENDERER_STARTUP_TIMEOUT_SECONDS` | `600`      | Max time for a renderer to become healthy (includes tokenizer download)        |
 | `RENDERER_MAX_RESTARTS`            | `3`        | Consecutive restarts allowed for a crashed renderer                            |
 | `RENDERER_STABLE_WINDOW_SECONDS`   | `600`      | How long a renderer must run while ready before its budget is restored         |
+| `RENDERER_BACKOFF_BASE_SECONDS`    | `0`        | Initial restart-delay (seconds); doubles on each consecutive failure up to max. Set to 0 to disable exponential backoff and retry immediately. |
+| `RENDERER_BACKOFF_MAX_SECONDS`     | `300`      | Maximum restart-delay cap when backoff is enabled (ignored when base is 0)     |
 | `HF_TOKEN`                         | —          | Hugging Face token for gated models                                            |
 | `HF_ENDPOINT`                      | —          | Alternative Hugging Face endpoint, e.g. a private mirror                       |
 

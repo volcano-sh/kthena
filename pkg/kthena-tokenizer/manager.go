@@ -77,10 +77,15 @@ type renderer struct {
 	exitedAt time.Time
 
 	// nextRetryAfter is the earliest time restartCrashed may relaunch this
-	// renderer. Zero means "retry immediately". Exponential backoff sets this
-	// field each time a restart is scheduled; it is cleared on a successful
-	// ready transition.
+	// renderer. Zero means "retry immediately". It is set when the renderer
+	// is observed to fail (in setFailed) and cleared on a successful ready
+	// transition.
 	nextRetryAfter time.Time
+	// consecutiveFailures counts how many times this renderer has failed since
+	// it last became ready. It drives the exponential backoff exponent and is
+	// reset to zero on each successful StatusReady transition. Unlike budgetUsed
+	// it is not capped by RendererMaxRestarts.
+	consecutiveFailures int
 
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
@@ -325,6 +330,7 @@ func (m *RendererManager) waitReady(r *renderer) {
 				r.lastErr = ""
 				r.readyAt = time.Now()
 				r.nextRetryAfter = time.Time{} // reset backoff on success
+				r.consecutiveFailures = 0      // reset backoff exponent on success
 				klog.Infof("Tokenizer for model %s ready at %s", r.model, r.endpoint())
 			}
 			m.mu.Unlock()
@@ -343,6 +349,13 @@ func (m *RendererManager) setFailed(r *renderer, msg string) {
 	}
 	r.status = StatusFailed
 	r.lastErr = msg
+	r.consecutiveFailures++
+	// Set the backoff window at failure-observation time, not at restart-schedule
+	// time, so that a slow startup failure (e.g. health-check timeout after 25s)
+	// doesn't consume the window before we ever get to restartCrashed.
+	if m.config.RendererBackoffBase > 0 {
+		r.nextRetryAfter = time.Now().Add(rendererBackoffDelay(m.config, r.consecutiveFailures))
+	}
 	klog.Errorf("Renderer for model %s failed: %s", r.model, msg)
 }
 
@@ -407,20 +420,21 @@ func (m *RendererManager) restartCrashed() {
 		}
 		r.restarts++
 		r.budgetUsed++
-		r.status = StatusLoading
-		// Schedule the next backoff window for the restart after this one.
-		// We set it now (before launch completes) so that a renderer crashing
-		// immediately does not get retried on the very next monitor tick.
-		if m.config.RendererBackoffBase > 0 {
-			r.nextRetryAfter = time.Now().Add(rendererBackoffDelay(m.config, r.restarts))
+		// A ready renderer that crashes exits without going through setFailed,
+		// so set the backoff window here for that case. For renderers that went
+		// through setFailed (startup failures) the window was already set there.
+		if r.status == StatusReady && m.config.RendererBackoffBase > 0 {
+			r.consecutiveFailures++
+			r.nextRetryAfter = time.Now().Add(rendererBackoffDelay(m.config, r.consecutiveFailures))
 		}
+		r.status = StatusLoading
 		toRestart = append(toRestart, r)
 	}
 	m.mu.Unlock()
 
 	for _, r := range toRestart {
-		klog.Warningf("Restarting renderer for model %s (%d/%d), next backoff window ends at %s",
-			r.model, r.budgetUsed, m.config.RendererMaxRestarts,
+		klog.Warningf("Restarting renderer for model %s (budget %d/%d, consecutive failures %d), next backoff window ends at %s",
+			r.model, r.budgetUsed, m.config.RendererMaxRestarts, r.consecutiveFailures,
 			func() string {
 				if r.nextRetryAfter.IsZero() {
 					return "none"

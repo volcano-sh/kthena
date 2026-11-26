@@ -102,7 +102,7 @@ func ConfigFromEnv() Config {
 		RendererStartupTimeout: time.Duration(envInt("RENDERER_STARTUP_TIMEOUT_SECONDS", 600)) * time.Second,
 		RendererMaxRestarts:    envInt("RENDERER_MAX_RESTARTS", 3),
 		RendererStableWindow:   time.Duration(envInt("RENDERER_STABLE_WINDOW_SECONDS", 600)) * time.Second,
-		RendererBackoffBase:    time.Duration(envInt("RENDERER_BACKOFF_BASE_SECONDS", 10)) * time.Second,
+		RendererBackoffBase:    time.Duration(envInt("RENDERER_BACKOFF_BASE_SECONDS", 0)) * time.Second,
 		RendererBackoffMax:     time.Duration(envInt("RENDERER_BACKOFF_MAX_SECONDS", 300)) * time.Second,
 		ProxyTimeout:           time.Duration(envInt("PROXY_TIMEOUT_SECONDS", 5)) * time.Second,
 	}

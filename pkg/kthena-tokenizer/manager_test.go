@@ -318,30 +318,30 @@ func TestRendererManagerBackoffDelaysRestart(t *testing.T) {
 	m.SetModels(map[string]struct{}{"served": {}})
 	waitForStatus(t, m, "served", StatusFailed)
 
-	// First explicit restart should proceed (nextRetryAfter is zero initially).
+	// setFailed() set nextRetryAfter at failure-observation time, so an
+	// immediate restartCrashed call must be suppressed by the backoff window.
 	m.restartCrashed()
-	waitForStatus(t, m, "served", StatusFailed)
 	infos := m.Snapshot()
 	require.Len(t, infos, 1)
-	assert.Equal(t, 1, infos[0].Restarts, "first restart should have fired")
-
-	// A second immediate call must be suppressed by the backoff window.
-	m.restartCrashed()
-	waitForStatus(t, m, "served", StatusFailed)
-	infos = m.Snapshot()
-	require.Len(t, infos, 1)
-	assert.Equal(t, 1, infos[0].Restarts, "second restart must be suppressed within backoff window")
+	assert.Equal(t, 0, infos[0].Restarts, "call within backoff window must be suppressed")
 
 	// After the window expires, the restart must proceed.
 	require.Eventually(t, func() bool {
 		m.restartCrashed()
 		for _, info := range m.Snapshot() {
-			if info.Model == "served" && info.Restarts >= 2 {
+			if info.Model == "served" && info.Restarts >= 1 {
 				return true
 			}
 		}
 		return false
 	}, 5*time.Second, 50*time.Millisecond, "restart should proceed after backoff window")
+
+	// Another immediate call after the restart must again be suppressed.
+	waitForStatus(t, m, "served", StatusFailed)
+	m.restartCrashed()
+	infos = m.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, 1, infos[0].Restarts, "second call within window must be suppressed")
 }
 
 // TestRendererManagerBackoffExponentialIncrease verifies that the delay doubles
@@ -437,12 +437,14 @@ func TestRendererManagerBackoffResetOnRecovery(t *testing.T) {
 		return false
 	}, 10*time.Second, 100*time.Millisecond, "renderer did not recover")
 
-	// Verify backoff was cleared: nextRetryAfter must be zero inside the
-	// renderer struct (checked via the internal map, which is package-private).
+	// Verify both backoff fields are cleared: nextRetryAfter must be zero and
+	// consecutiveFailures must be reset so the next crash starts from base delay.
 	m.mu.Lock()
 	r := m.renderers["served"]
 	m.mu.Unlock()
 	require.NotNil(t, r)
 	assert.True(t, r.nextRetryAfter.IsZero(),
 		"nextRetryAfter should be cleared after a successful ready transition")
+	assert.Equal(t, 0, r.consecutiveFailures,
+		"consecutiveFailures should reset to 0 after a successful ready transition")
 }
