@@ -3267,9 +3267,27 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 		expectedCount          int
 		groupStatuses          map[int]datastore.ServingGroupStatus // Index -> Status
 		podDeletionCosts       map[int]int                          // Index -> DeletionCost
+		unschedulableGroups    []int
 		expectedRemainingNames []string
 		description            string
 	}{
+		{
+			name:            "deletes unschedulable groups before groups that are starting",
+			existingIndices: []int{0, 1, 2, 3},
+			expectedCount:   3,
+			groupStatuses: map[int]datastore.ServingGroupStatus{
+				0: datastore.ServingGroupRunning,
+				1: datastore.ServingGroupCreating,
+				2: datastore.ServingGroupCreating,
+				3: datastore.ServingGroupCreating,
+			},
+			podDeletionCosts: map[int]int{
+				1: 1000, // High cost and low index, but the scheduler cannot place it
+			},
+			unschedulableGroups:    []int{1},
+			expectedRemainingNames: []string{"0", "2", "3"},
+			description:            "An unschedulable group should be deleted before other not-ready groups",
+		},
 		{
 			name:            "deletes groups that are still creating before running groups",
 			existingIndices: []int{0, 1, 2, 3},
@@ -3411,6 +3429,7 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      msName,
+					UID:       types.UID(fmt.Sprintf("%s-uid", msName)),
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](int32(tt.expectedCount)),
@@ -3452,6 +3471,9 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: ms.Namespace,
 						Name:      fmt.Sprintf("pod-%s", groupName),
+						OwnerReferences: []metav1.OwnerReference{
+							*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind),
+						},
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: msName,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -3467,6 +3489,13 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 						pod.Annotations = make(map[string]string)
 					}
 					pod.Annotations[PodDeletionCostAnnotation] = fmt.Sprintf("%d", cost)
+				}
+				if slices.Contains(tt.unschedulableGroups, ordinal) {
+					pod.Status.Conditions = []corev1.PodCondition{{
+						Type:   corev1.PodScheduled,
+						Status: corev1.ConditionFalse,
+						Reason: corev1.PodReasonUnschedulable,
+					}}
 				}
 
 				err := podIndexer.Add(pod)
@@ -3672,6 +3701,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      msName,
+					UID:       types.UID(fmt.Sprintf("%s-uid", msName)),
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](int32(tt.expectedCount)),
@@ -3719,6 +3749,9 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: ms.Namespace,
 						Name:      fmt.Sprintf("pod-%s", groupName),
+						OwnerReferences: []metav1.OwnerReference{
+							*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind),
+						},
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: msName,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -5477,6 +5510,7 @@ func TestCalculateServingGroupScore(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
 			Name:      "test-scoring",
+			UID:       "test-scoring-uid",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas:      ptr.To[int32](1),
@@ -5504,73 +5538,99 @@ func TestCalculateServingGroupScore(t *testing.T) {
 	}
 
 	tests := []struct {
-		name             string
-		groupStatus      datastore.ServingGroupStatus
-		podDeletionCost  int
-		expectedPriority int
-		description      string
+		name              string
+		groupStatus       datastore.ServingGroupStatus
+		podDeletionCost   int
+		unschedulable     bool
+		foreignUnschedPod bool
+		expectedPriority  int
+		description       string
 	}{
+		{
+			name:             "unschedulable_creating_status",
+			groupStatus:      datastore.ServingGroupCreating,
+			podDeletionCost:  50,
+			unschedulable:    true,
+			expectedPriority: PriorityServingGroupUnschedulable,
+			description:      "An unschedulable group should be deleted before other not-ready groups",
+		},
+		{
+			name:              "foreign_unschedulable_pod_ignored",
+			groupStatus:       datastore.ServingGroupCreating,
+			podDeletionCost:   50,
+			foreignUnschedPod: true,
+			expectedPriority:  PriorityServingGroupCreating,
+			description:       "An unschedulable Pod owned by another ModelServing must not affect priority",
+		},
+		{
+			name:             "unschedulable_pod_in_running_group",
+			groupStatus:      datastore.ServingGroupRunning,
+			podDeletionCost:  0,
+			unschedulable:    true,
+			expectedPriority: PriorityServingGroupRunning,
+			description:      "A Running group should stay protected",
+		},
 		{
 			name:             "creating_status",
 			groupStatus:      datastore.ServingGroupCreating,
 			podDeletionCost:  0,
-			expectedPriority: 0, // PriorityUnhealthy
+			expectedPriority: PriorityServingGroupCreating,
 			description:      "Creating status should not be ready",
 		},
 		{
 			name:             "scaling_status",
 			groupStatus:      datastore.ServingGroupScaling,
 			podDeletionCost:  0,
-			expectedPriority: 0, // PriorityUnhealthy
+			expectedPriority: PriorityServingGroupScaling,
 			description:      "Scaling status should not be ready",
 		},
 		{
 			name:             "notfound_status",
 			groupStatus:      datastore.ServingGroupNotFound,
 			podDeletionCost:  0,
-			expectedPriority: 0, // PriorityUnhealthy
+			expectedPriority: PriorityServingGroupNotFound,
 			description:      "NotFound status should not be ready",
 		},
 		{
 			name:             "running_status",
 			groupStatus:      datastore.ServingGroupRunning,
 			podDeletionCost:  0,
-			expectedPriority: 1, // PriorityHealthy
+			expectedPriority: PriorityServingGroupRunning,
 			description:      "Running status should be ready",
 		},
 		{
 			name:             "deleting_status",
 			groupStatus:      datastore.ServingGroupDeleting,
 			podDeletionCost:  0,
-			expectedPriority: 0, // PriorityUnhealthy
+			expectedPriority: PriorityServingGroupDeleting,
 			description:      "Deleting status should not be ready",
 		},
 		{
 			name:             "positive_deletion_cost",
 			groupStatus:      datastore.ServingGroupCreating,
 			podDeletionCost:  50,
-			expectedPriority: 0, // PriorityUnhealthy // Creating status is not ready
+			expectedPriority: PriorityServingGroupCreating,
 			description:      "Positive deletion cost with Creating status",
 		},
 		{
 			name:             "large_deletion_cost",
 			groupStatus:      datastore.ServingGroupRunning,
 			podDeletionCost:  500, // No longer capped
-			expectedPriority: 1,   // PriorityReady // Running status is ready
+			expectedPriority: PriorityServingGroupRunning,
 			description:      "Large deletion cost with Running status",
 		},
 		{
 			name:             "negative_deletion_cost",
 			groupStatus:      datastore.ServingGroupCreating,
 			podDeletionCost:  -500, // No longer capped
-			expectedPriority: 0,    // PriorityNotReady // Creating status is not ready
+			expectedPriority: PriorityServingGroupCreating,
 			description:      "Negative deletion cost with Creating status",
 		},
 		{
 			name:             "extra_positive_deletion_cost",
 			groupStatus:      datastore.ServingGroupRunning,
-			podDeletionCost:  99, //
-			expectedPriority: 1,  // PriorityReady // Running status is ready
+			podDeletionCost:  99,
+			expectedPriority: PriorityServingGroupRunning,
 			description:      "Positive deletion cost with Running status",
 		},
 	}
@@ -5587,10 +5647,16 @@ func TestCalculateServingGroupScore(t *testing.T) {
 
 			// Create a mock pod with deletion cost
 			podIndexer := controller.podsInformer.GetIndexer()
+			for _, obj := range podIndexer.List() {
+				require.NoError(t, podIndexer.Delete(obj))
+			}
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      "pod-test",
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind),
+					},
 					Labels: map[string]string{
 						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 						workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -5603,8 +5669,45 @@ func TestCalculateServingGroupScore(t *testing.T) {
 					},
 				},
 			}
+			if tt.unschedulable {
+				pod.Status.Conditions = []corev1.PodCondition{{
+					Type:   corev1.PodScheduled,
+					Status: corev1.ConditionFalse,
+					Reason: corev1.PodReasonUnschedulable,
+				}}
+			}
 			err := podIndexer.Add(pod)
 			assert.NoError(t, err)
+			if tt.foreignUnschedPod {
+				foreignMS := ms.DeepCopy()
+				foreignMS.UID = "previous-incarnation-uid"
+				foreignPod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Name:      "pod-foreign",
+						OwnerReferences: []metav1.OwnerReference{
+							*metav1.NewControllerRef(foreignMS, workloadv1alpha1.ModelServingKind),
+						},
+						Labels: map[string]string{
+							workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+							workloadv1alpha1.GroupNameLabelKey:        groupName,
+							workloadv1alpha1.RoleLabelKey:             "prefill",
+							workloadv1alpha1.RoleIDKey:                "prefill-0",
+						},
+						Annotations: map[string]string{
+							PodDeletionCostAnnotation: "-999",
+						},
+					},
+					Status: corev1.PodStatus{
+						Conditions: []corev1.PodCondition{{
+							Type:   corev1.PodScheduled,
+							Status: corev1.ConditionFalse,
+							Reason: corev1.PodReasonUnschedulable,
+						}},
+					},
+				}
+				assert.NoError(t, podIndexer.Add(foreignPod))
+			}
 
 			// Calculate score
 			score := controller.calculateServingGroupScore(ms, groupName)

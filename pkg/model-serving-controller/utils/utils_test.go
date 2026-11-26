@@ -575,3 +575,91 @@ func TestGetMaxSurgeForRole(t *testing.T) {
 		})
 	}
 }
+
+func TestPodUnschedulableSince(t *testing.T) {
+	since := metav1.NewTime(time.Date(2026, 11, 20, 6, 40, 0, 0, time.UTC))
+	createdAt := metav1.NewTime(time.Date(2026, 11, 20, 6, 39, 0, 0, time.UTC))
+	podScheduled := func(status corev1.ConditionStatus, reason string) corev1.PodCondition {
+		return corev1.PodCondition{Type: corev1.PodScheduled, Status: status, Reason: reason, LastTransitionTime: since}
+	}
+	tests := []struct {
+		name              string
+		pod               *corev1.Pod
+		conditions        []corev1.PodCondition
+		want              *metav1.Time
+		wantUnschedulable bool
+	}{
+		{name: "no pod"},
+		{name: "pod the scheduler has not seen yet", pod: &corev1.Pod{}},
+		{
+			name:              "unschedulable pod",
+			pod:               &corev1.Pod{},
+			conditions:        []corev1.PodCondition{podScheduled(corev1.ConditionFalse, corev1.PodReasonUnschedulable)},
+			want:              &since,
+			wantUnschedulable: true,
+		},
+		{
+			name: "unschedulable pod with other conditions",
+			pod:  &corev1.Pod{},
+			conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable},
+				podScheduled(corev1.ConditionFalse, corev1.PodReasonUnschedulable),
+			},
+			want:              &since,
+			wantUnschedulable: true,
+		},
+		{
+			name: "unschedulable pod with zero LastTransitionTime falls back to CreationTimestamp",
+			pod:  &corev1.Pod{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: createdAt}},
+			conditions: []corev1.PodCondition{{
+				Type:   corev1.PodScheduled,
+				Status: corev1.ConditionFalse,
+				Reason: corev1.PodReasonUnschedulable,
+			}},
+			want:              &createdAt,
+			wantUnschedulable: true,
+		},
+		{
+			name: "unschedulable pod with zero LastTransitionTime and zero CreationTimestamp returns nil time",
+			pod:  &corev1.Pod{},
+			conditions: []corev1.PodCondition{{
+				Type:   corev1.PodScheduled,
+				Status: corev1.ConditionFalse,
+				Reason: corev1.PodReasonUnschedulable,
+			}},
+			want:              nil,
+			wantUnschedulable: true,
+		},
+		{
+			name:       "gang member that fits and waits for the others",
+			pod:        &corev1.Pod{},
+			conditions: []corev1.PodCondition{podScheduled(corev1.ConditionFalse, "Schedulable")},
+		},
+		{
+			name:       "pod held by a scheduling gate",
+			pod:        &corev1.Pod{},
+			conditions: []corev1.PodCondition{podScheduled(corev1.ConditionFalse, corev1.PodReasonSchedulingGated)},
+		},
+		{
+			name:       "scheduler error",
+			pod:        &corev1.Pod{},
+			conditions: []corev1.PodCondition{podScheduled(corev1.ConditionFalse, corev1.PodReasonSchedulerError)},
+		},
+		{
+			name:       "scheduled pod",
+			pod:        &corev1.Pod{},
+			conditions: []corev1.PodCondition{podScheduled(corev1.ConditionTrue, "")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.pod != nil {
+				tt.pod.Status.Conditions = tt.conditions
+			}
+			got, ok := PodUnschedulableSince(tt.pod)
+			assert.Equal(t, tt.wantUnschedulable, ok)
+			assert.True(t, tt.want.Equal(got), "want %v, got %v", tt.want, got)
+		})
+	}
+}

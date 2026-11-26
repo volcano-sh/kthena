@@ -19,7 +19,8 @@ limitations under the License.
 package v1alpha1
 
 import (
-	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/client-go/applyconfigurations/meta/v1"
 )
 
 // ModelServingStatusApplyConfiguration represents a declarative configuration of the ModelServingStatus type for use
@@ -38,6 +39,12 @@ type ModelServingStatusApplyConfiguration struct {
 	UpdatedReplicas *int32 `json:"updatedReplicas,omitempty"`
 	// AvailableReplicas track the number of ServingGroup that are in ready state (updated or not).
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
+	// UnschedulableReplicas is the number of ServingGroups that wait for a node: the scheduler reported
+	// at least one of their Pods as unschedulable. They are never counted in AvailableReplicas.
+	UnschedulableReplicas *int32 `json:"unschedulableReplicas,omitempty"`
+	// UnschedulableSince is the time since which the oldest ServingGroup counted in UnschedulableReplicas
+	// has been unschedulable. It is recomputed on every sync and is unset when UnschedulableReplicas is 0.
+	UnschedulableSince *v1.Time `json:"unschedulableSince,omitempty"`
 	// CurrentRevision, if not empty, indicates the ControllerRevision version preserved by
 	// ServingGroups that have not been updated.
 	CurrentRevision *string `json:"currentRevision,omitempty"`
@@ -47,7 +54,7 @@ type ModelServingStatusApplyConfiguration struct {
 	// CollisionCount tracks hash collisions for ControllerRevision names.
 	CollisionCount *int32 `json:"collisionCount,omitempty"`
 	// Conditions track the condition of the ModelServing.
-	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
+	Conditions []metav1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	// LabelSelector is a label query over pods that should match the replica count.
 	LabelSelector *string `json:"labelSelector,omitempty"`
 }
@@ -98,6 +105,22 @@ func (b *ModelServingStatusApplyConfiguration) WithAvailableReplicas(value int32
 	return b
 }
 
+// WithUnschedulableReplicas sets the UnschedulableReplicas field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the UnschedulableReplicas field is set to the value of the last call.
+func (b *ModelServingStatusApplyConfiguration) WithUnschedulableReplicas(value int32) *ModelServingStatusApplyConfiguration {
+	b.UnschedulableReplicas = &value
+	return b
+}
+
+// WithUnschedulableSince sets the UnschedulableSince field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the UnschedulableSince field is set to the value of the last call.
+func (b *ModelServingStatusApplyConfiguration) WithUnschedulableSince(value v1.Time) *ModelServingStatusApplyConfiguration {
+	b.UnschedulableSince = &value
+	return b
+}
+
 // WithCurrentRevision sets the CurrentRevision field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the CurrentRevision field is set to the value of the last call.
@@ -125,7 +148,7 @@ func (b *ModelServingStatusApplyConfiguration) WithCollisionCount(value int32) *
 // WithConditions adds the given value to the Conditions field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the Conditions field.
-func (b *ModelServingStatusApplyConfiguration) WithConditions(values ...*v1.ConditionApplyConfiguration) *ModelServingStatusApplyConfiguration {
+func (b *ModelServingStatusApplyConfiguration) WithConditions(values ...*metav1.ConditionApplyConfiguration) *ModelServingStatusApplyConfiguration {
 	for i := range values {
 		if values[i] == nil {
 			panic("nil value passed to WithConditions")

@@ -18061,6 +18061,18 @@ spec:
                   have been created (updated or not, ready or not)
                 format: int32
                 type: integer
+              unschedulableReplicas:
+                description: |-
+                  UnschedulableReplicas is the number of ServingGroups that wait for a node: the scheduler reported
+                  at least one of their Pods as unschedulable. They are never counted in AvailableReplicas.
+                format: int32
+                type: integer
+              unschedulableSince:
+                description: |-
+                  UnschedulableSince is the time since which the oldest ServingGroup counted in UnschedulableReplicas
+                  has been unschedulable. It is recomputed on every sync and is unset when UnschedulableReplicas is 0.
+                format: date-time
+                type: string
               updateRevision:
                 description: |-
                   UpdateRevision, if not empty, indicates the ControllerRevision version targeted by

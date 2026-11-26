@@ -31,18 +31,21 @@ const (
 	PodDeletionCostAnnotation = corev1.PodDeletionCost
 
 	// Status priority constants: lower number = higher deletion priority (delete first)
-	// Priority levels:
-	//   0: Highest deletion priority - unhealthy or terminating states
-	//   1: Lowest deletion priority - healthy running state
 	//
 	// ServingGroup priorities:
-	PriorityServingGroupCreating = 0
-	PriorityServingGroupDeleting = 0
-	PriorityServingGroupScaling  = 0
-	PriorityServingGroupNotFound = 0
-	PriorityServingGroupRunning  = 1
+	//   0: Highest deletion priority - the scheduler cannot place the ServingGroup
+	//   1: Medium deletion priority - unhealthy or terminating states
+	//   2: Lowest deletion priority - healthy running state
+	PriorityServingGroupUnschedulable = 0
+	PriorityServingGroupCreating      = 1
+	PriorityServingGroupDeleting      = 1
+	PriorityServingGroupScaling       = 1
+	PriorityServingGroupNotFound      = 1
+	PriorityServingGroupRunning       = 2
 
 	// Role priorities:
+	//   0: Highest deletion priority - unhealthy or terminating states
+	//   1: Lowest deletion priority - healthy running state
 	PriorityRoleCreating = 0
 	PriorityRoleDeleting = 0
 	PriorityRoleNotFound = 0
@@ -153,7 +156,7 @@ func (c *ModelServingController) calculateRoleScore(ms *workloadv1alpha1.ModelSe
 }
 
 // calculateServingGroupScore calculates priority information for serving group scale-down with two-level sorting:
-// 1. Status readiness (primary): Not-ready groups should be deleted first
+// 1. Status readiness (primary): Unschedulable groups are deleted first, then the other not-ready groups
 // 2. Pod deletion cost (secondary): Among groups with same status, lower cost = delete first
 func (c *ModelServingController) calculateServingGroupScore(ms *workloadv1alpha1.ModelServing, groupName string) ServingGroupWithScore {
 	// Get serving group status from store
@@ -162,7 +165,7 @@ func (c *ModelServingController) calculateServingGroupScore(ms *workloadv1alpha1
 
 	// Get pod deletion cost as secondary factor
 	groupNameValue := fmt.Sprintf("%s/%s", ms.Namespace, groupName)
-	pods, err := c.getPodsByIndex(GroupNameKey, groupNameValue)
+	pods, err := c.ownedPodsByIndex(ms, GroupNameKey, groupNameValue)
 	if err != nil {
 		_, index := utils.GetParentNameAndOrdinal(groupName)
 		return ServingGroupWithScore{
@@ -170,6 +173,14 @@ func (c *ModelServingController) calculateServingGroupScore(ms *workloadv1alpha1
 			Priority:     priority,
 			DeletionCost: 0, // Default to 0 on error
 			Index:        index,
+		}
+	}
+
+	// A replica taken away because it does not fit here must not cost a group
+	// that is starting.
+	if priority != PriorityServingGroupRunning {
+		if _, unschedulable := unschedulableSince(pods); unschedulable {
+			priority = PriorityServingGroupUnschedulable
 		}
 	}
 

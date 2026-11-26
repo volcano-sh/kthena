@@ -344,7 +344,7 @@ func (c *ModelServingController) addPod(obj interface{}) {
 	c.updatePod(nil, obj)
 }
 
-func (c *ModelServingController) updatePod(_, newObj interface{}) {
+func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 	newPod, ok := newObj.(*corev1.Pod)
 	if !ok {
 		klog.Error("failed to parse newPod type when updatePod")
@@ -354,7 +354,17 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 
 	if newPod.DeletionTimestamp != nil {
 		// If the pod is being deleted, we do not need to handle it.
-		// After deleted，following work will be done in deletePod.
+		// After deleted, following work will be done in deletePod.
+		// However, an unschedulable Pod stops counting toward UnschedulableReplicas
+		// as soon as it starts terminating, so enqueue a status refresh on that transition.
+		oldPod, _ := oldObj.(*corev1.Pod)
+		if oldPod != nil && !utils.IsPodTerminating(oldPod) {
+			if _, wasUnschedulable := utils.PodUnschedulableSince(oldPod); wasUnschedulable {
+				if ms, servingGroupName, err := c.getModelServingByChildResource(newPod); err == nil && !c.shouldSkipHandling(ms, servingGroupName, newPod) {
+					c.enqueueModelServing(ms)
+				}
+			}
+		}
 		return
 	}
 	// Event handlers can lag behind the informer cache. An event about a Pod
@@ -379,6 +389,15 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 
 	if c.shouldSkipHandling(ms, servingGroupName, newPod) {
 		return
+	}
+
+	// An unschedulable Pod changes nothing in the store, but status reports the
+	// ServingGroups the scheduler cannot place and since when.
+	oldPod, _ := oldObj.(*corev1.Pod)
+	oldSince, oldUnschedulable := utils.PodUnschedulableSince(oldPod)
+	newSince, newUnschedulable := utils.PodUnschedulableSince(newPod)
+	if oldUnschedulable != newUnschedulable || !oldSince.Equal(newSince) {
+		c.enqueueModelServing(ms)
 	}
 
 	inPlaceState := inplace.StateOf(newPod)
@@ -2696,6 +2715,8 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 					currentRevision = copy.Status.CurrentRevision
 				}
 				needsUpdate := copy.Status.CurrentRevision != currentRevision || copy.Status.UpdateRevision != revision || copy.Status.LabelSelector != selector || conditionChanged
+				// If previously there were unschedulable replicas or timestamp, we need to update the status accordingly.
+				needsUpdate = needsUpdate || copy.Status.UnschedulableReplicas != 0 || copy.Status.UnschedulableSince != nil
 				if roleCoordination(latestMS) != nil && modelServingReplicas(latestMS) == 0 {
 					needsUpdate = needsUpdate || copy.Status.Replicas != 0 || copy.Status.AvailableReplicas != 0 || copy.Status.CurrentReplicas != 0 || copy.Status.UpdatedReplicas != 0 || copy.Status.ObservedGeneration != latestMS.Generation
 					copy.Status.Replicas, copy.Status.AvailableReplicas = 0, 0
@@ -2706,6 +2727,8 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 					needsUpdate = true
 				}
 				if needsUpdate {
+					copy.Status.UnschedulableReplicas = 0
+					copy.Status.UnschedulableSince = nil
 					copy.Status.CurrentRevision = currentRevision
 					copy.Status.UpdateRevision = revision
 					copy.Status.LabelSelector = selector
@@ -2723,6 +2746,9 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			return fmt.Errorf("failed to resolve rollout partition: %v", partitionErr)
 		}
 		available, updated := 0, 0
+		unschedulable := 0
+		// The time since which the oldest unschedulable group has been unschedulable.
+		var oldestUnschedulable *metav1.Time
 		progressingGroups, updatedGroups, currentGroups := []int{}, []int{}, []int{}
 		// Track revision counts to determine the most common non-updated revision (CurrentRevision)
 		revisionCount := make(map[string]int)
@@ -2784,6 +2810,16 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 					}
 				}
 				progressingGroups = append(progressingGroups, ordinal)
+				since, isUnschedulable, err := c.servingGroupUnschedulableSince(latestMS, group.Name)
+				if err != nil {
+					return fmt.Errorf("failed to check whether servingGroup %s is unschedulable: %v", group.Name, err)
+				}
+				if isUnschedulable {
+					unschedulable++
+					if since != nil && (oldestUnschedulable == nil || since.Before(oldestUnschedulable)) {
+						oldestUnschedulable = since
+					}
+				}
 			}
 
 			if c.compareServingGroupTemplate(ctx, latestMS, group, revision) == templateEquivalent {
@@ -2853,6 +2889,11 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			copy.Status.AvailableReplicas = int32(available)
 			copy.Status.UpdatedReplicas = int32(updated)
 			copy.Status.CurrentReplicas = int32(current)
+		}
+		if copy.Status.UnschedulableReplicas != int32(unschedulable) || !oldestUnschedulable.Equal(copy.Status.UnschedulableSince) {
+			shouldUpdate = true
+			copy.Status.UnschedulableReplicas = int32(unschedulable)
+			copy.Status.UnschedulableSince = oldestUnschedulable
 		}
 
 		revisionUpdated := false
@@ -3018,7 +3059,7 @@ func forEachMissingOrdinal(expectedCount int, existingOrdinals []int, limit int,
 }
 
 // scaleDownServingGroups scales down the ServingGroups to the expected count with two-level priority-based selection:
-// 1. Primary: Not-ready groups (Creating, NotFound) are deleted first
+// 1. Primary: Unschedulable groups are deleted first, then the other not-ready groups (Creating, NotFound)
 // 2. Secondary: Among groups with same status, lower deletion cost = delete first
 // Partition protects templates, not explicit replica-count decreases.
 func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {
