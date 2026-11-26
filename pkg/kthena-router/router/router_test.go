@@ -2913,8 +2913,9 @@ func TestRouter_HandlerFunc_ScheduleFailure(t *testing.T) {
 	// 4. Execute handler
 	router.HandlerFunc()(c)
 
-	// 5. Assertions
-	assert.Equal(t, http.StatusBadRequest, w.Code)
+	// 5. Assertions: every pod is saturated, which is a capacity problem on the
+	// server side, so the client gets a retryable 503 rather than a 400.
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 	assert.Contains(t, w.Body.String(), "can't schedule to target pod")
 }
 

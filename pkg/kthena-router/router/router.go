@@ -729,7 +729,10 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	err = r.scheduler.Schedule(ctx, pods)
 	if err != nil {
 		accesslog.SetError(c, "scheduling", fmt.Sprintf("can't schedule to target pod: %v", err))
-		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
+		// Every candidate pod was filtered out (for example, all saturated) or no
+		// prefill-decode pair is available. That is a backend capacity problem, not
+		// a bad request, so answer 503 like the no-available-pods case above.
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, fmt.Sprintf("can't schedule to target pod: %v", err))
 		return fmt.Errorf("can't schedule to target pod: %v", err)
 	}
 	r.finalizeSessionSticky(c, ctx, stickySpec, sessionKey, stickyStoreKey, stickyBinding, stickyBindingFound, modelServerName.Name)
