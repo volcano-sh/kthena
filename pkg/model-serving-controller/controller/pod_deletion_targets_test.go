@@ -66,13 +66,8 @@ func TestDeleteInstancePodsRetryNeverAbsorbsReplacements(t *testing.T) {
 	matchOld := func(pod *corev1.Pod) bool {
 		return pod.Labels[workload.RoleInstanceIDLabelKey] == "inst-old"
 	}
-	_, err := deleteInstancePods(ctx, client, ms, selector, matchOld, deletingScopeRole)
+	_, err := deleteInstancePods(ctx, client, ms, selector, matchOld)
 	require.ErrorContains(t, err, "retry")
-
-	// Verify tail Pod received the durable DeletingAnnotationKey before earlier Pods were deleted.
-	survivingB, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, "b", metav1.GetOptions{})
-	require.NoError(t, err)
-	assert.Equal(t, deletingScopeRole, survivingB.Annotations[workload.DeletingAnnotationKey])
 
 	replacementA := deletionTestPod(ms, "a", "inst-new")
 	replacementB := deletionTestPod(ms, "b", "inst-new")
@@ -84,7 +79,7 @@ func TestDeleteInstancePodsRetryNeverAbsorbsReplacements(t *testing.T) {
 	require.NoError(t, err)
 	_, err = client.CoreV1().Pods(ms.Namespace).Create(ctx, newPod, metav1.CreateOptions{})
 	require.NoError(t, err)
-	replacements, err := deleteInstancePods(ctx, client, ms, selector, matchOld, deletingScopeRole)
+	replacements, err := deleteInstancePods(ctx, client, ms, selector, matchOld)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a", "b", "c"}, replacements)
 	assert.Equal(t, map[string]int{"a": 1, "b": 1}, deletes)
@@ -117,9 +112,9 @@ func TestDeleteInstancePodsFenceReplacementBetweenListAndDelete(t *testing.T) {
 	matchOld := func(p *corev1.Pod) bool {
 		return p.Labels[workload.RoleInstanceIDLabelKey] == "inst-old"
 	}
-	_, err := deleteInstancePods(ctx, client, ms, labels.Everything(), matchOld, deletingScopeRole)
+	_, err := deleteInstancePods(ctx, client, ms, labels.Everything(), matchOld)
 	require.ErrorContains(t, err, "UID precondition")
-	replacements, err := deleteInstancePods(ctx, client, ms, labels.Everything(), matchOld, deletingScopeRole)
+	replacements, err := deleteInstancePods(ctx, client, ms, labels.Everything(), matchOld)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a"}, replacements)
 	assert.Equal(t, 1, deletes)
@@ -143,7 +138,7 @@ func TestDeleteInstancePodsOnlyCurrentControllerOwnedPods(t *testing.T) {
 	client := kubefake.NewSimpleClientset(owned, foreignUID, foreignName, nonController, foreignKind)
 	_, err := deleteInstancePods(ctx, client, ms, labels.Everything(), func(p *corev1.Pod) bool {
 		return p.Labels[workload.RoleInstanceIDLabelKey] == "inst-1"
-	}, deletingScopeRole)
+	})
 	require.NoError(t, err)
 	pods, err := client.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
@@ -169,9 +164,9 @@ func TestDeleteInstancePodsTerminatingPodSkipsDuplicateDelete(t *testing.T) {
 		return true, nil, nil
 	})
 	match := func(p *corev1.Pod) bool { return p.Labels[workload.RoleInstanceIDLabelKey] == "inst-1" }
-	_, err := deleteInstancePods(ctx, client, ms, labels.Everything(), match, deletingScopeRole)
+	_, err := deleteInstancePods(ctx, client, ms, labels.Everything(), match)
 	require.NoError(t, err)
-	_, err = deleteInstancePods(ctx, client, ms, labels.Everything(), match, deletingScopeRole)
+	_, err = deleteInstancePods(ctx, client, ms, labels.Everything(), match)
 	require.NoError(t, err)
 	assert.Equal(t, 1, deletes)
 	_, err = client.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})

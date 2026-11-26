@@ -338,7 +338,7 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 	}
 	klog.V(4).Infof("updatePod: %s/%s, %v", newPod.Namespace, newPod.Name, newPod.Status.Phase)
 
-	if newPod.DeletionTimestamp != nil || newPod.Annotations[workloadv1alpha1.DeletingAnnotationKey] != "" {
+	if newPod.DeletionTimestamp != nil {
 		// If the pod is being deleted, we do not need to handle it.
 		// After deleted，following work will be done in deletePod.
 		return
@@ -348,7 +348,7 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 	// store: it would bring back a ServingGroup that was already deleted, with
 	// the revision of its former Pod. The check narrows that window but does
 	// not close it, because the handling below makes API calls.
-	if current, err := c.podsLister.Pods(newPod.Namespace).Get(newPod.Name); err != nil || current.UID != newPod.UID || current.DeletionTimestamp != nil || current.Annotations[workloadv1alpha1.DeletingAnnotationKey] != "" {
+	if current, err := c.podsLister.Pods(newPod.Namespace).Get(newPod.Name); err != nil || current.UID != newPod.UID || current.DeletionTimestamp != nil {
 		klog.V(2).Infof("ignoring the event of pod %s/%s (uid %s): it is gone, replaced or terminating", newPod.Namespace, newPod.Name, newPod.UID)
 		return
 	}
@@ -1744,7 +1744,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	replacements, deleteErr := deleteInstancePods(ctx, c.kubeClientSet, ms, selector, func(pod *corev1.Pod) bool {
 		return utils.GetRoleInstanceID(pod) == roleInstanceID &&
 			(groupInstanceID == "" || utils.GetGroupInstanceID(pod) == groupInstanceID)
-	}, deletingScopeRole)
+	})
 	if deleteErr != nil {
 		klog.Errorf("failed to delete pods of role %s/%s: %v", groupName, roleID, deleteErr)
 		return deleteErr
@@ -3451,7 +3451,7 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 	})
 	replacements, err := deleteInstancePods(ctx, c.kubeClientSet, ms, selector, func(pod *corev1.Pod) bool {
 		return utils.GetGroupInstanceID(pod) == groupInstanceID
-	}, deletingScopeServingGroup)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to delete pods of ServingGroup %s: %v", servingGroupName, err)
 	}

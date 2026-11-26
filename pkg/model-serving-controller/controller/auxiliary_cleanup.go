@@ -19,7 +19,6 @@ package controller
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -28,7 +27,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
@@ -38,11 +36,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
-)
-
-const (
-	deletingScopeServingGroup = "serving-group"
-	deletingScopeRole         = "role"
 )
 
 // finishPendingDeletions retries failed API requests before any new capacity can
@@ -244,16 +237,13 @@ func (c *ModelServingController) stableCapacityFillsOrphanSlot(ctx context.Conte
 
 // deleteInstancePods submits named, UID-fenced deletions for controlled Pods matching matchInstance
 // in deterministic order (entry Pod "-0" first, followed by workers) without relying on any
-// in-memory deletion target map. When deleting multiple non-terminating Pods, it stamps a durable
-// DeletingAnnotationKey with deletingScope on the tail Pod first so controller restarts recover
-// the exact teardown scope regardless of RecoveryPolicy or partial multi-Role progress.
+// in-memory deletion target map.
 func deleteInstancePods(
 	ctx context.Context,
 	client kubernetes.Interface,
 	ms *workload.ModelServing,
 	selector labels.Selector,
 	matchInstance func(*corev1.Pod) bool,
-	deletingScope string,
 ) ([]string, error) {
 	if client == nil || ms == nil || selector == nil {
 		return nil, fmt.Errorf("Pod deletion requires Kubernetes client, ModelServing and selector")
@@ -279,34 +269,6 @@ func deleteInstancePods(
 	})
 	slices.Sort(replacements)
 
-	var nonTerminating []*corev1.Pod
-	alreadyStamped := false
-	for _, pod := range targets {
-		if pod.Annotations[workload.DeletingAnnotationKey] == deletingScope {
-			alreadyStamped = true
-		}
-		if pod.DeletionTimestamp == nil {
-			nonTerminating = append(nonTerminating, pod)
-		}
-	}
-	if deletingScope != "" && len(nonTerminating) >= 2 && !alreadyStamped {
-		anchor := nonTerminating[len(nonTerminating)-1]
-		patch, marshalErr := json.Marshal(map[string]any{
-			"metadata": map[string]any{
-				"uid": anchor.UID,
-				"annotations": map[string]string{
-					workload.DeletingAnnotationKey: deletingScope,
-				},
-			},
-		})
-		if marshalErr == nil {
-			if _, patchErr := pods.Patch(ctx, anchor.Name, types.MergePatchType, patch, metav1.PatchOptions{}); patchErr != nil &&
-				!apierrors.IsNotFound(patchErr) && !apierrors.IsInvalid(patchErr) && !apierrors.IsConflict(patchErr) {
-				return nil, fmt.Errorf("mark Pod %s/%s deleting: %w", ms.Namespace, anchor.Name, patchErr)
-			}
-		}
-	}
-
 	for _, pod := range targets {
 		if pod.DeletionTimestamp != nil {
 			continue
@@ -320,7 +282,7 @@ func deleteInstancePods(
 }
 
 func isPodMarkedDeleting(pod *corev1.Pod) bool {
-	return pod != nil && (pod.DeletionTimestamp != nil || pod.Annotations[workload.DeletingAnnotationKey] != "")
+	return pod != nil && pod.DeletionTimestamp != nil
 }
 
 func (c *ModelServingController) resolveGroupInstanceIDForCreate(ctx context.Context, ms *workload.ModelServing, groupName string) (string, error) {
@@ -442,10 +404,6 @@ func (c *ModelServingController) resolveInstanceIDsForRoleCreate(
 				if !utils.IsControlledByModelServing(pod, ms) {
 					continue
 				}
-				if pod.Annotations[workload.DeletingAnnotationKey] != "" {
-					c.enqueueModelServingAfter(ms, enqueueAfter)
-					return "", "", fmt.Errorf("Role %s/%s in ServingGroup %s still has deleting Pod %s", roleName, roleID, groupName, pod.Name)
-				}
 				if pod.DeletionTimestamp != nil {
 					if !roleExists || (roleInstanceID != "" && utils.GetRoleInstanceID(pod) != roleInstanceID) {
 						c.enqueueModelServingAfter(ms, enqueueAfter)
@@ -474,10 +432,6 @@ func (c *ModelServingController) resolveInstanceIDsForRoleCreate(
 			pod := &listed.Items[i]
 			if !utils.IsControlledByModelServing(pod, ms) {
 				continue
-			}
-			if pod.Annotations[workload.DeletingAnnotationKey] != "" {
-				c.enqueueModelServingAfter(ms, enqueueAfter)
-				return "", "", fmt.Errorf("Role %s/%s in ServingGroup %s still has deleting Pod %s", roleName, roleID, groupName, pod.Name)
 			}
 			if pod.DeletionTimestamp != nil {
 				if !roleExists {
@@ -620,13 +574,12 @@ func (c *ModelServingController) captureGroupInstanceIDsFromCache(ms *workload.M
 
 // recoverDeletingUnitsOnSync reconstructs Deleting store states during initial controller
 // sync from durable signals:
-//  1. Explicit controller teardown tombstones (DeletingAnnotationKey: "serving-group" | "role")
-//  2. Terminating Pods (DeletionTimestamp != nil)
-//  3. Partially-deleted multi-Pod Roles under Recreate policies whose entry Pod ("-0") has
+//  1. Terminating Pods (DeletionTimestamp != nil)
+//  2. Partially-deleted multi-Pod Roles under Recreate policies whose entry Pod ("-0") has
 //     already disappeared while worker Pods survive.
 func (c *ModelServingController) recoverDeletingUnitsOnSync(allPods []*corev1.Pod) {
 	for _, pod := range allPods {
-		if !isPodMarkedDeleting(pod) {
+		if pod.DeletionTimestamp == nil {
 			continue
 		}
 		ms, servingGroupName, err := c.getModelServingByChildResource(pod)
@@ -652,19 +605,12 @@ func (c *ModelServingController) recoverDeletingUnitsOnSync(allPods []*corev1.Po
 		if roleName != "" && roleID != "" {
 			c.store.EnsureRoleInstanceID(nsn, servingGroupName, roleName, roleID, podRID)
 		}
-		switch pod.Annotations[workload.DeletingAnnotationKey] {
-		case deletingScopeServingGroup:
-			c.markServingGroupDeleting(ms, servingGroupName)
-		case deletingScopeRole:
-			c.markRoleDeleting(ms, servingGroupName, roleName, roleID)
-		default:
-			c.markUnitDeletingByRecoveryPolicy(ms, servingGroupName, roleName, roleID)
-		}
+		c.markUnitDeletingByRecoveryPolicy(ms, servingGroupName, roleName, roleID)
 	}
 
-	// Fallback for unannotated multi-Pod units under Recreate policies whose entry Pod ("-0")
-	// already disappeared while worker Pods remain. RecoveryPolicy=None relies on explicit
-	// DeletingAnnotationKey above so single-Pod entry loss still refills normally.
+	// Detect partially-deleted multi-Pod units under Recreate policies whose entry Pod ("-0")
+	// already disappeared while worker Pods remain. Under RecoveryPolicy=None, single-Pod entry
+	// loss continues to be refilled normally.
 	type roleUnitKey struct {
 		ns, msName, group, role, roleID, rid string
 	}

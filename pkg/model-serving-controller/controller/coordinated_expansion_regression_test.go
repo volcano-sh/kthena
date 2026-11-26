@@ -203,18 +203,8 @@ func TestCoordinatedExpansionCountsFormalStartsAgainstLaterReplacement(t *testin
 				if action.GetResource().Resource != "pods" || action.GetVerb() == "get" || action.GetVerb() == "list" || action.GetVerb() == "watch" {
 					continue
 				}
+				mutations++
 				if method == api.RecreateUpdateMethod {
-					if patch, ok := action.(clienttesting.PatchAction); ok {
-						// Recreate stamps a UID-fenced deleting tombstone on the tail Pod of the selected Role before deleting.
-						previous, exists := original[patch.GetName()]
-						require.True(t, exists)
-						_, ordinal := utils.GetParentNameAndOrdinal(utils.GetRoleID(previous))
-						require.Equal(t, 3, ordinal, "deleting tombstone must only touch the selected Role")
-						require.Contains(t, string(patch.GetPatch()), api.DeletingAnnotationKey)
-						require.Contains(t, string(patch.GetPatch()), string(previous.UID))
-						continue
-					}
-					mutations++
 					deletion, ok := action.(clienttesting.DeleteAction)
 					require.True(t, ok, "Recreate deletes each original member with its UID")
 					previous, exists := original[deletion.GetName()]
@@ -225,7 +215,6 @@ func TestCoordinatedExpansionCountsFormalStartsAgainstLaterReplacement(t *testin
 					require.Equal(t, previous.UID, *deletion.GetDeleteOptions().Preconditions.UID)
 					deletedRoles[utils.GetRoleID(previous)]++
 				} else {
-					mutations++
 					patch, ok := action.(clienttesting.PatchAction)
 					require.True(t, ok, "InPlace must preserve the admitted Role's Pod identities")
 					previous, exists := original[patch.GetName()]
