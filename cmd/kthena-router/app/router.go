@@ -311,6 +311,14 @@ func newListenerHandler(cfg listenerConfig) http.Handler {
 // startListener builds the HTTP handler, listens, and gracefully shuts down on ctx.
 // It returns nil without listening once the router is shutting down.
 func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
+	return startListenerWithHandler(ctx, cfg, newListenerHandler(cfg))
+}
+
+func startListenerWithHandler(
+	ctx context.Context,
+	cfg listenerConfig,
+	handler http.Handler,
+) *http.Server {
 	if !cfg.listeners.add() {
 		klog.Infof("Not starting listener on %s: the router is shutting down", cfg.addr)
 		return nil
@@ -319,10 +327,10 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 	// Closing a connection does not always cancel its request's context: once
 	// a client has pipelined another request, net/http stops watching the
 	// connection. Requests therefore use a context that the drain cancels.
-	requestCtx, cancelRequests := context.WithCancel(context.Background())
+	requestCtx, cancelRequests := context.WithCancelCause(context.Background())
 	srv := &http.Server{
 		Addr:        cfg.addr,
-		Handler:     cfg.requests.track(newListenerHandler(cfg)),
+		Handler:     cfg.requests.track(handler),
 		BaseContext: func(net.Listener) context.Context { return requestCtx },
 	}
 
@@ -348,7 +356,7 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 
 	go func() {
 		defer cfg.listeners.done()
-		defer cancelRequests()
+		defer cancelRequests(context.Canceled)
 		<-ctx.Done()
 		klog.Info(cfg.shutdownStartLog)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.drainTimeout)
@@ -362,6 +370,8 @@ func startListener(ctx context.Context, cfg listenerConfig) *http.Server {
 				}
 				klog.Warningf("Drain timeout exceeded after %vs: %d requests still inflight, force-closing",
 					cfg.drainTimeout.Seconds(), remaining)
+
+				cancelRequests(router.ErrForcedDrain)
 				srv.Close()
 			} else {
 				cfg.logShutdownErr(err)
