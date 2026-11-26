@@ -21,13 +21,11 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"maps"
-	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
@@ -37,15 +35,6 @@ const (
 	HeadlessServicePluginName     = "headless-service"
 	HeadlessServicePluginLabelKey = "modelserving.volcano.sh/plugin"
 )
-
-// RoleCleanup retains only in-process auxiliary deletion targets. It never
-// establishes workload membership and is discarded when the Role is gone.
-// After restart, normal reconciliation independently identifies orphan resources.
-type RoleCleanup struct {
-	mu      sync.Mutex
-	targets map[string]types.UID
-	done    map[string]bool
-}
 
 type HeadlessServicePlugin struct {
 	BasePlugin
@@ -98,7 +87,7 @@ func (p *HeadlessServicePlugin) OnRoleSync(ctx context.Context, req *HookRequest
 	return p.ensureService(ctx, req, req.RoleIndex)
 }
 
-func roleSelector(req *HookRequest) map[string]string {
+func roleSlotSelector(req *HookRequest) map[string]string {
 	return map[string]string{
 		workloadv1alpha1.GroupNameLabelKey: req.ServingGroup,
 		workloadv1alpha1.RoleLabelKey:      req.RoleName,
@@ -106,36 +95,17 @@ func roleSelector(req *HookRequest) map[string]string {
 	}
 }
 
-// Capture freezes auxiliary UIDs before any Pod deletion can trigger callbacks.
-func (c *RoleCleanup) Capture(ctx context.Context, req *HookRequest) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.capture(ctx, req)
+func roleSelector(req *HookRequest) map[string]string {
+	sel := roleSlotSelector(req)
+	if req.RoleInstanceID != "" {
+		sel[workloadv1alpha1.RoleInstanceIDLabelKey] = req.RoleInstanceID
+	}
+	return sel
 }
 
-func (c *RoleCleanup) capture(ctx context.Context, req *HookRequest) error {
-	if req.KubeClient == nil {
-		return fmt.Errorf("Kubernetes client is not initialized")
-	}
-	services := req.KubeClient.CoreV1().Services(req.ModelServing.Namespace)
-	entry := utils.GeneratePodName(req.ServingGroup, req.RoleID, 0)
-	if c.targets == nil {
-		targets := map[string]types.UID{}
-		for _, name := range []string{entry, DiscoveryServiceName(entry)} {
-			service, err := services.Get(ctx, name, metav1.GetOptions{})
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			if err != nil {
-				return fmt.Errorf("get Headless Service %s/%s: %w", req.ModelServing.Namespace, name, err)
-			}
-			if isManagedHeadlessService(service, req.ModelServing, req.ServingGroup, req.RoleName, req.RoleID) {
-				targets[name] = service.UID
-			}
-		}
-		c.targets, c.done = targets, map[string]bool{}
-	}
-	return nil
+func serviceMatchesHookInstance(service *corev1.Service, req *HookRequest) bool {
+	return service.Labels[workloadv1alpha1.RoleInstanceIDLabelKey] == req.RoleInstanceID &&
+		service.Labels[workloadv1alpha1.GroupInstanceIDLabelKey] == req.GroupInstanceID
 }
 
 func (p *HeadlessServicePlugin) OnRoleDelete(ctx context.Context, req *HookRequest) error {
@@ -145,39 +115,26 @@ func (p *HeadlessServicePlugin) OnRoleDelete(ctx context.Context, req *HookReque
 	if req.KubeClient == nil {
 		return fmt.Errorf("Kubernetes client is not initialized")
 	}
-	cleanup := req.Cleanup
-	if cleanup == nil {
-		cleanup = &RoleCleanup{}
-	}
-	cleanup.mu.Lock()
-	defer cleanup.mu.Unlock()
 	services := req.KubeClient.CoreV1().Services(req.ModelServing.Namespace)
-	if err := cleanup.capture(ctx, req); err != nil {
-		return err
-	}
-
-	for name, uid := range cleanup.targets {
-		if cleanup.done[name] {
-			continue
-		}
+	entry := utils.GeneratePodName(req.ServingGroup, req.RoleID, 0)
+	for _, name := range []string{entry, DiscoveryServiceName(entry)} {
 		service, err := services.Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
-			cleanup.done[name] = true
 			continue
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("get Headless Service %s/%s: %w", req.ModelServing.Namespace, name, err)
 		}
-		// A retry never transfers an old deletion decision to a replacement UID.
-		if service.UID != uid || !isManagedHeadlessService(service, req.ModelServing, req.ServingGroup, req.RoleName, req.RoleID) {
-			cleanup.done[name] = true
+		// Only delete Services owned by this ModelServing and matching the target Role incarnation.
+		if !isManagedHeadlessService(service, req.ModelServing, req.ServingGroup, req.RoleName, req.RoleID) ||
+			!serviceMatchesHookInstance(service, req) {
 			continue
 		}
+		uid := service.UID
 		err = services.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete Headless Service %s/%s: %w", req.ModelServing.Namespace, name, err)
 		}
-		cleanup.done[name] = true
 	}
 	return nil
 }
@@ -191,7 +148,7 @@ func (p *HeadlessServicePlugin) ensureService(ctx context.Context, req *HookRequ
 	}
 	ms := req.ModelServing
 	entry := utils.GeneratePodName(req.ServingGroup, req.RoleID, 0)
-	pods, err := req.KubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(roleSelector(req)).String()})
+	pods, err := req.KubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(roleSlotSelector(req)).String()})
 	if err != nil {
 		return err
 	}
@@ -207,6 +164,9 @@ func (p *HeadlessServicePlugin) ensureService(ctx context.Context, req *HookRequ
 			selector[workloadv1alpha1.EntryLabelKey] = "true"
 		}
 		managedLabels := roleSelector(req)
+		if req.GroupInstanceID != "" {
+			managedLabels[workloadv1alpha1.GroupInstanceIDLabelKey] = req.GroupInstanceID
+		}
 		managedLabels[workloadv1alpha1.ModelServingNameLabelKey] = ms.Name
 		managedLabels[HeadlessServicePluginLabelKey] = HeadlessServicePluginName
 		service, err := services.Get(ctx, name, metav1.GetOptions{})
@@ -224,6 +184,10 @@ func (p *HeadlessServicePlugin) ensureService(ctx context.Context, req *HookRequ
 		}
 		if !isManagedHeadlessService(service, ms, req.ServingGroup, req.RoleName, req.RoleID) {
 			return fmt.Errorf("Headless Service name %s/%s is occupied by an object not managed by plugin %s", ms.Namespace, name, HeadlessServicePluginName)
+		}
+		if !serviceMatchesHookInstance(service, req) {
+			return fmt.Errorf("Headless Service %s/%s belongs to previous Role instance (groupInstanceID=%q roleInstanceID=%q)",
+				ms.Namespace, name, service.Labels[workloadv1alpha1.GroupInstanceIDLabelKey], service.Labels[workloadv1alpha1.RoleInstanceIDLabelKey])
 		}
 		if service.DeletionTimestamp != nil {
 			return fmt.Errorf("Headless Service %s/%s is terminating", ms.Namespace, name)

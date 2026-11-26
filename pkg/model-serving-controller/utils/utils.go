@@ -18,6 +18,8 @@ package utils
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -99,8 +101,8 @@ func GeneratePodName(groupName, roleName string, podIndex int) string {
 func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName, roleID, revision, roleTemplateHash string) *corev1.Pod {
 	entryPodName := GeneratePodName(groupName, roleID, 0)
 	entryPod := createBasePod(role, ms, entryPodName, groupName, roleID, revision, roleTemplateHash)
-	entryPod.ObjectMeta.Labels[workloadv1alpha1.EntryLabelKey] = Entry
 	addPodLabelAndAnnotation(entryPod, role.EntryTemplate.Metadata)
+	applyManagedPodLabels(entryPod, role.Name, ms.Name, groupName, roleID, revision, roleTemplateHash, true)
 	entryPod.Spec = *role.EntryTemplate.Spec.DeepCopy()
 	entryPod.Spec.SchedulerName = ms.Spec.SchedulerName
 	// Build environment variables into each container of all pod
@@ -118,11 +120,56 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelSer
 	workerPodName := GeneratePodName(groupName, roleID, podIndex)
 	workerPod := createBasePod(role, ms, workerPodName, groupName, roleID, revision, roleTemplateHash)
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
+	applyManagedPodLabels(workerPod, role.Name, ms.Name, groupName, roleID, revision, roleTemplateHash, false)
 	workerPod.Spec = *role.WorkerTemplate.Spec.DeepCopy()
 	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
 	envVars := createCommonEnvVars(role, podIndex)
 	AddPodEnvVars(workerPod, envVars...)
 	return workerPod
+}
+
+func applyManagedPodLabels(pod *corev1.Pod, roleName, msName, groupName, roleID, revision, roleTemplateHash string, isEntry bool) {
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	pod.Labels[workloadv1alpha1.ModelServingNameLabelKey] = msName
+	pod.Labels[workloadv1alpha1.GroupNameLabelKey] = groupName
+	pod.Labels[workloadv1alpha1.RoleLabelKey] = roleName
+	pod.Labels[workloadv1alpha1.RoleIDKey] = roleID
+	pod.Labels[workloadv1alpha1.RevisionLabelKey] = revision
+	pod.Labels[workloadv1alpha1.RoleTemplateHashLabelKey] = roleTemplateHash
+	if isEntry {
+		pod.Labels[workloadv1alpha1.EntryLabelKey] = Entry
+	} else {
+		delete(pod.Labels, workloadv1alpha1.EntryLabelKey)
+	}
+	delete(pod.Labels, workloadv1alpha1.GroupInstanceIDLabelKey)
+	delete(pod.Labels, workloadv1alpha1.RoleInstanceIDLabelKey)
+}
+
+// NewInstanceID generates a random 16-char lowercase hex identifier suitable as a Kubernetes label value.
+func NewInstanceID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("failed to generate random instance ID: %v", err))
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// SetPodInstanceIDs stamps non-empty ServingGroup and Role instance IDs onto a Pod.
+func SetPodInstanceIDs(pod *corev1.Pod, groupInstanceID, roleInstanceID string) {
+	if pod == nil {
+		return
+	}
+	if pod.Labels == nil && (groupInstanceID != "" || roleInstanceID != "") {
+		pod.Labels = make(map[string]string)
+	}
+	if groupInstanceID != "" {
+		pod.Labels[workloadv1alpha1.GroupInstanceIDLabelKey] = groupInstanceID
+	}
+	if roleInstanceID != "" {
+		pod.Labels[workloadv1alpha1.RoleInstanceIDLabelKey] = roleInstanceID
+	}
 }
 
 func createBasePod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, name, groupName, roleID, revision, roleTemplateHash string) *corev1.Pod {
@@ -312,6 +359,29 @@ func ObjectRevision(obj metav1.Object) string {
 
 func ObjectRoleTemplateHash(obj metav1.Object) string {
 	return obj.GetLabels()[workloadv1alpha1.RoleTemplateHashLabelKey]
+}
+
+// IsControlledByModelServing returns true when obj has a controller OwnerReference matching ms.
+func IsControlledByModelServing(obj metav1.Object, ms *workloadv1alpha1.ModelServing) bool {
+	if obj == nil || ms == nil || obj.GetNamespace() != ms.Namespace {
+		return false
+	}
+	owner := metav1.GetControllerOf(obj)
+	return owner != nil &&
+		owner.UID == ms.UID &&
+		owner.Name == ms.Name &&
+		owner.Kind == workloadv1alpha1.ModelServingKind.Kind &&
+		owner.APIVersion == workloadv1alpha1.SchemeGroupVersion.String()
+}
+
+// GetGroupInstanceID returns the ServingGroup instance ID label of the resource.
+func GetGroupInstanceID(resource metav1.Object) string {
+	return resource.GetLabels()[workloadv1alpha1.GroupInstanceIDLabelKey]
+}
+
+// GetRoleInstanceID returns the Role instance ID label of the resource.
+func GetRoleInstanceID(resource metav1.Object) string {
+	return resource.GetLabels()[workloadv1alpha1.RoleInstanceIDLabelKey]
 }
 
 // GetRoleName returns the role name of the resource.

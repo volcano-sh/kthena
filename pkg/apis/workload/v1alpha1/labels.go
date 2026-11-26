@@ -27,6 +27,10 @@ const (
 	RoleIDKey = "modelserving.volcano.sh/role-id"
 	// EntryLabelKey is the entry pod label key.
 	EntryLabelKey = "modelserving.volcano.sh/entry"
+	// GroupInstanceIDLabelKey uniquely identifies one incarnation of a ServingGroup slot.
+	GroupInstanceIDLabelKey = "modelserving.volcano.sh/group-instance-id"
+	// RoleInstanceIDLabelKey uniquely identifies one incarnation of a Role slot.
+	RoleInstanceIDLabelKey = "modelserving.volcano.sh/role-instance-id"
 
 	// RevisionLabelKey is the revision label for the model serving.
 	RevisionLabelKey = "modelserving.volcano.sh/revision"

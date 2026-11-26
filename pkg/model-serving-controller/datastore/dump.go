@@ -24,6 +24,7 @@ import (
 // It allows us to safely export unexported inner structures without exposing internal lock mechanics.
 type ExportedRole struct {
 	Name             string     `json:"name"`
+	InstanceID       string     `json:"instanceID,omitempty"`
 	Revision         string     `json:"revision"`
 	RoleTemplateHash string     `json:"roleTemplateHash"`
 	Status           RoleStatus `json:"status"`
@@ -33,6 +34,7 @@ type ExportedRole struct {
 // It maps the internal non-exported fields (like runningPods and roles) to JSON serializable formats.
 type ExportedServingGroup struct {
 	Name        string             `json:"name"`
+	InstanceID  string             `json:"instanceID,omitempty"`
 	RunningPods []string           `json:"runningPods"`
 	Revision    string             `json:"revision"`
 	Status      ServingGroupStatus `json:"status"`
@@ -51,6 +53,7 @@ func (s *store) DumpCache() ([]byte, error) {
 		for groupName, group := range groups {
 			expGroup := ExportedServingGroup{
 				Name:        group.Name,
+				InstanceID:  group.InstanceID,
 				Revision:    group.Revision,
 				Status:      group.Status,
 				RunningPods: make([]string, 0, len(group.runningPods)),
@@ -64,6 +67,7 @@ func (s *store) DumpCache() ([]byte, error) {
 				for roleID, role := range roleMap {
 					expGroup.Roles[roleName][roleID] = ExportedRole{
 						Name:             role.Name,
+						InstanceID:       role.InstanceID,
 						Revision:         role.Revision,
 						RoleTemplateHash: role.RoleTemplateHash,
 						Status:           role.Status,

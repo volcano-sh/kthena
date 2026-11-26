@@ -240,6 +240,35 @@ func (m *Manager) stopPodGroupInformer() {
 	}
 }
 
+type groupInstanceIDContextKey struct{}
+
+type groupInstanceIDContextValue struct {
+	id string
+}
+
+// ErrPodGroupInstanceMismatch indicates an existing PodGroup belongs to a different ServingGroup incarnation.
+var ErrPodGroupInstanceMismatch = errors.New("PodGroup belongs to another ServingGroup instance")
+
+// WithGroupInstanceID binds a ServingGroup instance ID (including empty string for legacy groups) to a context.
+func WithGroupInstanceID(ctx context.Context, instanceID string) context.Context {
+	return context.WithValue(ctx, groupInstanceIDContextKey{}, groupInstanceIDContextValue{id: instanceID})
+}
+
+// GroupInstanceIDSpecified reports the ServingGroup instance ID bound to ctx and whether it was explicitly set.
+func GroupInstanceIDSpecified(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	v, ok := ctx.Value(groupInstanceIDContextKey{}).(groupInstanceIDContextValue)
+	return v.id, ok
+}
+
+// GroupInstanceIDFromContext extracts a ServingGroup instance ID from ctx if present.
+func GroupInstanceIDFromContext(ctx context.Context) string {
+	id, _ := GroupInstanceIDSpecified(ctx)
+	return id
+}
+
 // CreateOrUpdatePodGroup creates a PodGroup for the given ServingGroup if it doesn't exist,
 // or updates it if it does.
 // Returns an error and a requeue duration if there is an error.
@@ -257,11 +286,32 @@ func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alph
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to get PodGroup %s: %v", pgName, err), 0
 		}
-		return m.createPodGroup(ctx, ms, pgName), 0
+		err = m.createPodGroup(ctx, ms, pgName)
+		if err == nil {
+			return nil, 0
+		}
+		if !apierrors.IsAlreadyExists(err) {
+			return err, 0
+		}
+		// Informer cache missed an existing PodGroup; fetch the live API object and validate it.
+		podGroup, err = m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Get(ctx, pgName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get existing PodGroup %s after AlreadyExists: %v", pgName, err), 0
+		}
 	}
 
+	return m.validateAndUpdatePodGroup(ctx, podGroup, ms, pgName)
+}
+
+func (m *Manager) validateAndUpdatePodGroup(ctx context.Context, podGroup *schedulingv1beta1.PodGroup, ms *workloadv1alpha1.ModelServing, pgName string) (error, time.Duration) {
 	if !utils.IsOwnedByModelServingWithUID(podGroup, ms.UID) {
 		return fmt.Errorf("PodGroup %s is not owned by ModelServing %s", pgName, ms.Name), enqueueAfter
+	}
+	if expectedInstanceID := GroupInstanceIDFromContext(ctx); podGroup.Labels[workloadv1alpha1.GroupInstanceIDLabelKey] != expectedInstanceID {
+		return fmt.Errorf("%w: PodGroup %s has instance %q (expected %q)", ErrPodGroupInstanceMismatch, pgName, podGroup.Labels[workloadv1alpha1.GroupInstanceIDLabelKey], expectedInstanceID), enqueueAfter
+	}
+	if podGroup.DeletionTimestamp != nil {
+		return fmt.Errorf("PodGroup %s is terminating", pgName), enqueueAfter
 	}
 
 	return m.updatePodGroupIfNeeded(ctx, podGroup, ms), 0
@@ -297,14 +347,19 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 	// minResources: aggregated resource requirements of all pods in the ServingGroup
 	minMember, minRoleMember, minResources := m.calculateRequirements(ms)
 
+	podGroupLabels := map[string]string{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		workloadv1alpha1.GroupNameLabelKey:        podGroupName,
+	}
+	if instanceID := GroupInstanceIDFromContext(ctx); instanceID != "" {
+		podGroupLabels[workloadv1alpha1.GroupInstanceIDLabelKey] = instanceID
+	}
+
 	podGroup := &schedulingv1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podGroupName,
 			Namespace: ms.Namespace,
-			Labels: map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
-				workloadv1alpha1.GroupNameLabelKey:        podGroupName,
-			},
+			Labels:    podGroupLabels,
 			Annotations: map[string]string{
 				schedulingv1beta1.KubeGroupNameAnnotationKey: podGroupName,
 			},
@@ -328,7 +383,7 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 	}
 
 	_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Create(ctx, podGroup, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
+	if err != nil {
 		return err
 	}
 
@@ -498,7 +553,22 @@ func (m *Manager) DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 		return nil
 	}
 
-	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, servingGroupName, metav1.DeleteOptions{}); err != nil {
+	pg, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Get(ctx, servingGroupName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !utils.IsControlledByModelServing(pg, ms) ||
+		pg.Labels[workloadv1alpha1.GroupNameLabelKey] != servingGroupName ||
+		pg.Labels[workloadv1alpha1.GroupInstanceIDLabelKey] != GroupInstanceIDFromContext(ctx) {
+		return nil
+	}
+	uid := pg.UID
+	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, servingGroupName, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	}); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return err
 		}
@@ -514,7 +584,13 @@ func (m *Manager) CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.Mod
 	}
 
 	for _, podGroup := range existingPodGroups {
-		err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, podGroup.Name, metav1.DeleteOptions{})
+		if !utils.IsControlledByModelServing(podGroup, ms) {
+			continue
+		}
+		uid := podGroup.UID
+		err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, podGroup.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid},
+		})
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete PodGroup %s: %v", podGroup.Name, err)
 		}
