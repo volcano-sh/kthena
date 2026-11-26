@@ -45,6 +45,16 @@ func newRetryableHTTPClient() *retryablehttp.Client {
 	retryClient.RetryWaitMax = 1 * time.Second
 	retryClient.HTTPClient.Timeout = defaultTimeout
 	retryClient.Logger = nil
+	// Do not retry 503 from the tokenizer service: it signals that the
+	// per-renderer in-flight limit is reached and the router should fall back
+	// to engine-side tokenization immediately rather than sleeping and retrying
+	// against a saturated renderer.
+	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
+			return false, nil
+		}
+		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+	}
 	return retryClient
 }
 

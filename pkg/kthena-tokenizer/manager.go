@@ -464,3 +464,45 @@ func (m *RendererManager) ReleaseInFlight(model string) {
 		r.inFlight.Add(-1)
 	}
 }
+
+// AcquireEndpoint returns the renderer endpoint for model and a release func
+// bound to that exact renderer instance, eliminating the race where SetModels
+// can swap the renderer between acquisition and release. ok is false when
+// the model has no ready renderer or the per-renderer limit is reached;
+// atCapacity distinguishes the latter case so callers can return an
+// appropriate error without a second lookup.
+//
+// The release func must be called exactly once; it is safe to call even after
+// the model is removed from the manager.
+func (m *RendererManager) AcquireEndpoint(model string) (endpoint string, release func(), ok bool, atCapacity bool) {
+	m.mu.Lock()
+	r, exists := m.renderers[model]
+	if !exists || r.status != StatusReady {
+		m.mu.Unlock()
+		return "", nil, false, false
+	}
+	m.mu.Unlock()
+
+	releaseFunc := func() {
+		if r.inFlight.Load() > 0 {
+			r.inFlight.Add(-1)
+		}
+	}
+
+	limit := int64(m.config.RendererMaxInFlight)
+	if limit <= 0 {
+		r.inFlight.Add(1)
+		return r.endpoint(), releaseFunc, true, false
+	}
+	for {
+		cur := r.inFlight.Load()
+		if cur >= limit {
+			klog.V(4).Infof("AcquireEndpoint: renderer for model %s at capacity (%d/%d)",
+				model, cur, limit)
+			return "", nil, false, true
+		}
+		if r.inFlight.CompareAndSwap(cur, cur+1) {
+			return r.endpoint(), releaseFunc, true, false
+		}
+	}
+}

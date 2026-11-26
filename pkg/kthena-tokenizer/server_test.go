@@ -186,6 +186,10 @@ func TestServerInFlightLimitRejectsConcurrentRequest(t *testing.T) {
 	arrived := make(chan struct{}, 1)
 	// hold gates the backend handler: the first request blocks until released.
 	hold := make(chan struct{})
+	var releaseHoldOnce sync.Once
+	releaseHold := func() { releaseHoldOnce.Do(func() { close(hold) }) }
+	// Always release on exit so backend goroutines are never stranded.
+	defer releaseHold()
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -232,7 +236,7 @@ func TestServerInFlightLimitRejectsConcurrentRequest(t *testing.T) {
 		"second request must be rejected when at in-flight capacity")
 
 	// Release the first request; it must succeed.
-	close(hold)
+	releaseHold()
 	select {
 	case status := <-firstStatus:
 		assert.Equal(t, http.StatusOK, status, "first request must succeed")
@@ -269,12 +273,22 @@ func TestServerInFlightLimitReleasedAfterResponse(t *testing.T) {
 func TestServerInFlightLimitZeroMeansUnlimited(t *testing.T) {
 	const concurrency = 10
 	var wg sync.WaitGroup
-	// hold all requests simultaneously.
+	// hold all requests simultaneously until all have arrived at the backend.
 	hold := make(chan struct{})
+	var releaseHoldOnce sync.Once
+	releaseHold := func() { releaseHoldOnce.Do(func() { close(hold) }) }
+	defer releaseHold()
+
 	var mu sync.Mutex
 	var codes []int
 
+	// arrivedWg counts backend arrivals so we know all requests are truly
+	// in-flight before we release the hold.
+	var arrivedWg sync.WaitGroup
+	arrivedWg.Add(concurrency)
+
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrivedWg.Done()
 		<-hold
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"tokens": [], "count": 0}`))
@@ -304,15 +318,80 @@ func TestServerInFlightLimitZeroMeansUnlimited(t *testing.T) {
 		}()
 	}
 
-	// Give all goroutines a moment to start and reach the backend.
-	time.Sleep(100 * time.Millisecond)
-	close(hold) // release all simultaneously
+	// Wait until all goroutines are inside the backend handler, then release.
+	done := make(chan struct{})
+	go func() { arrivedWg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		releaseHold()
+		t.Fatal("timed out waiting for all requests to reach the backend")
+	}
+	releaseHold()
 	wg.Wait()
 
 	require.Len(t, codes, concurrency)
 	for i, code := range codes {
 		assert.Equal(t, http.StatusOK, code, "request %d must succeed with unlimited concurrency", i)
 	}
+}
+
+// TestAcquireEndpointContention exercises AcquireEndpoint under concurrent
+// load: exactly RendererMaxInFlight acquisitions must succeed, all others must
+// be rejected, and over-releases must not drive InFlight negative.
+func TestAcquireEndpointContention(t *testing.T) {
+	const limit = 3
+	const goroutines = 10
+
+	cfg := Config{RendererMaxInFlight: limit}
+	m := NewRendererManager(cfg)
+	m.renderers["m"] = &renderer{model: "m", status: StatusReady}
+
+	// releases collects the release funcs returned by successful acquisitions.
+	var mu sync.Mutex
+	var releases []func()
+
+	// barrier ensures all goroutines attempt acquisition simultaneously.
+	var startWg sync.WaitGroup
+	startWg.Add(goroutines)
+	var doneWg sync.WaitGroup
+	doneWg.Add(goroutines)
+
+	granted := make(chan struct{}, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer doneWg.Done()
+			startWg.Done()
+			startWg.Wait() // all goroutines start together
+			_, rel, ok, _ := m.AcquireEndpoint("m")
+			if ok {
+				granted <- struct{}{}
+				mu.Lock()
+				releases = append(releases, rel)
+				mu.Unlock()
+			}
+		}()
+	}
+	doneWg.Wait()
+	close(granted)
+
+	grantCount := 0
+	for range granted {
+		grantCount++
+	}
+	assert.Equal(t, limit, grantCount, "exactly RendererMaxInFlight acquisitions must succeed")
+	assert.Equal(t, int64(limit), m.renderers["m"].inFlight.Load(), "inFlight must equal granted count")
+
+	// Release all slots and verify InFlight reaches zero (not negative).
+	for _, rel := range releases {
+		rel()
+	}
+	assert.Equal(t, int64(0), m.renderers["m"].inFlight.Load(), "inFlight must be zero after all releases")
+
+	// Extra release must not drive InFlight negative.
+	releases[0]()
+	assert.GreaterOrEqual(t, m.renderers["m"].inFlight.Load(), int64(0), "inFlight must not go negative")
 }
 
 // TestManagerAcquireRelease is a unit test for AcquireInFlight and
