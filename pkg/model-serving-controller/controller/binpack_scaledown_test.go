@@ -201,8 +201,8 @@ func TestRunningStatusHasLowerDeletionPriorityThanOthers(t *testing.T) {
 		priority := getServingGroupStatusPriority(status)
 		assert.Greater(t, runningPriority, priority,
 			"Running (%d) should have higher priority value than %s (%d)", runningPriority, status, priority)
-		assert.Greater(t, priority, PriorityServingGroupPending,
-			"%s (%d) should have higher priority value than Pending (%d)", status, priority, PriorityServingGroupPending)
+		assert.Greater(t, priority, PriorityServingGroupUnschedulable,
+			"%s (%d) should have higher priority value than Unschedulable (%d)", status, priority, PriorityServingGroupUnschedulable)
 	}
 }
 

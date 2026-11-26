@@ -39,12 +39,12 @@ type ModelServingStatusApplyConfiguration struct {
 	UpdatedReplicas *int32 `json:"updatedReplicas,omitempty"`
 	// AvailableReplicas track the number of ServingGroup that are in ready state (updated or not).
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
-	// PendingReplicas is the number of ServingGroup that wait for a node: the scheduler reported
+	// UnschedulableReplicas is the number of ServingGroups that wait for a node: the scheduler reported
 	// at least one of their Pods as unschedulable. They are never counted in AvailableReplicas.
-	PendingReplicas *int32 `json:"pendingReplicas,omitempty"`
-	// PendingSince is the time since which the oldest ServingGroup counted in PendingReplicas
-	// has been pending. It is recomputed on every sync and is unset when PendingReplicas is 0.
-	PendingSince *v1.Time `json:"pendingSince,omitempty"`
+	UnschedulableReplicas *int32 `json:"unschedulableReplicas,omitempty"`
+	// UnschedulableSince is the time since which the oldest ServingGroup counted in UnschedulableReplicas
+	// has been unschedulable. It is recomputed on every sync and is unset when UnschedulableReplicas is 0.
+	UnschedulableSince *v1.Time `json:"unschedulableSince,omitempty"`
 	// CurrentRevision, if not empty, indicates the ControllerRevision version preserved by
 	// ServingGroups that have not been updated.
 	CurrentRevision *string `json:"currentRevision,omitempty"`
@@ -105,19 +105,19 @@ func (b *ModelServingStatusApplyConfiguration) WithAvailableReplicas(value int32
 	return b
 }
 
-// WithPendingReplicas sets the PendingReplicas field in the declarative configuration to the given value
+// WithUnschedulableReplicas sets the UnschedulableReplicas field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the PendingReplicas field is set to the value of the last call.
-func (b *ModelServingStatusApplyConfiguration) WithPendingReplicas(value int32) *ModelServingStatusApplyConfiguration {
-	b.PendingReplicas = &value
+// If called multiple times, the UnschedulableReplicas field is set to the value of the last call.
+func (b *ModelServingStatusApplyConfiguration) WithUnschedulableReplicas(value int32) *ModelServingStatusApplyConfiguration {
+	b.UnschedulableReplicas = &value
 	return b
 }
 
-// WithPendingSince sets the PendingSince field in the declarative configuration to the given value
+// WithUnschedulableSince sets the UnschedulableSince field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the PendingSince field is set to the value of the last call.
-func (b *ModelServingStatusApplyConfiguration) WithPendingSince(value v1.Time) *ModelServingStatusApplyConfiguration {
-	b.PendingSince = &value
+// If called multiple times, the UnschedulableSince field is set to the value of the last call.
+func (b *ModelServingStatusApplyConfiguration) WithUnschedulableSince(value v1.Time) *ModelServingStatusApplyConfiguration {
+	b.UnschedulableSince = &value
 	return b
 }
 

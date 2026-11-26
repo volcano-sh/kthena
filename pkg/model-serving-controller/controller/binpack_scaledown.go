@@ -36,12 +36,12 @@ const (
 	//   0: Highest deletion priority - the scheduler cannot place the ServingGroup
 	//   1: Medium deletion priority - unhealthy or terminating states
 	//   2: Lowest deletion priority - healthy running state
-	PriorityServingGroupPending  = 0
-	PriorityServingGroupCreating = 1
-	PriorityServingGroupDeleting = 1
-	PriorityServingGroupScaling  = 1
-	PriorityServingGroupNotFound = 1
-	PriorityServingGroupRunning  = 2
+	PriorityServingGroupUnschedulable = 0
+	PriorityServingGroupCreating      = 1
+	PriorityServingGroupDeleting      = 1
+	PriorityServingGroupScaling       = 1
+	PriorityServingGroupNotFound      = 1
+	PriorityServingGroupRunning       = 2
 
 	// Role priorities:
 	//   0: Highest deletion priority - unhealthy or terminating states
@@ -156,7 +156,7 @@ func (c *ModelServingController) calculateRoleScore(ms *workloadv1alpha1.ModelSe
 }
 
 // calculateServingGroupScore calculates priority information for serving group scale-down with two-level sorting:
-// 1. Status readiness (primary): Pending groups are deleted first, then the other not-ready groups
+// 1. Status readiness (primary): Unschedulable groups are deleted first, then the other not-ready groups
 // 2. Pod deletion cost (secondary): Among groups with same status, lower cost = delete first
 func (c *ModelServingController) calculateServingGroupScore(ms *workloadv1alpha1.ModelServing, groupName string) ServingGroupWithScore {
 	// Get serving group status from store
@@ -165,7 +165,7 @@ func (c *ModelServingController) calculateServingGroupScore(ms *workloadv1alpha1
 
 	// Get pod deletion cost as secondary factor
 	groupNameValue := fmt.Sprintf("%s/%s", ms.Namespace, groupName)
-	pods, err := c.getPodsByIndex(GroupNameKey, groupNameValue)
+	pods, err := c.ownedPodsByIndex(ms, GroupNameKey, groupNameValue)
 	if err != nil {
 		_, index := utils.GetParentNameAndOrdinal(groupName)
 		return ServingGroupWithScore{
@@ -178,8 +178,10 @@ func (c *ModelServingController) calculateServingGroupScore(ms *workloadv1alpha1
 
 	// A replica taken away because it does not fit here must not cost a group
 	// that is starting.
-	if priority != PriorityServingGroupRunning && pendingSince(pods) != nil {
-		priority = PriorityServingGroupPending
+	if priority != PriorityServingGroupRunning {
+		if _, unschedulable := unschedulableSince(pods); unschedulable {
+			priority = PriorityServingGroupUnschedulable
+		}
 	}
 
 	// Sum pod deletion costs (0 if not set)

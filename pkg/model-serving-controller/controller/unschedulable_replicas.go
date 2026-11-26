@@ -25,29 +25,36 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// pendingSince returns the time since which the pods of one ServingGroup have
-// been waiting for a node, or nil if they are not. A gang that cannot be
-// satisfied has members that would fit on their own, so one unschedulable Pod
-// is enough.
-func pendingSince(pods []*corev1.Pod) *metav1.Time {
+// unschedulableSince reports whether any non-terminating Pod of a ServingGroup
+// is unschedulable and, when available, the earliest non-zero time since which
+// those Pods have been waiting for a node. A gang that cannot be satisfied has
+// members that would fit on their own, so one unschedulable Pod is enough.
+func unschedulableSince(pods []*corev1.Pod) (*metav1.Time, bool) {
+	unschedulable := false
 	var since *metav1.Time
 	for _, pod := range pods {
 		if utils.IsPodTerminating(pod) {
 			continue
 		}
-		if t := utils.PodUnschedulableSince(pod); t != nil && (since == nil || t.Before(since)) {
+		t, ok := utils.PodUnschedulableSince(pod)
+		if !ok {
+			continue
+		}
+		unschedulable = true
+		if t != nil && (since == nil || t.Before(since)) {
 			since = t
 		}
 	}
-	return since
+	return since, unschedulable
 }
 
-// servingGroupPendingSince returns the time since which the scheduler has been
-// unable to place the ServingGroup, or nil if it can.
-func (c *ModelServingController) servingGroupPendingSince(ms *workloadv1alpha1.ModelServing, groupName string) (*metav1.Time, error) {
+// servingGroupUnschedulableSince reports whether the scheduler has been unable
+// to place the ServingGroup and the earliest timestamp among its unschedulable Pods.
+func (c *ModelServingController) servingGroupUnschedulableSince(ms *workloadv1alpha1.ModelServing, groupName string) (*metav1.Time, bool, error) {
 	pods, err := c.ownedPodsByIndex(ms, GroupNameKey, fmt.Sprintf("%s/%s", ms.Namespace, groupName))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return pendingSince(pods), nil
+	since, unschedulable := unschedulableSince(pods)
+	return since, unschedulable, nil
 }

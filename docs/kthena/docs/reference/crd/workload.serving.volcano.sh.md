@@ -688,7 +688,7 @@ _Appears in:_
 | `currentReplicas` _integer_ | CurrentReplicas is the number of ServingGroup created by the ModelServing controller from the ModelServing version |  |  |
 | `updatedReplicas` _integer_ | UpdatedReplicas track the number of ServingGroup that have been updated (ready or not). |  |  |
 | `availableReplicas` _integer_ | AvailableReplicas track the number of ServingGroup that are in ready state (updated or not). |  |  |
-| `pendingReplicas` _integer_ | PendingReplicas is the number of ServingGroup that wait for a node: the scheduler reported<br />at least one of their Pods as unschedulable. They are never counted in AvailableReplicas. |  |  |
+| `unschedulableReplicas` _integer_ | UnschedulableReplicas is the number of ServingGroups that wait for a node: the scheduler reported<br />at least one of their Pods as unschedulable. They are never counted in AvailableReplicas. |  |  |
 | `currentRevision` _string_ | CurrentRevision, if not empty, indicates the ControllerRevision version preserved by<br />ServingGroups that have not been updated. |  |  |
 | `updateRevision` _string_ | UpdateRevision, if not empty, indicates the ControllerRevision version targeted by<br />the current ModelServing spec. |  |  |
 | `collisionCount` _integer_ | CollisionCount tracks hash collisions for ControllerRevision names. |  |  |
