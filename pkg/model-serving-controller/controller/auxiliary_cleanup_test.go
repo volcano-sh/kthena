@@ -44,7 +44,13 @@ import (
 
 func auxiliaryFixture(t *testing.T) (*ModelServingController, *kubefake.Clientset, *workload.ModelServing, *corev1.Service) {
 	t.Helper()
-	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "cleanup", Namespace: "default", UID: types.UID("ms-uid")}, Spec: workload.ModelServingSpec{Replicas: ptr.To[int32](0)}}
+	ms := &workload.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "cleanup", Namespace: "default", UID: types.UID("ms-uid")},
+		Spec: workload.ModelServingSpec{
+			Replicas: ptr.To[int32](0),
+			Plugins:  []workload.PluginSpec{{Name: plugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}},
+		},
+	}
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "cleanup-0-infer-0-0", Namespace: ms.Namespace, UID: types.UID("service-uid"), Labels: map[string]string{
 		workload.ModelServingNameLabelKey: ms.Name, workload.GroupNameLabelKey: "cleanup-0", workload.RoleLabelKey: "infer", workload.RoleIDKey: "infer-0",
 	}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}}, Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone}}

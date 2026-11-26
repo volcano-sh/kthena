@@ -6176,6 +6176,12 @@ func TestCleanupHeadlessServices(t *testing.T) {
 			Namespace: "default",
 			UID:       types.UID("test-ms-uid"),
 		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Plugins: []workloadv1alpha1.PluginSpec{{
+				Name: plugins.HeadlessServicePluginName,
+				Type: workloadv1alpha1.PluginTypeBuiltIn,
+			}},
+		},
 	}
 	ownerRef := func(uid types.UID) []metav1.OwnerReference {
 		return []metav1.OwnerReference{
@@ -6245,6 +6251,12 @@ func TestCleanupHeadlessServicesReturnsDeleteError(t *testing.T) {
 			Name:      "test-ms",
 			Namespace: "default",
 			UID:       types.UID("test-ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Plugins: []workloadv1alpha1.PluginSpec{{
+				Name: plugins.HeadlessServicePluginName,
+				Type: workloadv1alpha1.PluginTypeBuiltIn,
+			}},
 		},
 	}
 	svc := &corev1.Service{
@@ -7264,6 +7276,12 @@ func TestDeleteRoleRetainsDeletionOnFailure(t *testing.T) {
 					Namespace: "default",
 					UID:       types.UID("test-model-serving-uid"),
 				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Plugins: []workloadv1alpha1.PluginSpec{{
+						Name: plugins.HeadlessServicePluginName,
+						Type: workloadv1alpha1.PluginTypeBuiltIn,
+					}},
+				},
 			}
 
 			groupName := ms.Name + "-0"
@@ -7934,6 +7952,12 @@ func TestDeleteServingGroupRetainsDeletionOnFailure(t *testing.T) {
 					Name:      "test-model-serving",
 					Namespace: "default",
 					UID:       types.UID("test-model-serving-uid"),
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Plugins: []workloadv1alpha1.PluginSpec{{
+						Name: plugins.HeadlessServicePluginName,
+						Type: workloadv1alpha1.PluginTypeBuiltIn,
+					}},
 				},
 			}
 

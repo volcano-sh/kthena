@@ -3110,12 +3110,12 @@ func (c *ModelServingController) runModelServingSyncPlugins(ctx context.Context,
 }
 
 func (c *ModelServingController) runRoleDeletePlugins(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) error {
-	if c.pluginsRegistry == nil {
-		return fmt.Errorf("plugin registry is not initialized")
-	}
-	chain, err := plugins.NewRoleDeleteChain(c.pluginsRegistry, ms.Spec.Plugins)
+	chain, err := c.buildPluginChain(ms)
 	if err != nil {
 		return fmt.Errorf("build Role delete plugin chain: %w", err)
+	}
+	if chain == nil {
+		return nil
 	}
 	_, roleIndex := utils.GetParentNameAndOrdinal(roleID)
 	var role *workloadv1alpha1.Role

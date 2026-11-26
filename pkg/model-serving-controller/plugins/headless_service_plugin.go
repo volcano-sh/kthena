@@ -54,7 +54,6 @@ type HeadlessServicePlugin struct {
 
 func init() {
 	DefaultRegistry.Register(HeadlessServicePluginName, NewHeadlessServicePlugin)
-	DefaultRegistry.RegisterRoleDelete(HeadlessServicePluginName)
 }
 
 func NewHeadlessServicePlugin(spec workloadv1alpha1.PluginSpec) (Plugin, error) {

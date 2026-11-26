@@ -182,14 +182,17 @@ func TestChainRoleLifecycleHooks(t *testing.T) {
 	}
 }
 
-func TestRoleDeleteChainIgnoresCurrentCleanupPluginScope(t *testing.T) {
+func TestChainRoleDeleteRespectsConfigAndScope(t *testing.T) {
 	calls := []string{}
 	registry := NewRegistry()
 	registry.Register("cleanup", func(spec workloadv1alpha1.PluginSpec) (Plugin, error) {
 		return &testPlugin{name: spec.Name, calls: &calls}, nil
 	})
-	registry.RegisterRoleDelete("cleanup")
-	chain, err := NewRoleDeleteChain(registry, []workloadv1alpha1.PluginSpec{{
+	registry.Register("unconfigured", func(spec workloadv1alpha1.PluginSpec) (Plugin, error) {
+		return &testPlugin{name: spec.Name, calls: &calls}, nil
+	})
+
+	chain, err := NewChain(registry, []workloadv1alpha1.PluginSpec{{
 		Name:  "cleanup",
 		Type:  workloadv1alpha1.PluginTypeBuiltIn,
 		Scope: &workloadv1alpha1.PluginScope{Roles: []string{"prefill"}},
@@ -197,11 +200,19 @@ func TestRoleDeleteChainIgnoresCurrentCleanupPluginScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected chain build error: %v", err)
 	}
+
 	if err := chain.OnRoleDelete(context.Background(), &HookRequest{RoleName: "decode"}); err != nil {
 		t.Fatalf("unexpected Role delete error: %v", err)
 	}
+	if len(calls) != 0 {
+		t.Fatalf("expected out-of-scope and unconfigured plugins not to run, got %v", calls)
+	}
+
+	if err := chain.OnRoleDelete(context.Background(), &HookRequest{RoleName: "prefill"}); err != nil {
+		t.Fatalf("unexpected Role delete error: %v", err)
+	}
 	if got := strings.Join(calls, ","); got != "role-delete-cleanup" {
-		t.Fatalf("cleanup hook mismatch, got %s", got)
+		t.Fatalf("role delete hook mismatch, got %s", got)
 	}
 }
 

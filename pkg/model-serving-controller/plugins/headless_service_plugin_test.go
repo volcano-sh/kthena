@@ -231,7 +231,7 @@ func TestHeadlessServicePluginRequiresKubeClientAtHookTime(t *testing.T) {
 	require.ErrorContains(t, err, "Kubernetes client is not initialized")
 }
 
-func TestRoleDeleteChainCleansServiceAfterPluginRemoval(t *testing.T) {
+func TestChainRoleDeleteCleansConfiguredHeadlessService(t *testing.T) {
 	ctx := context.Background()
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default", UID: types.UID("test-ms-uid")},
@@ -255,16 +255,27 @@ func TestRoleDeleteChainCleansServiceAfterPluginRemoval(t *testing.T) {
 		},
 	}, Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone}}
 	kubeClient := kubefake.NewSimpleClientset(service)
-	chain, err := NewRoleDeleteChain(DefaultRegistry, nil)
-	require.NoError(t, err)
-	require.NoError(t, chain.OnRoleDelete(ctx, &HookRequest{
+	req := &HookRequest{
 		ModelServing: ms,
 		ServingGroup: "test-ms-0",
 		RoleName:     "prefill",
 		RoleID:       "prefill-0",
 		RoleIndex:    0,
 		KubeClient:   kubeClient,
-	}))
+	}
+
+	emptyChain, err := NewChain(DefaultRegistry, nil)
+	require.NoError(t, err)
+	require.NoError(t, emptyChain.OnRoleDelete(ctx, req))
+	_, err = kubeClient.CoreV1().Services(ms.Namespace).Get(ctx, serviceName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	chain, err := NewChain(DefaultRegistry, []workloadv1alpha1.PluginSpec{{
+		Name: HeadlessServicePluginName,
+		Type: workloadv1alpha1.PluginTypeBuiltIn,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, chain.OnRoleDelete(ctx, req))
 	_, err = kubeClient.CoreV1().Services(ms.Namespace).Get(ctx, serviceName, metav1.GetOptions{})
 	assert.Error(t, err)
 }
