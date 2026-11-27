@@ -317,6 +317,44 @@ func TestCoordinatedPodGroupUsesAppliedWorkerLayoutUntilReplacement(t *testing.T
 	require.Equal(t, ms, projected)
 }
 
+func TestCoordinatedPodGroupEmptyRoleUsesPartitionSelectedLayout(t *testing.T) {
+	tests := []struct {
+		name          string
+		oldWorkers    int32
+		targetWorkers int32
+		partition     int
+		wantWorkers   int32
+	}{
+		{name: "no partition uses target layout", oldWorkers: 1, targetWorkers: 3, partition: 0, wantWorkers: 3},
+		{name: "negative partition uses target layout", oldWorkers: 1, targetWorkers: 3, partition: -1, wantWorkers: 3},
+		{name: "partition uses smaller protected layout", oldWorkers: 1, targetWorkers: 3, partition: 1, wantWorkers: 1},
+		{name: "partition keeps smaller target layout", oldWorkers: 3, targetWorkers: 1, partition: 1, wantWorkers: 1},
+		{name: "full partition uses protected layout", oldWorkers: 3, targetWorkers: 1, partition: 2, wantWorkers: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withWorkers := func(ms *api.ModelServing, workers int32) {
+				for i := range ms.Spec.Template.Roles {
+					ms.Spec.Template.Roles[i].WorkerReplicas = workers
+					ms.Spec.Template.Roles[i].WorkerTemplate = ms.Spec.Template.Roles[i].EntryTemplate.DeepCopy()
+				}
+			}
+			c, ms, pg := coordinatedExpansionFixture(t, []string{"prefill", "decode"}, []api.RoleRolloutDependency{{Role: "prefill", DependsOn: []string{"decode"}}}, 2, 2,
+				func(old *api.ModelServing) { withWorkers(old, tt.oldWorkers) })
+			withWorkers(ms, tt.targetWorkers)
+			ms.Spec.Template.Roles[1].Partition = ptr.To(intstr.FromInt(tt.partition))
+			for ordinal := 0; ordinal < 2; ordinal++ {
+				c.store.DeleteRole(utils.GetNamespaceName(ms), pg.Name, "decode", utils.GenerateRoleID("decode", ordinal))
+			}
+			projected, err := c.coordinatedPodGroupLayout(ms, pg.Name)
+			require.NoError(t, err)
+			decode := projected.Spec.Template.Roles[1]
+			require.Equal(t, tt.wantWorkers, decode.WorkerReplicas, "the subgroup is sized for the layouts scaleUpRoles will create")
+			require.Equal(t, int32(2), *decode.Replicas)
+		})
+	}
+}
+
 func TestCoordinatedPodGroupRefreshUsesDesiredPolicyWithHistoricalLayout(t *testing.T) {
 	c, ms, pg := coordinatedExpansionFixture(t, []string{"prefill", "decode"}, []api.RoleRolloutDependency{{Role: "prefill", DependsOn: []string{"decode"}}}, 1, 2)
 	for i := range ms.Spec.Template.Roles {
