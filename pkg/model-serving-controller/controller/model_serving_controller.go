@@ -669,26 +669,85 @@ func (c *ModelServingController) processNextWorkItem(ctx context.Context) bool {
 
 func (c *ModelServingController) syncModelServing(ctx context.Context, key string) (syncErr error) {
 	klog.V(4).InfoS("Started syncing ModelServing", "key", key)
+
+	// 1. Fetch the ModelServing; a deleted object needs no sync.
+	ms, err := c.getModelServing(key)
+	if err != nil || ms == nil {
+		return err
+	}
+
+	// 2. Recover orphan cleanup independently of migration errors in surviving Roles.
+	orphanErr := c.cleanupOrphanServices(ctx, ms)
+	defer func() { syncErr = errors.Join(syncErr, orphanErr) }()
+
+	if err := c.finishPendingDeletions(ctx, ms); err != nil {
+		return err
+	}
+
+	// 3. Install per-sync revision/coordination state and resolve the desired revision.
+	ctx, history, revision, err := c.resolveRevisionState(ctx, ms)
+	if err != nil {
+		return err
+	}
+
+	// 4. Run pre-rollout safety: explicit scale-down, availability refresh, sync plugins.
+	if err := c.prepareRollout(ctx, ms); err != nil {
+		return err
+	}
+
+	// 5. Sync ServingGroups to the expected replica count.
+	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
+		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)
+	}
+
+	// 6. Derive the Role rollout policy from the ServingGroups synced above.
+	rolloutPolicy, err := c.resolveRoleRolloutPolicy(ctx, ms, revision)
+	if err != nil {
+		return fmt.Errorf("failed to resolve Role rollout policy: %v", err)
+	}
+
+	// 7. Sync Role replicas to the expected count.
+	roleSyncErr := c.syncRoleReplicas(ctx, ms, revision, rolloutPolicy)
+	if roleSyncErr != nil && !onlyRevisionErrors(roleSyncErr) {
+		return fmt.Errorf("failed to sync role replicas: %w", roleSyncErr)
+	}
+
+	// 8. Handle the rolling update, deleting outdated ServingGroups/Roles.
+	if err := c.manageRollingUpdateWithPolicy(ctx, ms, revision, rolloutPolicy); err != nil {
+		return fmt.Errorf("failed to handle rollingUpdate: %v", err)
+	}
+
+	// 9. Calculate and update the overall condition and replica status fields.
+	if err := c.updateModelServingStatusInRound(ctx, ms, revision, rolloutPolicy); err != nil {
+		return fmt.Errorf("failed to update status of ms %s/%s: %v", ms.Namespace, ms.Name, err)
+	}
+
+	// 10. Return revision-only errors so the workqueue retries without undoing the safe scale-down above.
+	return errors.Join(roleSyncErr, history.errors())
+}
+
+// getModelServing resolves a workqueue key to its ModelServing. A missing
+// object returns (nil, nil): it was deleted and there is nothing to sync.
+func (c *ModelServingController) getModelServing(key string) (*workloadv1alpha1.ModelServing, error) {
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		return fmt.Errorf("invalid resource key: %s", err)
+		return nil, fmt.Errorf("invalid resource key: %s", err)
 	}
 
 	ms, err := c.modelServingLister.ModelServings(namespace).Get(name)
 	if apierrors.IsNotFound(err) {
 		klog.V(4).Infof("%v has been deleted", key)
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
+	return ms, nil
+}
 
-	// Recover orphan cleanup independently of migration errors in surviving Roles.
-	orphanErr := c.cleanupOrphanServices(ctx, ms)
-	defer func() { syncErr = errors.Join(syncErr, orphanErr) }()
-	if err := c.finishPendingDeletions(ctx, ms); err != nil {
-		return err
-	}
+// resolveRevisionState installs the per-sync revision and coordination
+// memoization on ctx, then resolves and persists the desired revision.
+func (c *ModelServingController) resolveRevisionState(ctx context.Context, ms *workloadv1alpha1.ModelServing) (context.Context, *revisionHistory, string, error) {
 	ctx = c.withRevisionHistory(ctx, ms)
 	ctx = withCoordinatedRound(ctx, ms)
 	history := c.revisionHistory(ctx, ms)
@@ -697,12 +756,18 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		// Revision persistence is required before creating or replacing Pods. An
 		// explicit replica decrease is safe without a new template, so retain that
 		// path and return the revision error to keep workqueue retries active.
-		return errors.Join(fmt.Errorf("resolve desired revision: %w", err), c.scaleDownOnRevisionError(ctx, ms))
+		return ctx, history, "", errors.Join(fmt.Errorf("resolve desired revision: %w", err), c.scaleDownOnRevisionError(ctx, ms))
 	}
 	if err := c.persistCoordinatedRoleRevision(ctx, ms, revision); err != nil {
-		return fmt.Errorf("failed to persist coordinated Role revision: %v", err)
+		return ctx, history, "", fmt.Errorf("failed to persist coordinated Role revision: %v", err)
 	}
+	return ctx, history, revision, nil
+}
 
+// prepareRollout runs the safety steps that must precede replica and rollout
+// changes: explicit ServingGroup scale-down, coordinated availability refresh,
+// and ModelServing-level sync plugins.
+func (c *ModelServingController) prepareRollout(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
 	// Explicit scale-down does not need the discarded groups' old templates.
 	if roleCoordination(ms) != nil {
 		groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
@@ -723,38 +788,7 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	if err := c.runModelServingSyncPlugins(ctx, ms); err != nil {
 		return err
 	}
-
-	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
-	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
-		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)
-	}
-
-	// Derive optional dependency and proportional limits from the current Role state.
-	rolloutPolicy, err := c.resolveRoleRolloutPolicy(ctx, ms, revision)
-	if err != nil {
-		return fmt.Errorf("failed to resolve Role rollout policy: %v", err)
-	}
-
-	// 2. Sync the roles and their replicas within each ServingGroup, handling partitioned scaling and revisions.
-	roleSyncErr := c.syncRoleReplicas(ctx, ms, revision, rolloutPolicy)
-	if roleSyncErr != nil && !onlyRevisionErrors(roleSyncErr) {
-		return fmt.Errorf("failed to sync role replicas: %w", roleSyncErr)
-	}
-
-	// 3. Handle the rolling update process, deleting outdated ServingGroups/Roles to trigger updates.
-	if err := c.manageRollingUpdateWithPolicy(ctx, ms, revision, rolloutPolicy); err != nil {
-		return fmt.Errorf("failed to handle rollingUpdate: %v", err)
-	}
-
-	// 4. Calculate and update the overall condition and replica status fields of the ModelServing.
-	if err := c.updateModelServingStatusInRound(ctx, ms, revision, rolloutPolicy); err != nil {
-		return fmt.Errorf("failed to update status of ms %s/%s: %v", namespace, name, err)
-	}
-
-	// Unknown history never authorizes a rollout. Returning the cached errors
-	// after safe reconciliation makes the workqueue retry without blocking an
-	// explicit scale-down that already completed above.
-	return errors.Join(roleSyncErr, history.errors())
+	return nil
 }
 
 func (c *ModelServingController) Run(ctx context.Context, workers int) {
