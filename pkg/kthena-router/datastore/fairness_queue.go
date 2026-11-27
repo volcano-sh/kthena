@@ -234,6 +234,7 @@ type RequestPriorityQueue struct {
 	podCounter     PodCounter            // Optional; counts backend pods for inflight scaling
 	inflightCount  atomic.Int64          // In-flight requests in session-boost mode
 	releaseCh      chan struct{}         // Signals a permit release in session-boost mode
+	releaseMu      sync.Mutex            // Makes a release's freed slot and its signal visible together
 	recheckCh      chan struct{}         // Signals refreshed backend state in session-boost mode
 }
 
