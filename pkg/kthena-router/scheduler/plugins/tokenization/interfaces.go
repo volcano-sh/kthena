@@ -39,5 +39,5 @@ type remoteTokenizer interface {
 type engineAdapter interface {
 	PrepareTokenizeRequest(input TokenizeInput) (interface{}, error)
 	ParseTokenizeResponse(data []byte) (*TokenizeResult, error)
-	GetTokenizePath() string
+	GetTokenizePath(inputType TokenizeInputType) string
 }

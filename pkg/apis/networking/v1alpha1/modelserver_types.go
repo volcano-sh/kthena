@@ -72,7 +72,7 @@ type ModelServerSpec struct {
 
 // InferenceEngine defines the inference framework used by the modelServer to serve LLM requests.
 //
-// +kubebuilder:validation:Enum=vLLM;SGLang
+// +kubebuilder:validation:Enum=vLLM;SGLang;TensorRTLLM
 type InferenceEngine string
 
 const (
@@ -80,6 +80,9 @@ const (
 	VLLM InferenceEngine = "vLLM"
 	// https://github.com/sgl-project/sglang
 	SGLang InferenceEngine = "SGLang"
+	// https://github.com/NVIDIA/TensorRT-LLM
+	// Requires trtllm-serve OpenAI server (/v1/*); metrics are JSON /metrics.
+	TensorRTLLM InferenceEngine = "TensorRTLLM"
 )
 
 // WorkloadSelector is used to match the model serving instances.
