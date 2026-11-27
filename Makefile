@@ -99,7 +99,7 @@ test-e2e: ## Run all e2e tests sequentially (legacy).
 	@echo "Setting up Kind cluster for E2E tests..."
 	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} ./test/e2e/setup.sh
 	@echo "Running E2E tests sequentially..."
-	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=15m
+	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=25m
 	@echo "E2E tests completed"
 
 .PHONY: test-e2e-controller-manager
@@ -113,7 +113,7 @@ test-e2e-router: ## Run router e2e tests.
 	@command -v kind >/dev/null 2>&1 || { echo "Kind is not installed."; exit 1; }
 	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} TEST_CATEGORY=router ./test/e2e/setup.sh
 	@go test -v ./test/e2e/external-provider-mock
-	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=18m ./test/e2e/router
+	@E2E_EXTERNAL_PROVIDER_MOCK_IMAGE=${IMG_E2E_EXTERNAL_PROVIDER_MOCK} KUBECONFIG=/tmp/kubeconfig-e2e go test -v -timeout=25m ./test/e2e/router
 
 .PHONY: test-e2e-router-kvcache-aware
 test-e2e-router-kvcache-aware: ## Run KV-cache-aware router e2e tests.

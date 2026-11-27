@@ -26,6 +26,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +55,14 @@ const (
 	gpuCacheUsageLoadMaxTokens     = 256
 	kvCacheFixtureName             = "router-plugin-kvcache-mock"
 	kvCacheFixtureAppLabel         = kvCacheFixtureName
+	kvCacheRuntimeContainer        = "kthena-runtime"
+	routerContainerPort            = "8080" // kthenaRouter.port in the Helm chart; the Service exposes it as 80
+	kvCacheSyncModeEnv             = "KV_EVENT_SYNC_MODE"
+	kvCacheStreamWaitTimeout       = 90 * time.Second
+	kvCacheOwnershipProbeAttempts  = 5
+	kvCacheOwnershipProbeInterval  = 2 * time.Second
+	kvCacheMemoryEngineCacheSize   = "32"
+	kvCacheMatchRatioMetric        = "kthena_router_kvcache_aware_match_ratio"
 	kvCacheOwnershipWaitTimeout    = 90 * time.Second
 	kvCacheMappingPrefix           = "vllm:kv:block"
 	kvCacheOwnershipPrefix         = "matrix:kv:block"
@@ -67,6 +77,9 @@ type kvCacheOwnership struct {
 	owner        string
 }
 
+// kvCacheReadinessGate is a pod readiness gate the memory-mode tests flip to make a pod NotReady.
+const kvCacheReadinessGate corev1.PodConditionType = "kthena.volcano.sh/e2e-ready"
+
 func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string) []corev1.Pod {
 	t.Helper()
 	ready := utils.ListReadyPodsByLabel(t, kube, namespace, "app="+plugincontext.DeploymentName)
@@ -76,23 +89,75 @@ func listReadyMockPods(t *testing.T, kube kubernetes.Interface, namespace string
 
 func setupKVCacheFixture(t *testing.T, kube kubernetes.Interface, namespace, redisNamespace string) []corev1.Pod {
 	t.Helper()
-	ctx := context.Background()
-	statefulSet := utils.LoadYAMLFromFile[appsv1.StatefulSet](filepath.Join(plugincontext.TestDataDir, "LLM-Mock-plugins-kvcache.yaml"))
-	statefulSet.Namespace = namespace
-	redisHostSet := false
-	for i := range statefulSet.Spec.Template.Spec.Containers {
-		container := &statefulSet.Spec.Template.Spec.Containers[i]
-		if container.Name != "kthena-runtime" {
-			continue
-		}
+	return createKVCacheFixture(t, kube, namespace, false, "", func(container *corev1.Container) {
+		redisHostSet := false
 		for j := range container.Env {
 			if container.Env[j].Name == "REDIS_HOST" {
 				container.Env[j].Value = fmt.Sprintf("redis-server.%s.svc.cluster.local", redisNamespace)
 				redisHostSet = true
 			}
 		}
+		require.True(t, redisHostSet, "KV-cache fixture Runtime needs REDIS_HOST")
+	})
+}
+
+// setupKVCacheMemoryFixture deploys the KV-cache fixture with the runtime sidecar streaming
+// KV events to routers (KV_EVENT_SYNC_MODE=memory) and without any Redis settings.
+func setupKVCacheMemoryFixture(t *testing.T, kube kubernetes.Interface, namespace string, gated bool) []corev1.Pod {
+	t.Helper()
+	return createKVCacheFixture(t, kube, namespace, gated, kvCacheMemoryEngineCacheSize, func(container *corev1.Container) {
+		env := make([]corev1.EnvVar, 0, len(container.Env)+1)
+		for _, e := range container.Env {
+			if e.Name != "REDIS_HOST" && e.Name != "REDIS_PORT" {
+				env = append(env, e)
+			}
+		}
+		container.Env = append(env, corev1.EnvVar{Name: kvCacheSyncModeEnv, Value: "memory"})
+	})
+}
+
+// setKVCacheEngineCacheSize overrides the simulated engine's KV cache capacity in blocks.
+func setKVCacheEngineCacheSize(t *testing.T, statefulSet *appsv1.StatefulSet, size string) {
+	t.Helper()
+	const flag = "--kv-cache-size="
+	replaced := false
+	for i := range statefulSet.Spec.Template.Spec.Containers {
+		container := &statefulSet.Spec.Template.Spec.Containers[i]
+		for j, arg := range container.Args {
+			if strings.HasPrefix(arg, flag) {
+				container.Args[j] = flag + size
+				replaced = true
+			}
+		}
 	}
-	require.True(t, redisHostSet, "KV-cache fixture Runtime needs REDIS_HOST")
+	require.True(t, replaced, "KV-cache fixture needs a %s argument", flag)
+}
+
+// createKVCacheFixture deploys the KV-cache mock fixture. engineCacheSize, when set, raises the engine cache. With gated set, pods also need the
+// kvCacheReadinessGate condition, which the test flips to make a pod NotReady without restarting it.
+func createKVCacheFixture(t *testing.T, kube kubernetes.Interface, namespace string, gated bool, engineCacheSize string, configureRuntime func(*corev1.Container)) []corev1.Pod {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	statefulSet := utils.LoadYAMLFromFile[appsv1.StatefulSet](filepath.Join(plugincontext.TestDataDir, "LLM-Mock-plugins-kvcache.yaml"))
+	statefulSet.Namespace = namespace
+	runtimeFound := false
+	for i := range statefulSet.Spec.Template.Spec.Containers {
+		container := &statefulSet.Spec.Template.Spec.Containers[i]
+		if container.Name != kvCacheRuntimeContainer {
+			continue
+		}
+		configureRuntime(container)
+		runtimeFound = true
+	}
+	require.True(t, runtimeFound, "KV-cache fixture needs a %s container", kvCacheRuntimeContainer)
+	if engineCacheSize != "" {
+		setKVCacheEngineCacheSize(t, statefulSet, engineCacheSize)
+	}
+
+	if gated {
+		statefulSet.Spec.Template.Spec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: kvCacheReadinessGate}}
+	}
 
 	_, err := kube.AppsV1().StatefulSets(namespace).Create(ctx, statefulSet, metav1.CreateOptions{})
 	require.NoError(t, err, "create KV-cache fixture")
@@ -104,6 +169,9 @@ func setupKVCacheFixture(t *testing.T, kube kubernetes.Interface, namespace, red
 			return err == nil && len(pods.Items) == 0
 		}, 2*time.Minute, time.Second, "KV-cache fixture pods should be deleted")
 	})
+	if gated {
+		go openKVCacheReadinessGate(ctx, kube, namespace)
+	}
 
 	require.Eventually(t, func() bool {
 		current, err := kube.AppsV1().StatefulSets(namespace).Get(ctx, kvCacheFixtureName, metav1.GetOptions{})
@@ -367,6 +435,212 @@ func postKVCacheLifecycle(t *testing.T, pod corev1.Pod, path string) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
 }
 
+// setKVCacheReadinessGate sets the readiness gate condition of a pod, making it Ready or NotReady.
+func setKVCacheReadinessGate(ctx context.Context, kube kubernetes.Interface, pod corev1.Pod, ready bool) error {
+	latest, err := kube.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	status := corev1.ConditionFalse
+	if ready {
+		status = corev1.ConditionTrue
+	}
+	condition := corev1.PodCondition{Type: kvCacheReadinessGate, Status: status, LastTransitionTime: metav1.Now()}
+	found := false
+	for i := range latest.Status.Conditions {
+		if latest.Status.Conditions[i].Type == kvCacheReadinessGate {
+			latest.Status.Conditions[i] = condition
+			found = true
+		}
+	}
+	if !found {
+		latest.Status.Conditions = append(latest.Status.Conditions, condition)
+	}
+	_, err = kube.CoreV1().Pods(pod.Namespace).UpdateStatus(ctx, latest, metav1.UpdateOptions{})
+	return err
+}
+
+// openKVCacheReadinessGate marks every new fixture pod as gate-ready until the context ends.
+func openKVCacheReadinessGate(ctx context.Context, kube kubernetes.Interface, namespace string) {
+	for ctx.Err() == nil {
+		pods, err := kube.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + kvCacheFixtureAppLabel})
+		if err == nil {
+			for _, pod := range pods.Items {
+				hasGate := false
+				for _, c := range pod.Status.Conditions {
+					if c.Type == kvCacheReadinessGate {
+						hasGate = true
+					}
+				}
+				if !hasGate && pod.DeletionTimestamp == nil {
+					_ = setKVCacheReadinessGate(ctx, kube, pod, true)
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// countSelectedPodInRouterPodLogs counts access log lines of one router pod that selected the given pod.
+func countSelectedPodInRouterPodLogs(t *testing.T, kube kubernetes.Interface, routerPod corev1.Pod, podName string, since metav1.Time) int {
+	t.Helper()
+	raw, err := kube.CoreV1().Pods(routerPod.Namespace).GetLogs(routerPod.Name, &corev1.PodLogOptions{SinceTime: &since}).Do(context.Background()).Raw()
+	require.NoError(t, err)
+	return strings.Count(string(raw), "selected_pod="+podName)
+}
+
+// The memory mode helpers below match log lines of the runtime sidecar, because the sidecar exposes no
+// status endpoint and the router has no way to show its index. The strings come from
+// python/kthena/runtime/memory_kv_manager.py: "Router registered: id=", "Router stream ended: id=" and
+// "Runtime memory stream - Model: ". Update these tests when those messages change.
+
+// runtimeLogsSince returns the kthena-runtime sidecar logs of a pod since the given time.
+func runtimeLogsSince(t *testing.T, kube kubernetes.Interface, pod corev1.Pod, since metav1.Time) string {
+	t.Helper()
+	raw, err := kube.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		Container: kvCacheRuntimeContainer,
+		SinceTime: &since,
+	}).Do(context.Background()).Raw()
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// waitForRouterRegistration waits until every sidecar logs a stream registration from each router pod.
+// Each stream starts with the sidecar's full block index, so a registered router has current state.
+func waitForRouterRegistration(t *testing.T, kube kubernetes.Interface, pods []corev1.Pod, routerPods []corev1.Pod, since metav1.Time) {
+	t.Helper()
+	require.NotEmpty(t, routerPods)
+	for _, pod := range pods {
+		for _, routerPod := range routerPods {
+			routerID := routerPod.Namespace + "/" + routerPod.Name
+			require.Eventuallyf(t, func() bool {
+				return strings.Contains(runtimeLogsSince(t, kube, pod, since), "Router registered: id="+routerID)
+			}, kvCacheStreamWaitTimeout, time.Second,
+				"sidecar of pod %s did not log a registration from router %s", pod.Name, routerID)
+		}
+	}
+}
+
+// warmKVCacheMemory sends the prompt directly to the pod and waits until its sidecar has streamed the
+// resulting blocks to the registered routers. Observing the sidecar log avoids probing through the
+// router, which would warm other pods on a miss.
+func warmKVCacheMemory(t *testing.T, kube kubernetes.Interface, pod corev1.Pod, model, prompt string) {
+	t.Helper()
+	since := metav1.NewTime(time.Now())
+	utils.DirectChatToPod(t, pod, model, prompt, 1)
+	streamed := fmt.Sprintf("Runtime memory stream - Model: %s, Pod: %s.%s", model, pod.Name, pod.Namespace)
+	require.Eventuallyf(t, func() bool {
+		return strings.Contains(runtimeLogsSince(t, kube, pod, since), streamed)
+	}, kvCacheStreamWaitTimeout, time.Second,
+		"sidecar of pod %s did not stream KV blocks to routers", pod.Name)
+}
+
+// kvCacheMatchCounts scrapes the router and returns how many kvcache-aware match attempts it has
+// recorded for the model and how many of them were misses (match ratio 0).
+func kvCacheMatchCounts(metricsURL, model string) (total, misses float64, err error) {
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get(metricsURL)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, 0, err
+	}
+	modelLabel := fmt.Sprintf(`model=%q`, model)
+	for _, line := range strings.Split(string(body), "\n") {
+		isCount := strings.HasPrefix(line, kvCacheMatchRatioMetric+"_count{")
+		isMissBucket := strings.HasPrefix(line, kvCacheMatchRatioMetric+"_bucket{") && strings.Contains(line, `le="0"`)
+		if !(isCount || isMissBucket) || !strings.Contains(line, modelLabel) {
+			continue
+		}
+		fields := strings.Fields(line)
+		value, parseErr := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if parseErr != nil {
+			return 0, 0, parseErr
+		}
+		if isCount {
+			total += value
+		} else {
+			misses += value
+		}
+	}
+	return total, misses, nil
+}
+
+// confirmKVCacheOwnership waits until routerPod has applied the blocks a pod streamed. The sidecar logs
+// only show that events were queued, and the selected pod cannot show it either because a miss can pick
+// the owner on a tie. The router's own match ratio can: a probe prompt that only the owner holds is
+// scored as a hit (ratio above 0) only once the router has indexed the owner's blocks. The pod streams
+// its blocks in order, so a router that has applied the probe has applied everything streamed before it,
+// including the prompts under test. Each probe is unique and short, led by a distinct token: a probe
+// that races ahead of the router only warms another pod for its own prompt and never for the prompts
+// under test. chatURL must reach routerPod. Probes are capped so they stay within the engine cache.
+func confirmKVCacheOwnership(t *testing.T, kube kubernetes.Interface, chatURL, model string, pod, routerPod corev1.Pod) {
+	t.Helper()
+	localPort := utils.AllocateLocalPort(t)
+	pf, err := utils.SetupPortForwardToPod(routerPod.Namespace, routerPod.Name, localPort, utils.RouterMetricsPort)
+	require.NoError(t, err, "port-forward to router metrics")
+	defer pf.Close()
+	metricsURL := fmt.Sprintf("http://127.0.0.1:%s/metrics", localPort)
+
+	for attempt := 0; attempt < kvCacheOwnershipProbeAttempts; attempt++ {
+		prompt := fmt.Sprintf("probe%d%s kvcache ownership check", attempt, utils.RandomString(6))
+		warmKVCacheMemory(t, kube, pod, model, prompt)
+		totalBefore, missesBefore, err := kvCacheMatchCounts(metricsURL, model)
+		require.NoError(t, err, "read router match ratio metric")
+		_ = utils.CheckChatCompletionsWithURLAndHeaders(t, chatURL, model, []utils.ChatMessage{utils.NewChatMessage("user", prompt)}, nil)
+		totalAfter, missesAfter, err := kvCacheMatchCounts(metricsURL, model)
+		require.NoError(t, err, "read router match ratio metric")
+		if (totalAfter-totalBefore)-(missesAfter-missesBefore) >= 1 {
+			return
+		}
+		time.Sleep(kvCacheOwnershipProbeInterval)
+	}
+	require.FailNowf(t, "router did not apply the KV blocks streamed by the pod", "pod=%s router=%s", pod.Name, routerPod.Name)
+}
+
+// assertKVCacheHitRouting sends the warmed prompt through the router and expects most requests on the owning pod.
+func assertKVCacheHitRouting(t *testing.T, kube kubernetes.Interface, kthenaNamespace, chatURL, model, prompt string, warmedPod corev1.Pod, pods []corev1.Pod) {
+	t.Helper()
+	hitSince := metav1.NewTime(time.Now())
+	utils.SendRouterChatRequests(t, chatURL, model, prompt, kvCacheRoutingRequestCount)
+	time.Sleep(2 * time.Second)
+
+	warmedCount := utils.CountSelectedPodInRouterLogs(t, kube, kthenaNamespace, warmedPod.Name, hitSince)
+	hitRouted := utils.CountSelectedPodsInRouterLogs(t, kube, kthenaNamespace, hitSince, pods)
+	t.Logf("kvcache-aware hit: warmed pod %s selected %d/%d (of %d log lines)", warmedPod.Name, warmedCount, kvCacheRoutingRequestCount, hitRouted)
+	require.GreaterOrEqual(t, hitRouted, kvCacheRoutingRequestCount/2, "expected access logs for cache-hit requests")
+	require.GreaterOrEqual(t, float64(warmedCount)/float64(hitRouted), 0.9)
+}
+
+// assertKVCacheMissRouting sends unique prompts and expects no single pod to take most of them.
+func assertKVCacheMissRouting(t *testing.T, kube kubernetes.Interface, kthenaNamespace, chatURL, model string, pods []corev1.Pod) {
+	t.Helper()
+	missSince := metav1.NewTime(time.Now())
+	for i := 0; i < kvCacheRoutingRequestCount; i++ {
+		// Keep each miss prompt unique so routed requests do not warm later probes.
+		missPrompt := fmt.Sprintf("miss-%03d kvcache probe", i)
+		utils.SendRouterChatRequests(t, chatURL, model, missPrompt, 1)
+	}
+	time.Sleep(2 * time.Second)
+
+	maxMissCount := 0
+	missRouted := 0
+	for _, pod := range pods {
+		selectedCount := utils.CountSelectedPodInRouterLogs(t, kube, kthenaNamespace, pod.Name, missSince)
+		missRouted += selectedCount
+		if selectedCount > maxMissCount {
+			maxMissCount = selectedCount
+		}
+	}
+	t.Logf("kvcache-aware miss: dominant pod selected %d/%d (of %d log lines)", maxMissCount, kvCacheRoutingRequestCount, missRouted)
+	require.GreaterOrEqual(t, missRouted, kvCacheRoutingRequestCount/2, "expected access logs for cache-miss requests")
+	require.Less(t, float64(maxMissCount)/float64(missRouted), 0.9)
+}
+
 func waitForSchedulerPluginInMetrics(t *testing.T, metricsURL, pluginName, pluginType string) {
 	t.Helper()
 	require.Eventually(t, func() bool {
@@ -541,6 +815,26 @@ func waitForLeastRequestLoadSeparation(t *testing.T, kube kubernetes.Interface, 
 }
 
 const (
+	schedulerKVCacheAwareMemory = `scheduler:
+  pluginConfig:
+  - name: kvcache-aware
+    args:
+      indexMode: memory
+      blockSizeToHash: 8
+      maxBlocksToMatch: 128
+  - name: least-request
+    args:
+      maxWaitingRequests: 10
+  plugins:
+    Filter:
+      enabled: []
+    Score:
+      enabled:
+        - name: kvcache-aware
+          weight: 1
+        - name: least-request
+          weight: 1`
+
 	schedulerKVCacheAware = `scheduler:
   pluginConfig:
   - name: kvcache-aware
