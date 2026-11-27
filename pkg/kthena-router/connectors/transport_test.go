@@ -1410,3 +1410,25 @@ func TestBuildDecodeRequestContextPreservation(t *testing.T) {
 	assert.Equal(t, "sentinel", result.Context().Value(contextKey{}),
 		"request context must be preserved by BuildDecodeRequest")
 }
+
+func TestIsDeterministicClientError(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+		want bool
+	}{
+		{"400 bad request", http.StatusBadRequest, true},
+		{"413 payload too large", http.StatusRequestEntityTooLarge, true},
+		{"422 unprocessable entity", http.StatusUnprocessableEntity, true},
+		{"404 lora not loaded", http.StatusNotFound, false},
+		{"408 request timeout", http.StatusRequestTimeout, false},
+		{"429 too many requests", http.StatusTooManyRequests, false},
+		{"500 internal", http.StatusInternalServerError, false},
+		{"200 ok", http.StatusOK, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsDeterministicClientError(tt.code))
+		})
+	}
+}

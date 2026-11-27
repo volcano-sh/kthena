@@ -110,6 +110,13 @@ func (e *DecodeUpstreamError) Error() string {
 	return fmt.Sprintf("decode request failed with status %d", e.StatusCode)
 }
 
+// IsDeterministicClientError reports whether the status is a request-content
+// error another pod cannot fix; pod-state 4xx (404 LoRA not loaded, 408, 429)
+// must be retried.
+func IsDeterministicClientError(code int) bool {
+	return code == 400 || code == 413 || code == 422
+}
+
 // WriteTo forwards the captured upstream status, headers, and body to the client.
 func (e *DecodeUpstreamError) WriteTo(c *gin.Context) {
 	copyResponseHeaders(c, e.Header)

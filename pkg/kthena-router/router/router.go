@@ -1040,6 +1040,11 @@ func (r *Router) proxy(
 		bodyBytes = b
 	}
 
+	// Set when an attempt fails with a captured (not yet written) upstream
+	// error, so it can still be forwarded to the client below if every retry
+	// fails.
+	var lastUpstreamErr *connectors.DecodeUpstreamError
+
 	for i := 0; i < len(ctx.BestPods); i++ {
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		accesslog.SetUpstreamInfo(c, 0, i+1)
@@ -1070,17 +1075,24 @@ func (r *Router) proxy(
 				return err
 			}
 			var upstreamErr *connectors.DecodeUpstreamError
-			if errors.As(err, &upstreamErr) &&
-				upstreamErr.StatusCode >= 400 && upstreamErr.StatusCode < 500 {
-				// 4xx is deterministic: forward it without retrying another pod.
-				upstreamErr.WriteTo(c)
-				return upstreamErr
+			if errors.As(err, &upstreamErr) {
+				// Request-content 4xx is deterministic; pod-state 4xx (404/408/429) retries below.
+				if connectors.IsDeterministicClientError(upstreamErr.StatusCode) {
+					upstreamErr.WriteTo(c)
+					return upstreamErr
+				}
+				lastUpstreamErr = upstreamErr
 			}
 			continue
 		}
 		// record in prefix cache
 		r.scheduler.RunPostHooks(ctx, i)
 		return nil
+	}
+	if lastUpstreamErr != nil {
+		lastUpstreamErr.WriteTo(c)
+		c.Set("finishReason", "proxy")
+		return lastUpstreamErr
 	}
 	c.AbortWithStatusJSON(http.StatusServiceUnavailable, "request to all pods failed")
 	c.Set("finishReason", "proxy")
@@ -1661,8 +1673,8 @@ func (r *Router) proxyToPDDisaggregated(
 			}
 			var responsesErr *connectors.DecodeUpstreamError
 			if errors.As(err, &responsesErr) {
-				// 4xx is deterministic: forward it without retrying another pair.
-				if responsesErr.StatusCode >= 400 && responsesErr.StatusCode < 500 {
+				// Request-content 4xx is deterministic; pod-state 4xx (404/408/429) retries below.
+				if connectors.IsDeterministicClientError(responsesErr.StatusCode) {
 					responsesErr.WriteTo(c)
 					return responsesErr
 				}
