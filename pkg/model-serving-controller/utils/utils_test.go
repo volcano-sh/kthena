@@ -663,3 +663,57 @@ func TestPodUnschedulableSince(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPodContainersReady(t *testing.T) {
+	tests := []struct {
+		name       string
+		pod        *corev1.Pod
+		conditions []corev1.PodCondition
+		want       bool
+	}{
+		{
+			name: "nil pod",
+			pod:  nil,
+			want: false,
+		},
+		{
+			name: "no conditions",
+			pod:  &corev1.Pod{},
+			want: false,
+		},
+		{
+			name: "containers ready false",
+			pod:  &corev1.Pod{},
+			conditions: []corev1.PodCondition{
+				{Type: corev1.ContainersReady, Status: corev1.ConditionFalse},
+			},
+			want: false,
+		},
+		{
+			name: "containers ready true with pod ready false",
+			pod:  &corev1.Pod{},
+			conditions: []corev1.PodCondition{
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			},
+			want: true,
+		},
+		{
+			name: "only pod ready true without containers ready",
+			pod:  &corev1.Pod{},
+			conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.pod != nil {
+				tt.pod.Status.Conditions = tt.conditions
+			}
+			assert.Equal(t, tt.want, IsPodContainersReady(tt.pod))
+		})
+	}
+}

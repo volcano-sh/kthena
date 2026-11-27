@@ -120,7 +120,7 @@ type ModelServingController struct {
 }
 
 func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
-	selector, err := labels.NewRequirement(workloadv1alpha1.GroupNameLabelKey, selection.Exists, nil)
+	selector, err := labels.NewRequirement(workloadv1alpha1.ModelServingNameLabelKey, selection.Exists, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create label selector, err: %v", err)
 	}
@@ -229,6 +229,9 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 			if metaObj == nil {
 				return false
 			}
+			if _, ok := metaObj.GetLabels()[workloadv1alpha1.GroupNameLabelKey]; !ok {
+				return false
+			}
 			return isOwnedByModelServing(metaObj)
 		},
 		Handler: cache.ResourceEventHandlerFuncs{
@@ -248,6 +251,9 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		FilterFunc: func(obj interface{}) bool {
 			metaObj := getMetaObject(obj)
 			if metaObj == nil {
+				return false
+			}
+			if _, ok := metaObj.GetLabels()[workloadv1alpha1.GroupNameLabelKey]; !ok {
 				return false
 			}
 			return isOwnedByModelServing(metaObj)
@@ -413,8 +419,8 @@ func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 		c.handleInPlaceUpdatingPod(ms, servingGroupName, newPod)
 	case utils.IsPodRunningAndReady(newPod):
 		klog.V(4).Infof("handleReadyPod: %s/%s", newPod.Namespace, newPod.Name)
-		if inPlaceState.InProgress() {
-			// Every patched container restarted: let the rollout finish the update.
+		if inPlaceState.InProgress() || shouldEnqueueOnPodReadinessChange(oldPod, newPod) {
+			// Every patched container restarted or Pod readiness transitioned: reconcile.
 			defer c.enqueueModelServing(ms)
 		}
 		// The pod is available, that is, the state is running, and the container is ready
@@ -429,12 +435,30 @@ func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 			klog.Errorf("handle error pod %s/%s failed for ModelServing %s/%s: %v", newPod.Namespace, newPod.Name, ms.Namespace, ms.Name, err)
 		}
 	default:
-		if roleCoordination(ms) != nil {
+		if roleCoordination(ms) != nil || shouldEnqueueOnPodReadinessChange(oldPod, newPod) {
 			c.enqueueModelServing(ms)
 		}
 		klog.V(4).Infof("handleDefault: %s/%s", newPod.Namespace, newPod.Name)
 		c.addServingGroupAndRoleFromPod(ms, servingGroupName, newPod)
 	}
+}
+
+func shouldEnqueueOnPodReadinessChange(oldPod, newPod *corev1.Pod) bool {
+	if newPod == nil {
+		return false
+	}
+	newReady := utils.IsPodRunningAndReady(newPod)
+	newContainersReady := utils.IsPodContainersReady(newPod)
+	if oldPod == nil {
+		if newReady {
+			return true
+		}
+		return len(newPod.Spec.ReadinessGates) > 0 && newPod.Status.Phase == corev1.PodRunning && newContainersReady
+	}
+	if utils.IsPodRunningAndReady(oldPod) != newReady {
+		return true
+	}
+	return utils.IsPodContainersReady(oldPod) != newContainersReady
 }
 
 func (c *ModelServingController) addServingGroupAndRoleFromPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) {

@@ -296,6 +296,19 @@ func IsPodRunningAndReady(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodRunning && isPodReady(pod)
 }
 
+// IsPodContainersReady returns true if the pod has ContainersReady=True.
+func IsPodContainersReady(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == corev1.ContainersReady {
+			return pod.Status.Conditions[i].Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
 // CheckPodRevision determine if the pod's revision is compliant or not.
 func CheckPodRevision(pod *corev1.Pod, revision string) bool {
 	podRevision, ok := pod.Labels[workloadv1alpha1.RevisionLabelKey]
