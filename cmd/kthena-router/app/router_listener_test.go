@@ -236,29 +236,36 @@ func TestGatewayListenerAuthenticatesEveryPath(t *testing.T) {
 			80: {Listeners: []ListenerConfig{{GatewayKey: "default/gateway", ListenerName: "http", Port: 80}}},
 		},
 	}
-	handler := newListenerHandler(listenerConfig{gateway: &listenerGatewayConfig{lm: lm, port: 80}})
 	valid := issuer.token(t, "https://issuer.example", "alice")
 	body := `{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`
 
 	tests := []struct {
-		name       string
-		method     string
-		path       string
-		token      string
-		wantStatus int
+		name          string
+		method        string
+		path          string
+		token         string
+		exposeMetrics bool
+		wantStatus    int
 	}{
 		{name: "canonical path without token", method: http.MethodPost, path: "/v1/chat/completions", wantStatus: http.StatusUnauthorized},
 		{name: "rewritten prefix without token", method: http.MethodPost, path: "/llm/v1/chat/completions", wantStatus: http.StatusUnauthorized},
 		{name: "rewritten prefix with forged token", method: http.MethodPost, path: "/llm/v1/chat/completions", token: "forged.x.y", wantStatus: http.StatusUnauthorized},
 		{name: "backend endpoint outside /v1 without token", method: http.MethodPost, path: "/tokenize", wantStatus: http.StatusUnauthorized},
 		{name: "uncleaned path without token", method: http.MethodPost, path: "//v1/chat/completions", wantStatus: http.StatusUnauthorized},
+		// Without --expose-metrics-on-router-port the router does not serve
+		// /metrics itself, so the request is proxied to the backend.
 		{name: "backend metrics without token", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusUnauthorized},
+		{name: "router metrics need no token", method: http.MethodGet, path: "/metrics", exposeMetrics: true, wantStatus: http.StatusOK},
 		{name: "model list without token", method: http.MethodGet, path: "/models", wantStatus: http.StatusUnauthorized},
 		{name: "model list with valid token", method: http.MethodGet, path: "/models", token: valid, wantStatus: http.StatusOK},
 		{name: "health check needs no token", method: http.MethodGet, path: "/healthz", wantStatus: http.StatusOK},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			handler := newListenerHandler(listenerConfig{
+				gateway:       &listenerGatewayConfig{lm: lm, port: 80},
+				exposeMetrics: tt.exposeMetrics,
+			})
 			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			if tt.token != "" {
