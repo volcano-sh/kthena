@@ -15,33 +15,41 @@ creation-date: 2026-09-29
 
 ### Summary
 
-When many ModelServing replicas start together, every role replica loads the full checkpoint from storage at once, and the fleet is ready only as fast as that contended load. [ModelExpress (MX)](https://github.com/ai-dynamo/modelexpress) copies post-processed weights from a ready serving replica over NIXL/RDMA (DeepSeek-V4-Pro, TP=8: 11s versus 8m53s for a cold Hugging Face pull). It only helps replicas that start **after** a compatible source is serving.
+When many ModelServing replicas (`ServingGroup`s) start together on initial deployment, scale-up, or rolling update, every role replica loads the full checkpoint from storage at once, and the fleet is ready only as fast as that contended load. [ModelExpress (MX)](https://github.com/ai-dynamo/modelexpress) copies post-processed weights from a ready serving replica over NIXL/RDMA (DeepSeek-V4-Pro, TP=8: 11s versus 8m53s for a cold Hugging Face pull). It only helps replicas that start **after** a compatible source is serving.
 
-This proposal adds an optional `spec.bootstrapAccelerateStrategy` to ModelServing. Instead of creating every role replica at once, the controller creates them in two stages per pool:
+This proposal adds an optional `spec.bootstrapAccelerateStrategy` to ModelServing that selects seeds at **`ServingGroup` granularity** rather than `Role` granularity, avoiding conflicts with `ServingGroup`-scoped gang scheduling, network topology, and cross-role coordination. Instead of creating every `ServingGroup` at once, the controller creates them in two stages:
 
-- While a pool has no ready replica, it creates an initial seed batch of up to the role's `initialSeedReplicas` role replicas. They find no source, so they load from storage and then become MX sources.
-- Once a seed replica is ready, it creates all remaining role replicas. They pull weights P2P from the ready replicas.
+- While any in-scope role pool of a target `ServingGroup` has no ready replica, the controller creates an initial seed batch of up to `initialSeedReplicas` whole `ServingGroup`s. Cold roles in the seed batch find no source, load from storage, and then publish MX metadata.
+- Once every in-scope role pool has a ready source replica, the controller creates all remaining `ServingGroup`s. Their engines pull weights P2P from the ready replicas.
 
-All replicas are identical: each one tries P2P first and falls back to storage. The controller only decides **when** to create them.
+All Pods are identical: each engine tries P2P first and falls back to storage. Role creation inside an already-created `ServingGroup` is never gated; the controller only decides **when** to create whole `ServingGroup`s.
 
 ### Motivation
 
-Weight loading dominates bootstrap of large models on initial deployment, scale-up, and rolling update. MX only helps if replicas start in source-aware order, and only the ModelServing controller sees every ServingGroup, role replica, revision, and desired count.
+Weight loading dominates bootstrap of large models when multiple `ServingGroup`s start on initial deployment, scale-up, or rolling update. MX only helps if replicas start in source-aware order, and only the ModelServing controller sees every `ServingGroup`, role template revision, readiness state, and desired count.
+
+At the same time, `ServingGroup` is the atomic scheduling and cross-role coordination boundary in ModelServing, whereas individual `Role`s within one `ServingGroup` are tightly coupled:
+
+- **Gang scheduling and network topology** ([manager.go](../../pkg/model-serving-controller/podgroupmanager/manager.go#L353-L388)): with `schedulerName: volcano`, one `PodGroup` spans the entire `ServingGroup` (`minMember`, `SubGroupPolicy`, and `NetworkTopology.GroupPolicy`), defaulting `minRoleReplicas` to all `role.replicas`. Selecting seeds per `Role` either splits a `ServingGroup` into partial waves—breaking group topology co-placement and requiring runtime gang-floor overrides of user seed counts—or fragments per-role budgets across different `ServingGroup`s so no group satisfies its gang.
+- **Role coordination** ([role_rolling_update_coordinator.go](../../pkg/model-serving-controller/controller/role_rolling_update_coordinator.go), [role_coordinated_expansion.go](../../pkg/model-serving-controller/controller/role_coordinated_expansion.go#L74)): under `RoleRollingUpdate` with `roleCoordination`, cross-role `maxSkew`, startup `dependencies`, and staged `PodGroup` subgroup expansion (`stageCoordinatedExpansionGang`) govern role starts inside each `ServingGroup`. Once a role's dependency gate opens, `stageCoordinatedExpansionGang` advances its `PodGroup` subgroup minimum to full `role.replicas`; a second per-role seed gate in `scaleUpRoles` holding back part of that role would deadlock scheduling, distort `maxSkew` progress, or leave coordinated replacement slots unfilled while old dependencies remain pinned.
+
+Selecting and admitting seeds as whole `ServingGroup`s bounds cold-start load across `ServingGroup`s while preserving every intra-group gang, topology, and role-coordination invariant.
 
 #### Goals
 
-- Most role replicas start up via P2P from ready peers on initial deployment, scale-up, and rolling update.
-- Bounded cold-start concurrency: only the initial seed batch loads from storage before a source is ready.
+- Most `ServingGroup`s start up via P2P from ready peers on initial deployment, scale-up, and `ServingGroupRollingUpdate` (and multi-step `RoleRollingUpdate` waves also pull P2P via MX environment injection).
+- Bounded cold-start concurrency across groups: at most `initialSeedReplicas` seed `ServingGroup`s cold-load an unready role pool from storage before a source is ready.
+- Zero conflict with gang scheduling, network topology, `RoleRollingUpdate`, or `RoleCoordination`.
 - Opt-in and revision-neutral; no behavior change without the field.
 - Stateless: nothing beyond existing Pods and the datastore.
-- No semantic change to recovery, rolling update (`maxUnavailable`, `maxSurge`, `partition`), or scale-down.
+- No semantic change to recovery, rolling update (`maxUnavailable`, `maxSurge`, `partition`, `roleCoordination`), or scale-down.
 
 #### Non-Goals
 
 - Deploying MX or its metadata backend, or configuring the engine command line (`--load-format modelexpress`). The controller only injects the MX environment variables into selected engine containers (see [Environment injection](#environment-injection)).
 - Calling MX APIs from the controller. A Running role replica is treated as a source.
 - Choosing the load path. MX's fallback chain (P2P → cache → storage → native loader) does that.
-- ModelBooster integration, and cross-role or cross-layout sources.
+- Sub-`ServingGroup` (per-`Role`) seed gating inside a single `ServingGroup`, ModelBooster integration, and cross-role or cross-layout sources.
 
 ### Proposal
 
@@ -49,37 +57,36 @@ Weight loading dominates bootstrap of large models on initial deployment, scale-
 
 | Fact | Consequence |
 |---|---|
-| A role replica is one entry Pod plus `workerReplicas` worker Pods ([Role](../../pkg/apis/workload/v1alpha1/servinggroup_types.go#L54-L86)). | Admit per role replica; one role replica is one MX source. |
-| The revision and the role template hash are hashes of `template.roles` ([revision_util.go](../../pkg/model-serving-controller/utils/revision_util.go#L42-L71)). | A new `Role` field would re-hash and roll every ModelServing on upgrade, so the policy lives at `spec.bootstrapAccelerateStrategy`. |
-| Every role replica is created by [scaleUpServingGroups](../../pkg/model-serving-controller/controller/model_serving_controller.go#L723) or [scaleUpRoles](../../pkg/model-serving-controller/controller/model_serving_controller.go#L1004). This covers initial deployment, scale-up, recovery, and rolling-update re-creation. The datastore is updated synchronously right after the Pods are created. | One admission hook covers every scenario, and no create expectations are needed. |
-| A role becomes `RoleRunning` when all its Pods are Ready, which enqueues the ModelServing ([checkRoleReady](../../pkg/model-serving-controller/controller/model_serving_controller.go#L1916-L1962)). | Reused as "source ready" and as the trigger to create the remaining replicas. |
-| With `schedulerName: volcano`, each ServingGroup has one PodGroup, created before its Pods. Its `minMember` counts $\min(\texttt{minRoleReplicas}[r], \texttt{role.replicas})$ replicas of every role $r$, and defaults to all of them ([calculateRequirements](../../pkg/model-serving-controller/podgroupmanager/manager.go#L350-L383)). `minRoleReplicas` is immutable. | A group's gang-required replicas must be created together, or the created ones never schedule. Replicas beyond them schedule on their own. The seed budget $S$ must be able to hold them. See [Seed budget and gang](#seed-budget-and-gang). |
-| A ServingGroup is Running only when every role has `role.replicas` Running replicas ([checkServingGroupReady](../../pkg/model-serving-controller/controller/model_serving_controller.go#L1888-L1914)), and missing replicas of an existing group are created by `manageRoleReplicasPerGroup` → `scaleUpRoles`. | A group can be created with only its gang-required replicas and completed later; until then it counts as unavailable. |
-| Rolling update paces on `len(groups) - minAvailable - newUnavailable` ([manageRollingUpdate](../../pkg/model-serving-controller/controller/model_serving_controller.go#L1373)). | A group that is not created yet lowers `len(groups)` just like an unavailable one. See [Rolling update](#3-rolling-update). |
+| `spec.replicas` scales whole `ServingGroup`s via [scaleUpServingGroups](../../pkg/model-serving-controller/controller/model_serving_controller.go#L1009) (and whole-group revision reset in [syncRoleReplicas](../../pkg/model-serving-controller/controller/model_serving_controller.go#L1108) when all Pods of an outdated group are gone), updating the datastore synchronously right after creation. | Gate whole `ServingGroup`s at those group-creation points; no create expectations are needed. |
+| A role replica is one entry Pod plus `workerReplicas` worker Pods ([Role](../../pkg/apis/workload/v1alpha1/servinggroup_types.go#L54-L86)), and becomes `RoleRunning` when all its Pods are Ready, which enqueues the ModelServing ([handleReadyPod](../../pkg/model-serving-controller/controller/model_serving_controller.go#L2213-L2264)). | One `RoleRunning` replica is one complete MX source across all worker ranks, and wakes reconciliation so remaining `ServingGroup`s are created once every in-scope role pool has a source. |
+| The workload revision and role template hash are derived from `schedulerName`, `plugins`, and `template.roles` ([revision_util.go](../../pkg/model-serving-controller/utils/revision_util.go#L56-L74), [revision_data.go](../../pkg/model-serving-controller/utils/revision_data.go#L75-L155)). | A new `Role` field would re-hash and roll every ModelServing on upgrade, so the policy lives at `spec.bootstrapAccelerateStrategy`. |
+| With `schedulerName: volcano`, each `ServingGroup` has one `PodGroup` created before its Pods, covering `minMember`, `SubGroupPolicy`, and `NetworkTopology` across its roles ([calculateRequirements](../../pkg/model-serving-controller/podgroupmanager/manager.go#L353-L388)). | Creating an admitted `ServingGroup` in full with its `PodGroup` satisfies gang and topology constraints natively without gang-floor overrides or partial-group backfill; deferred `ServingGroup`s create neither `PodGroup` nor Pods. |
+| Inside an existing `ServingGroup`, [scaleUpRoles](../../pkg/model-serving-controller/controller/model_serving_controller.go#L1236) handles `RoleRecreate`, `RoleRollingUpdate`, and `RoleCoordination` (`maxSkew`, `dependencies`, and [stageCoordinatedExpansionGang](../../pkg/model-serving-controller/controller/role_coordinated_expansion.go#L74)). | Leaving existing `ServingGroup`s ungated avoids any conflict or scheduling deadlock with `RoleCoordination` and intra-group recovery. |
+| `ServingGroupRollingUpdate` paces deletions on `len(groups) - minAvailable - newUnavailable` ([manageRollingUpdateWithPolicy](../../pkg/model-serving-controller/controller/model_serving_controller.go#L1776)). | A `ServingGroup` that is not created yet lowers `len(groups)` just like an unavailable one. See [Rolling update](#3-rolling-update). |
 
 #### Batch creation
 
-The controller changes when role replicas are created; a built-in ModelServing plugin injects MX environment variables into in-scope Pods. Templates and existing labels are unchanged. Every engine runs the same MX load path: it looks for a compatible ready source, loads P2P if there is one, and otherwise falls back to storage. The seed batch simply finds no source.
+The controller changes when whole `ServingGroup`s are created; a built-in ModelServing plugin injects MX environment variables into in-scope Pods. Templates and existing labels are unchanged. Every engine runs the same MX load path: it looks for a compatible ready source, loads P2P if there is one, and otherwise falls back to storage. Cold roles in the seed `ServingGroup` batch simply find no source.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant C as ModelServing controller
     participant K as API server / kubelet
-    participant A as Seed replica
-    participant B as Remaining replicas
+    participant A as Seed ServingGroup(s)
+    participant B as Remaining ServingGroups
     participant MX as ModelExpress server
 
-    Note over C: R=0 → admit up to S, defer the rest
-    C->>K: create seed Pods
-    K->>A: schedule, pull image, start engine
+    Note over C: Any pool R=0 → admit up to S ServingGroups, defer the rest
+    C->>K: create seed PodGroup(s) and Pods
+    K->>A: schedule, pull image, start engines
     A->>MX: discover source (none)
     A->>A: load from storage
     A->>MX: publish metadata
-    A-->>C: Ready → RoleRunning (enqueue)
-    Note over C: R>0 → admit all remaining replicas
-    C->>K: create remaining Pods
-    K->>B: schedule, pull image, start engine
+    A-->>C: Ready → RoleRunning / ServingGroupRunning (enqueue)
+    Note over C: All pools R>0 → admit all remaining ServingGroups
+    C->>K: create remaining PodGroups and Pods
+    K->>B: schedule, pull image, start engines
     B->>MX: discover source
     A-->>B: weights over NIXL/RDMA
     B-->>C: Ready
@@ -89,32 +96,32 @@ sequenceDiagram
 
 ##### Story 1
 
-Initial deployment of 32 single-role replicas with `roles: [{name: prefill, initialSeedReplicas: 2}]`. The controller creates 2 seed replicas first and all remaining 30 once a seed replica is ready, so storage serves 2 cold loads instead of 32.
+Initial deployment of 32 `ServingGroup`s (single-role or disaggregated PD) with `bootstrapAccelerateStrategy: {initialSeedReplicas: 2}`. The controller creates 2 seed `ServingGroup`s first and all remaining 30 once every in-scope role has a ready source, so storage serves 2 `ServingGroup`s instead of 32.
 
 ##### Story 2
 
-Autoscaling from 4 to 16 replicas. The 4 serving replicas are already ready sources, so all 12 new ones are created at once and load P2P.
+Autoscaling `spec.replicas` from 4 to 16 `ServingGroup`s. The 4 serving groups already have ready sources for every role, so all 12 new `ServingGroup`s are created at once and load P2P.
 
 ##### Story 3
 
-Rolling update of the engine image on 32 replicas. The first new-revision seed batch loads from storage, and every later rollout step loads P2P from already-updated replicas.
+`ServingGroupRollingUpdate` of the engine image across 32 `ServingGroup`s. The first new-revision seed `ServingGroup` batch loads from storage, and every later rollout step loads P2P from already-updated groups.
 
 #### Notes/Constraints/Caveats (Optional)
 
-- The engine must be MX-enabled (vLLM ≥ 0.23 with `--load-format modelexpress`, or SGLang `remote_instance` with the `modelexpress` backend) and able to reach the MX server. Otherwise the policy only limits initial cold-start concurrency.
+- The engine must be MX-enabled (vLLM ≥ 0.23 with `--load-format modelexpress`, or SGLang `remote_instance` with the `modelexpress` backend) and able to reach the MX server. Otherwise the policy only limits initial cold-start concurrency across `ServingGroup`s.
 - Readiness must imply that the weights are loaded; a `/health` probe is enough for that. A source publishes its MX metadata only after its readiness endpoint (`MX_ARTIFACT_READY_URL`, set through `modelExpress.readyURL` or defaulting to `/health` for vLLM) responds, so a `RoleRunning` replica may briefly not be discoverable. The next batch's scheduling and engine startup usually cover this gap; a reader that still finds no source falls back to storage. For strict P2P, add a readiness check that also confirms the source is published on the MX server.
-- Deferred replicas are scheduled, and pull their image, only after a seed replica is ready, so these steps don't overlap the seed batch's load. Pre-pull the engine image on GPU nodes to keep the second wave short. In exchange, deferred replicas hold no GPUs while they wait.
+- Deferred `ServingGroup`s are scheduled, and pull their image, only after compatible seed sources are ready, so these steps don't overlap the seed batch's load. Pre-pull the engine image on GPU nodes to keep the second wave short. In exchange, deferred `ServingGroup`s hold no GPUs while they wait.
+- Within an admitted seed `ServingGroup` that sets `role.replicas > 1` (for example `2 prefill + 4 decode`), all replicas of that group are created together so gang scheduling, `NetworkTopology.GroupPolicy`, and `RoleCoordination` stay intact; cold loads are bounded to `initialSeedReplicas × role.replicas` rather than `spec.replicas × role.replicas`. For single-`ServingGroup` deployments (`spec.replicas: 1`) updated via `RoleRollingUpdate`, P2P wave sizing is controlled directly by each role's `maxUnavailable` and `maxSurge`.
 - A full-download init container still blocks P2P loading. Use a shared cache, `MX_MODEL_URI`, or no downloader.
 
 #### Risks and Mitigations
 
 | Risk | Mitigation |
 |---|---|
-| A first-batch replica never becomes Ready (unschedulable, or crash-looping) and stalls its pool. | Failed replicas are re-created by the recovery policy and re-admitted. An unschedulable replica would block the fleet without the feature too. Events and V(4) logs make it visible. Removing the policy creates everything on the next reconcile. |
+| A seed `ServingGroup` never becomes Ready (unschedulable, or crash-looping) and stalls remaining `ServingGroup`s. | Failed roles inside the seed group are re-created immediately by `RoleRecreate` (ungated), and `ServingGroupRecreate` deletes the failed seed group so a replacement seed group is admitted. An unschedulable group would block the fleet without the feature too. Events and V(4) logs make deferral visible. Removing the policy creates all remaining `ServingGroup`s on the next reconcile. |
 | Between batches, other workloads take the capacity that later batches need. | Same as any scale-up; reserve capacity with a Volcano queue or quota. |
-| A role's `initialSeedReplicas` is smaller than its gang requirement. | The controller raises $S$ to at least $g$ at runtime, so a gang unit always fits when $I=0$. See [Seed budget and gang](#seed-budget-and-gang). |
 | MX known issue (nvbug 6519532): a source may stop serving new readers after one of its readers is deleted. Rolling update and scale-down delete readers. | Affected replicas stall until `MX_TRANSFER_TIMEOUT`, then try another source or fall back to storage. Document a lower `MX_TRANSFER_TIMEOUT`. |
-| Controller downgrade | Safe: an old controller simply creates the missing replicas. |
+| Controller downgrade | Safe: an old controller simply creates the missing `ServingGroup`s. |
 | Security | No new privileges or RBAC. In-scope Pods get plain/downward-API environment variables; the MX server address is configured on the controller. |
 
 ### Design Details
@@ -128,8 +135,8 @@ A new optional field on `ModelServingSpec`:
 type ModelServingSpec struct {
 	// ...existing fields...
 
-	// BootstrapAccelerateStrategy creates role replicas in batches so that most of them
-	// load model weights peer-to-peer from ready replicas instead of from storage.
+	// BootstrapAccelerateStrategy creates ServingGroups in source-aware batches so that
+	// most of them load model weights peer-to-peer from ready replicas instead of storage.
 	// +optional
 	BootstrapAccelerateStrategy *BootstrapAccelerateStrategy `json:"bootstrapAccelerateStrategy,omitempty"`
 }
@@ -142,41 +149,34 @@ const (
 	BootstrapAccelerateStrategyProviderModelExpress BootstrapAccelerateStrategyProvider = "ModelExpress"
 )
 
-// BootstrapAccelerateStrategy configures source-aware creation of role replicas.
+// BootstrapAccelerateStrategy configures source-aware creation of ServingGroups.
 type BootstrapAccelerateStrategy struct {
 	// Provider is the weight transfer system used by the inference engines.
 	// +kubebuilder:default=ModelExpress
 	// +optional
 	Provider BootstrapAccelerateStrategyProvider `json:"provider,omitempty"`
 
-	// Roles limits bootstrap acceleration to the listed roles and configures each of them.
-	// At least one role must be specified.
-	// +kubebuilder:validation:MinItems=1
-	// +listType=map
-	// +listMapKey=name
-	// +required
-	Roles []BootstrapRole `json:"roles"`
+	// InitialSeedReplicas is the number of seed ServingGroups that may be created
+	// while any in-scope role pool of the group has no ready source. A percentage
+	// (1%–100%) is taken of spec.replicas and rounded up, e.g. 10% of 3 is 1.
+	// A desired count of zero creates nothing.
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:default=1
+	// +optional
+	InitialSeedReplicas *intstr.IntOrString `json:"initialSeedReplicas,omitempty"`
+
+	// Roles optionally restricts weight-transfer source tracking and provider
+	// environment injection to the named roles in spec.template.roles (for example,
+	// excluding a non-engine router or tokenizer role). When empty, all roles in
+	// spec.template.roles are in scope. Seed admission is always whole-ServingGroup.
+	// +listType=set
+	// +optional
+	Roles []string `json:"roles,omitempty"`
 
 	// ModelExpress configures the ModelExpress provider. If unspecified, no MX
 	// environment variables are injected and users configure the engine themselves.
 	// +optional
 	ModelExpress *ModelExpressConfig `json:"modelExpress,omitempty"`
-}
-
-// BootstrapRole configures bootstrap acceleration for one role.
-type BootstrapRole struct {
-	// Name is the name of a role in spec.template.roles.
-	Name string `json:"name"`
-
-	// InitialSeedReplicas is the number of this role's replicas that may be created while
-	// no ready source exists for it. A percentage is taken of the desired role replicas
-	// (spec.replicas * role.replicas) and rounded up, e.g. 10% of 3 is 1.
-	// With gang scheduling, the effective budget is at least the role's minRoleReplicas
-	// (default: all role replicas in one ServingGroup). A desired count of zero creates nothing.
-	// +kubebuilder:validation:XIntOrString
-	// +kubebuilder:default=1
-	// +optional
-	InitialSeedReplicas *intstr.IntOrString `json:"initialSeedReplicas,omitempty"`
 }
 
 // ModelExpressConfig holds values injected into the Pods of in-scope roles.
@@ -200,9 +200,7 @@ type ModelExpressConfig struct {
 spec:
   replicas: 16
   bootstrapAccelerateStrategy:
-    roles:
-    - name: prefill
-      initialSeedReplicas: 1
+    initialSeedReplicas: 1
     modelExpress:
       engineContainers: ["engine"]
       readyURL: http://127.0.0.1:8000/health
@@ -220,7 +218,7 @@ spec:
               httpGet: {path: /health, port: 8000}
 ```
 
-**Validation** ([validateModelServing](../../pkg/model-serving-controller/webhook/validator.go#L82)): each `roles[].name` must name an existing role, and names are unique (enforced by the list-map schema); each `roles[].initialSeedReplicas` is a positive integer or `1%`–`100%`, with percentages rounded up. A seed count below the gang minimum is accepted and raised to $g$ at runtime, including the default of 1 (see [Seed budget and gang](#seed-budget-and-gang)). `modelExpress.readyURL`, if set, must be an absolute `http` or `https` URL. The field is mutable and takes effect on the next reconcile.
+**Validation** ([validateModelServing](../../pkg/model-serving-controller/webhook/validator.go#L113)): `initialSeedReplicas`, if set, must be a positive integer or `1%`–`100%`, with percentages rounded up against `spec.replicas`. If `roles` is specified, each entry must be nonempty, unique, and name an existing role in `spec.template.roles`; an empty or omitted `roles` selects all roles in `spec.template.roles`. Because seeds are admitted as whole `ServingGroup`s, no gang-minimum comparison or runtime floor override is needed. `modelExpress.readyURL`, if set, must be an absolute `http` or `https` URL. The field is mutable and takes effect on the next reconcile.
 
 **Revision neutrality.** `ModelServingRevision` hashes canonical workload revision data; `RoleRevisionHash` and `CalRoleTemplateHash` hash one role's effective template inputs; `BuildRevisionData` captures roles, `schedulerName`, and user `plugins`. None includes `BootstrapAccelerateStrategy`. MX variables are added to generated Pods, not to the templates, so they do not change these revision inputs. Unit tests lock this in.
 
@@ -232,121 +230,109 @@ The automatically enabled MX plugin is not written into `spec.plugins` or the Co
 
 ##### Pools
 
-Admission is computed per **pool** = (role name, role template hash). Only replicas in the same pool count as sources for each other. For partition-protected ordinals, the role template comes from the ControllerRevision.
+Source compatibility is tracked per **pool** = (role name, role template hash) for each in-scope role (`role.replicas > 0`). Only `RoleRunning` replicas in the same pool count as ready sources for that pool. For partition-protected `ServingGroup` ordinals, the group's workload—and therefore its role templates—comes from its ControllerRevision.
 
-The pool key is the same input the managed plugin turns into `MX_MODEL_REVISION` (prefixed with the ModelServing's namespace and name, since pools never span ModelServings), so the controller's notion of a compatible source mirrors the identity ModelExpress itself matches on. Nothing is persisted on Pods: $R$ and $I$ are read from the datastore (`RoleTemplateHash` and `Status`), which `syncAll` rebuilds from the Pods' labels after a restart.
+The pool key is the same input the managed plugin turns into `MX_MODEL_REVISION` (prefixed with the ModelServing's namespace and name, since pools never span ModelServings), so the controller's notion of a compatible source mirrors the identity ModelExpress itself matches on. Nothing is persisted on Pods: $R_p$ and $I_p$ are read from the datastore (`RoleTemplateHash` and `Status`), which `syncAll` rebuilds from the Pods' labels after a restart.
 
-The template hash does not cover the controller's ModelExpress server address, `modelExpress.engineContainers`, or whether a role was in scope when its Pods were created. After enabling the strategy on an existing fleet or changing those settings, Running replicas of the current template still count as sources even though they may not publish to the expected server. New replicas are then created together and ModelExpress falls back to storage for them, which is the behavior without the feature. Roll the Pods to benefit; changing `initialSeedReplicas` or `readyURL` needs no roll.
+The template hash does not cover the controller's ModelExpress server address, `modelExpress.engineContainers`, or whether a role was in scope when its Pods were created. After enabling the strategy on an existing fleet or changing those settings, Running replicas of the current template still count as sources even though they may not publish to the expected server. New `ServingGroup`s are then created together and ModelExpress falls back to storage for them, which is the behavior without the feature. Roll the Pods to benefit; changing `initialSeedReplicas` or `readyURL` needs no roll.
 
-##### Budget
+##### Budget and `ServingGroup` unit
 
 | Symbol | Meaning |
 |---|---|
-| $R$ | Ready sources: replicas in the pool that are `RoleRunning`. |
-| $I$ | In flight: created replicas in the pool that are neither `RoleRunning` nor `Deleting`. |
-| $D$ | Desired replicas: $\texttt{spec.replicas} \times \texttt{role.replicas}$. |
-| $g$ | Gang minimum per ServingGroup: $\min(\texttt{role.replicas}, \max(1, \texttt{minRoleReplicas}[r]))$ with a PodGroup, otherwise 1. |
+| $D$ | Desired `ServingGroup`s: `spec.replicas`. |
+| $S$ | Seed `ServingGroup` budget: $\min\bigl(D,\ \max(1,\ \texttt{initialSeedReplicas})\bigr)$ when $D > 0$, and $0$ when $D = 0$. |
+| $R_p$ | Ready source replicas: non-deleting role replicas in pool $p$ that are `RoleRunning`. |
+| $I_p$ | In-flight seed `ServingGroup`s for cold pool $p$: non-deleting `ServingGroup`s associated with pool $p$ while $R_p = 0$. |
 
-$$
-S = \min\bigl(D,\ \max(g,\ \texttt{initialSeedReplicas})\bigr)
-$$
+`initialSeedReplicas` defaults to 1, and percentages (`1%`–`100%`) are rounded up against $D = \texttt{spec.replicas}$.
 
-`initialSeedReplicas` defaults to 1, and percentages are rounded up against $D$. While $R = 0$, the free seed budget is $S - I$, and replicas that don't fit stay missing until a later reconcile. Once $R > 0$, the pool has a ready source and all remaining replicas in that pool are admitted.
+Admission gates **only whole `ServingGroup` creation** (never individual `Role` replicas inside an existing `ServingGroup`):
 
-##### Units
+- A candidate `ServingGroup` for workload $W$ touches the pools $P(W) = \{(r, \text{RoleRevisionHash}(W, r))\}$ of its in-scope roles with `role.replicas > 0` (out-of-scope roles and zero-replica roles add no pool constraint).
+- Any pool $p \in P(W)$ with $R_p > 0$ already has a ready P2P source and imposes no limit.
+- If $P(W)$ contains any cold pool ($R_p = 0$), the `ServingGroup` is admitted if and only if $I_p + 1 \le S$ for every cold pool $p \in P(W)$.
+- **Admitted `ServingGroup`:** $I_p$ increments by $1$ for every pool $p \in P(W)$, and the controller creates the group's `PodGroup` (`minMember`, `SubGroupPolicy`, and `NetworkTopology` unchanged) together with **all** of its roles and replicas (`0 .. role.replicas - 1`).
+- **Denied `ServingGroup`:** neither its `PodGroup` nor any of its Pods is created; the group remains absent until a later reconcile. Candidate `ServingGroup`s are evaluated in ascending ordinal order.
+- **No overshoot while $R_p = 0$:** if $S$ drops below $I_p$ (policy lowered while $R_p = 0$), existing groups keep running and further cold `ServingGroup` creation pauses until a source is ready or in-flight groups drop below $S$.
+- **Existing `ServingGroup`s are ungated:** once a `ServingGroup` exists, `syncRoleReplicas` (`scaleUpRoles`) creates or repairs missing role replicas inside that group without consulting bootstrap admission, preserving gang scheduling, `NetworkTopology.GroupPolicy`, `RoleRecreate`, `RoleRollingUpdate`, and `RoleCoordination`.
 
-Replicas are admitted in units, so that gang scheduling stays satisfiable:
+**Example (disaggregated PD).** `spec.replicas: 4` `ServingGroup`s, each group has `2 prefill + 4 decode`, `schedulerName: volcano` (with or without `minRoleReplicas` / `networkTopology`), default `initialSeedReplicas: 1` ($S = 1$).
 
-- **New ServingGroup:** its PodGroup plus its **gang core** (ordinals $0..g_r-1$ of each in-scope role) plus all out-of-scope replicas. `scaleUpRoles` adds the rest later.
-- **Existing group missing part of its core** (for example after `RoleRecreate`): the missing core replicas form one unit.
-- **Any other missing replica:** a unit of one.
-
-A unit is admitted only if it fits in every in-scope pool with $R_p = 0$ that it touches ($u_p \le S_p - I_p$); pools with $R_p > 0$ and out-of-scope roles are not limited. Units go in lowest-ordinal order. Once a unit is denied, later units touching the same pool are also denied in this reconcile, so small units cannot starve a gang core.
-
-##### Seed budget and gang
-
-When `initialSeedReplicas` and the gang core disagree, the gang wins:
-
-- **Floor:** $S \ge g$, so at least one gang core fits when $I = 0$.
-- **No overshoot while $R = 0$:** admission never pushes $I$ above $S$ before a source is ready. If $S$ drops below $I$ (policy lowered while $R = 0$), creation pauses until in-flight replicas finish or one becomes ready.
-- **Per role:** each role counts only its own sources, and a multi-role core needs room in every pool that still has $R = 0$.
-- **`minRoleReplicas`** only raises the effective seed budget. Lowering it shrinks the core and reduces cold starts.
-
-**Example.** Prefill/decode (PD), `replicas: 4`, each group has 2 prefill + 4 decode, `minRoleReplicas: {prefill: 1, decode: 2}` ($g_P = 1$, $g_D = 2$), default `initialSeedReplicas: 1`. The gang floor raises the seed budgets to 1P and 2D.
-
-| Batch | $(R_P, R_D)$ | Created |
+| Batch | $(R_P, R_D)$ | Created `ServingGroup`s |
 |---|---|---|
-| 1 | (0, 0) | Group 0 core (1P + 2D, cold). Group 1's core doesn't fit $S_P$. |
-| 2 | (1, 2) | Groups 1, 2, and 3 cores plus all 4 non-core P and 8 non-core D replicas (7P + 14D, P2P). |
+| 1 | $(0, 0)$ | `ServingGroup` 0 in full (`PodGroup` + 2P + 4D, cold). `ServingGroup`s 1–3 are deferred ($I_P = 1, I_D = 1 = S$). |
+| 2 | $(\ge 1, \ge 1)$ | `ServingGroup`s 1, 2, and 3 in full (6P + 12D, P2P). If `prefill` finishes before `decode` in group 0 ($R_P \ge 1, R_D = 0$), groups 1–3 wait until `decode` also has $R_D \ge 1$. |
 
-Storage serves 3 cold loads instead of 24.
+Storage serves 1 `ServingGroup` (6 role replicas) instead of 4 `ServingGroup`s (24 role replicas), and every `ServingGroup` schedules its `PodGroup` and topology domain as one intact unit.
 
-**Examples** ($D = 8$, $g = 1$; cumulative created replicas):
+**Examples** ($D = 8$ `ServingGroup`s; cumulative created `ServingGroup`s):
 
 | Policy | Batches |
 |---|---|
 | `initialSeedReplicas: 1` | 1 → 8 |
 | `initialSeedReplicas: 2` | 2 → 8 |
-| Scale 8 → 16 | 8 → 16 |
+| `initialSeedReplicas: 25%` | 2 → 8 |
+| Scale `spec.replicas` 8 → 16 | 8 → 16 |
 
 #### 3. Rolling update
 
-`manageRollingUpdate` is unchanged. Replicas it deletes are re-created through `scaleUpServingGroups`/`scaleUpRoles` on a later reconcile, and those pass admission like any other missing replica.
+`manageRollingUpdateWithPolicy` is unchanged. Under `ServingGroupRollingUpdate`, `ServingGroup`s it deletes are re-created through `scaleUpServingGroups` on a later reconcile and pass whole-`ServingGroup` admission like any other missing group.
 
-**R1. A changed role template is a new pool.** It starts with a first batch of $S$; replicas with a different template hash are not counted in its $R$.
+**R1. A changed in-scope role template starts a cold pool.** A new `ServingGroup` whose workload touches a changed pool starts with $R_p = 0$ and is limited to $S$ seed `ServingGroup`s; replicas with a different template hash are not counted in $R_p$.
 
-- Why not share sources across revisions: MX matches sources by `SourceIdentity` (model, revision, TP/PP/EP, dtype, quantization, engine/torch/CUDA versions, GPU arch). The controller can't tell from a template diff whether that identity changed. Counting incompatible old replicas would release a large batch that all falls back to storage.
-- If the change is identity-neutral (for example, resources, probes, `--max-num-seqs`), the new pool's first batch still finds old-revision sources through MX and loads P2P. The only cost is that the first batch is the role's `initialSeedReplicas` wide.
-- Roles whose template didn't change keep their pool. Under `ServingGroupRollingUpdate`, their re-created replicas join the existing pool (usually $R > 0$) and are admitted immediately.
+- Why not share sources across revisions: MX matches sources by `SourceIdentity` (model, revision, TP/PP/EP, dtype, quantization, engine/torch/CUDA versions, GPU arch). The controller can't tell from a template diff whether that identity changed. Counting incompatible old replicas would release a large batch of `ServingGroup`s that all fall back to storage.
+- If the change is identity-neutral (for example, resources, probes, `--max-num-seqs`), the seed `ServingGroup` batch still finds old-revision sources through MX and loads P2P. The only cost is that the first step is `initialSeedReplicas` `ServingGroup`s wide.
+- Roles whose template didn't change keep their existing warm pool ($R_p > 0$). In PD disaggregation, if `ServingGroupRollingUpdate` updates only `prefill`, the seed `ServingGroup` cold-loads only `prefill` while its `decode` replicas immediately pull P2P from the remaining old `ServingGroup`s; if only an out-of-scope role changed, all pools have $R_p > 0$ and no seed throttle applies.
 
-**R2. Pacing stays with the rollout.** A deferred group is absent from the datastore, which lowers `len(groups)` in `maxScaleDown` exactly as one unavailable new group would. `maxUnavailable` is never exceeded.
+**R2. Pacing stays with `ServingGroupRollingUpdate`.** A deferred `ServingGroup` is absent from the datastore, which lowers `len(groups)` in `maxScaleDown` exactly as one unavailable new group would. `maxUnavailable` is never exceeded.
 
-- Only the first step of a changed pool (while $R = 0$) is narrowed, to $S$.
-- Once a seed replica is ready ($R > 0$), admission stops gating that pool and the rollout runs at its normal pace.
-- With `maxSurge` ≥ 1, the seed batch is surge replicas and loads while old capacity is intact.
+- Only the first step of a rollout with a cold pool (while any $R_p = 0$) is narrowed, to $S$ `ServingGroup`s.
+- Once every in-scope pool has a ready replica ($R_p > 0$), admission stops gating and the rollout runs at its normal `maxUnavailable` / `maxSurge` pace.
+- With `maxSurge` ≥ 1, up to $\min(\texttt{maxSurge}, S)$ surge `ServingGroup`s form the seed batch and load while old capacity is intact.
 
-**R3. Outdated replicas** already exist and are not affected. Missing partition-protected ordinals are re-created from their ControllerRevision and admitted in their old pool.
+**R3. Outdated `ServingGroup`s** already exist and are not affected. Missing partition-protected `ServingGroup` ordinals (`ordinal < partition`) are re-created from `CurrentRevision` and admitted against their historical pools.
 
 **R4. Deleting sources.** A replica pulling from a deleted source retries another candidate (MX tries up to 3) and then falls back to storage. On clean shutdown MX marks the source `STALE`, and the MX server's reaper removes stale metadata from its backend (Redis).
 
-**R5. Rollback.** Reverting to a template whose hash still has Running replicas resolves to that pool, so re-created replicas are admitted with $R > 0$ immediately.
+**R5. Rollback.** Reverting to a revision whose in-scope role template hashes still have `RoleRunning` replicas resolves to warm pools ($R_p > 0$), so re-created `ServingGroup`s are admitted immediately.
 
-**R6. `RoleRollingUpdate`.** The same rules apply per role, and unchanged roles are not touched. In PD disaggregation, updating only `prefill` restarts from a seed batch only in the prefill pool.
+**R6. `RoleRollingUpdate` and `RoleCoordination`.** `RoleRollingUpdate` (typically used with a single `ServingGroup`, optionally paired with `roleCoordination`) updates individual role replicas inside existing `ServingGroup`s via `deleteOutdatedRoles` and `scaleUpRoles`. Because bootstrap admission gates only whole `ServingGroup` creation, it does not gate `scaleUpRoles`: role rollout concurrency, `roleCoordination.maxSkew`, startup `dependencies`, and staged `PodGroup` subgroup expansion (`stageCoordinatedExpansionGang`) run without interference or deadlock. Meanwhile, the managed `modelexpress` plugin still injects MX environment variables into every new Pod of in-scope roles, so once the first updated role wave (bounded by that role's `maxUnavailable` / `maxSurge`) is Ready, subsequent rollout steps discover those MX sources and load P2P automatically.
 
-**Example.** `replicas: 8`, `maxUnavailable: 2`, `maxSurge: 0`, `initialSeedReplicas: 1`, new engine image:
+**Example (`ServingGroupRollingUpdate`).** `spec.replicas: 8`, `maxUnavailable: 2`, `maxSurge: 0`, `initialSeedReplicas: 1`, new engine image:
 
-1. The rollout deletes groups 7 and 6. The new pool has $R=0$ and $S=1$, so only group 6 is created, and 7 stays missing. `maxScaleDown` = 7 − 6 − 1 = 0.
-2. Group 6 is Running, so $R=1 > 0$. Group 7 is created, `maxScaleDown` = 8 − 6 − 1 = 1, and group 5 is deleted. From here $R > 0$ and the rollout keeps 2 groups in flight at its normal pace.
+1. The rollout deletes `ServingGroup`s 7 and 6. The new pool has $R=0$ and $S=1$, so only `ServingGroup` 6 is created, and 7 stays missing. `maxScaleDown` = 7 − 6 − 1 = 0.
+2. `ServingGroup` 6 becomes Running, so $R \ge 1 > 0$. `ServingGroup` 7 is created, `maxScaleDown` = 8 − 6 − 1 = 1, and `ServingGroup` 5 is deleted. From here $R > 0$ and the rollout keeps 2 `ServingGroup`s in flight at its normal pace.
 
-Storage serves 1 cold load instead of 8.
+Storage serves 1 seed `ServingGroup` instead of 8.
 
 #### 4. Controller changes
 
-A new package `pkg/model-serving-controller/bootstrap/` holds a pure `Admitter`. [syncModelServing](../../pkg/model-serving-controller/controller/model_serving_controller.go) builds one `Admitter` per reconcile from the datastore ($R$, $I$ per pool), attaches it to the reconcile context, and both creation paths consult it:
+A new package `pkg/model-serving-controller/bootstrap/` holds a pure `Admitter`. [syncModelServing](../../pkg/model-serving-controller/controller/model_serving_controller.go#L669) builds one `Admitter` per reconcile from the datastore ($R_p$, $I_p$ per pool), attaches it to the reconcile context, and whole-`ServingGroup` creation consults it:
 
 ```text
 syncModelServing
-├─ admitter := newBootstrapAdmitter(ms); ctx = bootstrap.WithAdmitter(ctx, admitter)
-├─ syncServingGroupReplicas → scaleUpServingGroups       (A) new groups
-├─ syncRoleReplicas → for each group: core deficit      (B)
-│                   → for each role:  scaleUpRoles       (C) units of one
-└─ rollout, services, status                              unchanged
+├─ admitter := newBootstrapAdmitter(ctx, ms); ctx = bootstrap.WithAdmitter(ctx, admitter)
+├─ syncServingGroupReplicas → scaleUpServingGroups          (A) new ServingGroups (gated)
+├─ syncRoleReplicas         → whole-group revision reset    (B) empty outdated group (gated)
+│                           → manageRoleReplicasPerGroup    (C) existing groups (ungated)
+└─ rollout, services, status                                unchanged
 ```
 
-- **(A) New groups.** For each missing ordinal, `AdmitGroup` the unit (the gang core of in-scope roles). If it is admitted, create the PodGroup (`minMember` unchanged), then only the core's in-scope replicas plus all out-of-scope replicas, then `AddServingGroup`. If it is denied, the group is not created: no PodGroup and no Pods.
-- **(B) Core deficit.** Before the per-role loop, if an existing group is missing part of its core (for example after `RoleRecreate`), those replicas across all roles are admitted as one unit (`PlanGroupCore`) and created together. If the unit is denied, (C) skips them. A repair must fit the budget but ignores pools blocked by an earlier denial in the same reconcile: new groups are reconciled first, and a deferred new group must never starve an existing group whose core was only partially created.
-- **(C) Remaining replicas.** In `scaleUpRoles`, each missing in-scope replica beyond the core is a unit of one (`AdmitReplica`). Out-of-scope roles are not gated.
-- A denied unit blocks its pools for the rest of the reconcile ([Order](#2-admission)). Admitted replicas are added to $I$, and they are also in the datastore right after creation, so the next reconcile sees them.
-- **Observation.** Nothing new is persisted. Each reconcile counts $R$ and $I$ per (role, template hash) from the datastore's Role records; legacy records without a hash resolve it from their ControllerRevision. A replica that is not Running yet is in flight; a replica is a source only once every Pod is Ready.
-- **Wake-ups.** No new handlers. `RoleRunning` transitions already enqueue (the next batch), and so do deletions (lower $I$) and spec edits.
-- **Disabling** the policy: the next reconcile creates every missing replica. **Crash safety:** no batch progress is persisted; after a restart, `syncAll` rebuilds the datastore from observed Pods and admission is recomputed.
-- **Events:** `BootstrapBatchCreated` per pool with the count and the number of ready sources; deferred counts are logged at V(4).
-- **In-place updates.** The managed plugin does not implement `InPlaceUpdatePlugin`, because `MX_MODEL_REVISION` is bound to the role template hash at creation and cannot be patched in place. With the strategy set, `updateMethod: InPlace` falls back to recreating outdated replicas, which then pass admission like any other missing replica.
+- **(A) New `ServingGroup`s.** For each missing ordinal in `[0, expectedCount)`, resolve its `workload` (`CurrentRevision` if `ordinal < partition`, else `newRevision`) and call `AdmitGroup(workload) bool`. If admitted, create the `PodGroup` (`minMember`, `SubGroupPolicy`, and `NetworkTopology` unchanged), create all roles and replicas of the `ServingGroup`, and `AddServingGroup`. If denied, the `ServingGroup` is not created: no `PodGroup` and no Pods.
+- **(B) Empty outdated `ServingGroup` reset.** In `syncRoleReplicas`, when `RolloutStrategy` is not `RoleRollingUpdate` and an outdated `ServingGroup` already has zero live or terminating Pods left, re-creating it onto its target revision also checks `AdmitGroup(workload)`. If denied, re-creation waits until compatible sources are ready.
+- **(C) Existing `ServingGroup`s.** `manageRoleReplicasPerGroup` and `scaleUpRoles` are not gated by `Admitter`. Partial group creation recovery, `RoleRecreate`, `RoleRollingUpdate`, and `RoleCoordination` create missing role replicas immediately within existing `ServingGroup`s.
+- Admitted `ServingGroup`s increment $I_p$ by 1 for each touched pool in `Admitter`, and are recorded in the datastore right after Pod creation so the next reconcile sees them.
+- **Observation.** Nothing new is persisted. Each reconcile computes $R_p$ and $I_p$ per `(role, templateHash)` from non-deleting `ServingGroup`s in the datastore; legacy `Role` records without a stored hash resolve it from their ControllerRevision. Each `RoleRunning` replica increments $R_p$, and each non-deleting `ServingGroup` that carries pool $p$ (via an observed non-deleting `Role` record, or via its group revision while role records for that role are not yet created) counts once toward $I_p$.
+- **Wake-ups.** No new handlers. Both `RoleRunning` and `ServingGroupRunning` transitions already enqueue the ModelServing ([handleReadyPod](../../pkg/model-serving-controller/controller/model_serving_controller.go#L2213-L2264)), and so do deletions (lowering $I_p$) and spec edits.
+- **Disabling** the policy: the next reconcile creates every missing `ServingGroup`. **Crash safety:** no batch progress is persisted; after a restart, `syncAll` rebuilds the datastore from observed Pods and admission is recomputed.
+- **Events:** `BootstrapBatchCreated` summarizing admitted `ServingGroup`s and ready source counts; deferred `ServingGroup`s are logged at V(4).
+- **In-place updates.** The managed plugin does not implement `InPlaceUpdatePlugin`, because `MX_MODEL_REVISION` is bound to the role template hash at creation and cannot be patched in place. With the strategy set, `updateMethod: InPlace` falls back to recreating outdated units, which then pass `ServingGroup` admission (under `ServingGroupRollingUpdate`) or roll per role with MX injection (under `RoleRollingUpdate`).
 - **Configuration.** The ModelExpress server address is a controller flag, `--modelexpress-server-address` (Helm: `controllerManager.modelExpressServerAddress`).
 
 ##### Environment injection
 
-A built-in `modelexpress` plugin implements the existing [OnPodCreate hook](../../pkg/model-serving-controller/plugins/manager.go#L86-L100). `buildPluginChain` appends it automatically after user plugins when `bootstrapAccelerateStrategy.provider` is `ModelExpress`, scoped to the strategy's roles and both entry and worker Pods. Users do not need a duplicate `spec.plugins` entry; explicit registration of this managed plugin is rejected. Its `OnPodReady` is a no-op. Admission remains in the controller because a per-Pod plugin cannot defer a whole gang unit.
+A built-in `modelexpress` plugin implements the existing [OnPodCreate hook](../../pkg/model-serving-controller/plugins/manager.go#L160-L174). `buildPluginChain` appends it automatically after user plugins when `bootstrapAccelerateStrategy.provider` is `ModelExpress`, scoped to the strategy's in-scope roles (all roles when `roles` is empty) and both entry and worker Pods. Users do not need a duplicate `spec.plugins` entry; explicit registration of this managed plugin is rejected. Its `OnPodReady` is a no-op. Admission remains in the controller because a per-Pod plugin cannot defer a whole `ServingGroup` and its `PodGroup`.
 
 The plugin injects the variables below **only into inference-engine containers**, selected by `modelExpress.engineContainers` from `pod.spec.containers`. Init containers and unselected regular containers (including sidecars) are never modified. The webhook requires every in-scope template to contain a selected engine container; if a user plugin still leaves a rendered Pod without one, the plugin fails that Pod's creation with a `PluginError` event and the reconcile is retried. The plugin does not infer engine containers from images or command lines. If `modelExpress` is omitted, nothing is injected; users configure their engine containers themselves.
 
@@ -435,10 +421,11 @@ The injection happens at Pod creation, so changing the ModelExpress configuratio
 
 | Feature | Behavior |
 |---|---|
-| Gang scheduling / network topology | A group's gang core is created together with its PodGroup, and seed budgets are at least $g$ ([Seed budget and gang](#seed-budget-and-gang)). Deferred groups get no PodGroup yet. |
-| `RoleRecreate` / `ServingGroupRecreate` recovery | Re-created replicas pass admission, usually with $R > 0$. |
-| Pod re-creation inside an existing role replica | Not gated. The replacement Pod runs the MX plugin and rejoins its replica's pool. |
-| Scale-down | Deferred replicas don't exist, so there is nothing to delete. |
+| Gang scheduling / network topology | Every admitted `ServingGroup` is created in full together with its `PodGroup` (`minMember`, `SubGroupPolicy`, and `NetworkTopology`); deferred `ServingGroup`s get neither `PodGroup` nor Pods. No gang-floor override or partial-group creation is needed. |
+| `RoleRollingUpdate` / `RoleCoordination` | Not gated by bootstrap admission, avoiding any conflict with `maxSkew`, startup `dependencies`, or staged `PodGroup` subgroup expansion (`stageCoordinatedExpansionGang`). Pods still receive MX env injection so later rollout steps pull P2P after the first wave is Ready. |
+| `ServingGroupRecreate` recovery | Whole-group re-creation passes `AdmitGroup`, usually warm with $R_p > 0$ (or re-admitted in the seed slot if the seed group itself failed while $R_p = 0$). |
+| `RoleRecreate` recovery and Pod re-creation inside an existing `ServingGroup` | Not gated. Replacement roles and Pods inside an already-created `ServingGroup` are created immediately, run the MX plugin, and rejoin their pool. |
+| Scale-up / scale-down | Increasing `spec.replicas` passes `AdmitGroup`; increasing `role.replicas` inside existing `ServingGroup`s is ungated and pulls P2P from already-Running replicas. Deferred `ServingGroup`s don't exist, so scale-down has nothing extra to delete. |
 | kthena-router | Unchanged. |
 | User plugins | Existing hooks are unchanged; the managed MX plugin runs last. Effective plugin configuration participates in source identity. |
 
@@ -446,21 +433,22 @@ The injection happens at Pod creation, so changing the ModelExpress configuratio
 
 Unit tests (table-driven, `-race` where concurrent):
 
-- **Admitter:** $S$ when $R=0$ and unbounded when $R>0$, per-role integer and percentage seeds, the default of 1 when a seed is unset, the gang floor $g$, $D=0$, whole-unit fit across pools, blocking after a denied unit, $I > S$ after the seed policy is lowered while $R=0$, and the batch sequences in the examples above.
-- **Pool identity:** replicas of another role template are neither sources nor in flight for the current pool; Running replicas without a template hash are not sources; legacy datastore records resolve their hash from the ControllerRevision.
-- **Controller:** new-group core creation with its PodGroup, core-deficit units, units of one, out-of-scope roles ungated, a failed unit render creating nothing, disabling the policy, and rolling-update pacing (`maxUnavailable`, `maxSurge`, `partition`, rollback).
-- **Revision neutrality:** adding, editing, or removing the strategy does not change `ModelServingRevision`, `CalRoleTemplateHash`, or `BuildRevisionData`.
-- **Environment injection:** only selected engine containers change; init containers and sidecars are untouched; `MX_MODEL_REVISION`, `MX_SERVER_ADDRESS`, `MX_P2P_METADATA`, `MX_METADATA_PORT`, `MX_WORKER_GRPC_PORT`, `MX_NIXL_BACKEND`, `MX_INSTANT_TENSOR`, `MX_ARTIFACT_TRANSFER`, `MX_POOL_REG`, `MX_VMM_ARENA`, `MX_ARTIFACT_READY_URL`, `MODEL_EXPRESS_LOG_LEVEL`, `NIXL_LOG_LEVEL`, `UCX_LOG_LEVEL`, `MX_WORKER_HOST`, `POD_NAME`, `POD_UID`, `POD_NAMESPACE`, and `MX_RDMA_NIC_PIN` are injected as expected; `MX_MODEL_REVISION` differs between ModelServings with identical role templates and between positions of one replica; `MX_RDMA_NIC_PIN` is not injected when `UCX_NET_DEVICES` is set; existing user-specified variables win; changing `readyURL` keeps the pool; nothing is injected when `modelExpress` is omitted; `MODEL_EXPRESS_URL` is never injected.
-- **Webhook:** unknown or duplicate `roles[].name`, invalid `roles[].initialSeedReplicas`, malformed `readyURL`, missing engine containers in templates, and explicit registration of the managed plugin.
+- **Admitter:** whole-`ServingGroup` admission up to $S$ when any touched pool has $R_p=0$ and unbounded when all touched pools have $R_p>0$; integer, percentage (of `spec.replicas`), and default (1) `initialSeedReplicas`; $D=0$; multi-role PD holding subsequent `ServingGroup`s until every in-scope role pool has $R_p>0$; optional `roles` scoping; $I_p > S$ when `initialSeedReplicas` is lowered while $R_p=0$; and the batch sequences in the examples above.
+- **Pool identity:** replicas of another role template are not sources for the current pool; Running replicas without a template hash are not sources; legacy datastore records resolve their hash from the ControllerRevision; a partially created `ServingGroup` still counts once in $I_p$ via its group revision.
+- **Controller:** whole-`ServingGroup` creation with its `PodGroup` and all roles, deferred `ServingGroup`s creating neither `PodGroup` nor Pods, existing `ServingGroup`s ungated in `scaleUpRoles` (`RoleRecreate`, `RoleRollingUpdate`, `RoleCoordination`), empty outdated group reset gated by `AdmitGroup`, disabling the policy, and `ServingGroupRollingUpdate` pacing (`maxUnavailable`, `maxSurge`, `partition`, partial role template updates, rollback).
+- **Revision neutrality:** adding, editing, or removing the strategy does not change `ModelServingRevision`, `RoleRevisionHash`, `CalRoleTemplateHash`, or `BuildRevisionData`.
+- **Environment injection:** only selected engine containers change; init containers and sidecars are untouched; default all-roles scope when `roles` is omitted and explicit `roles` filtering when set; `MX_MODEL_REVISION`, `MX_SERVER_ADDRESS`, `MX_P2P_METADATA`, `MX_METADATA_PORT`, `MX_WORKER_GRPC_PORT`, `MX_NIXL_BACKEND`, `MX_INSTANT_TENSOR`, `MX_ARTIFACT_TRANSFER`, `MX_POOL_REG`, `MX_VMM_ARENA`, `MX_ARTIFACT_READY_URL`, `MODEL_EXPRESS_LOG_LEVEL`, `NIXL_LOG_LEVEL`, `UCX_LOG_LEVEL`, `MX_WORKER_HOST`, `POD_NAME`, `POD_UID`, `POD_NAMESPACE`, and `MX_RDMA_NIC_PIN` are injected as expected; `MX_MODEL_REVISION` differs between ModelServings with identical role templates and between positions of one replica; `MX_RDMA_NIC_PIN` is not injected when `UCX_NET_DEVICES` is set; existing user-specified variables win; changing `readyURL` keeps the pool; nothing is injected when `modelExpress` is omitted; `MODEL_EXPRESS_URL` is never injected.
+- **Webhook:** invalid `initialSeedReplicas` (zero, negative, or outside `1%`–`100%`), unknown, empty, or duplicate `roles` entries, malformed `readyURL`, missing engine containers in in-scope role templates (and out-of-scope roles ignored), and explicit registration of the managed plugin.
 
-E2E (`test/e2e/controller-manager`): a multi-replica ModelServing with the strategy and a stub engine (no MX needed) verifies batch order, gang cores with `schedulerName: volcano`, and a rolling update.
+E2E (`test/e2e/controller-manager`): a multi-`ServingGroup` ModelServing with the strategy and a stub engine (no MX needed) verifies seed-then-remaining `ServingGroup` batch order, intact full-group scheduling with `schedulerName: volcano`, and a `ServingGroupRollingUpdate`.
 
 ### Alternatives
 
+- **Select seeds at `Role` granularity (`roles[].initialSeedReplicas`):** configuring and admitting seeds per role replica conflicts with `ServingGroup`-level scheduling and cross-role coordination. With Volcano gang scheduling and `NetworkTopology.GroupPolicy`, one `PodGroup` spans the `ServingGroup`; gating individual role replicas forces splitting a group into a "gang core" and deferred non-core replicas (weakening group topology co-placement and requiring runtime gang-floor overrides when `initialSeedReplicas < minRoleReplicas`) and can fragment role budgets across different groups during recovery so none completes its gang. Under `RoleRollingUpdate` with `RoleCoordination`, a second per-role gate in `scaleUpRoles` also conflicts with `maxSkew`, startup `dependencies`, and `stageCoordinatedExpansionGang` (which raises the `PodGroup` subgroup minimum to full `role.replicas` once dependencies are Ready, deadlocking scheduling if bootstrap admission holds back part of that role). Admitting whole `ServingGroup`s avoids both classes of conflict.
 - **Create all Pods and gate the engine with an injected init container** (released by a Pod label through the downward API): overlaps scheduling and image pulls with the first batch's load. However, waiting Pods hold GPUs, it needs Pod `patch` RBAC, a gate image, and downward-API refresh latency, and a gate crash triggers recovery.
 - **`schedulingGates`:** adds Pod patching and interacts with PodGroup `minMember`, with no clear gain over deferring creation.
 - **Policy on `Role`:** re-hashes every existing role on upgrade and rolls the fleet.
-- **Plugin-only batching:** plugins only have per-Pod hooks and cannot defer a whole gang unit. Use a plugin for MX Pod configuration, but keep admission in the controller.
-- **Pods self-coordinate via MX/Redis:** needs backend credentials in every Pod and has no view of desired replicas or rollouts.
+- **Plugin-only batching:** plugins only have per-Pod hooks and cannot defer a whole `ServingGroup` and its `PodGroup`. Use a plugin for MX Pod configuration, but keep admission in the controller.
+- **Pods self-coordinate via MX/Redis:** needs backend credentials in every Pod and has no view of desired `ServingGroup`s or rollouts.
 - **Query MX `ListSources`:** more precise (catches wedged sources) but couples the controller to MX networking and auth. Possible later behind `provider`.
 - **Share pools across revisions** (for example, a user-declared source key): removes the first batch for identity-neutral updates, but a misconfiguration causes a fallback stampede.
