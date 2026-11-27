@@ -125,6 +125,7 @@ Service environment variables (advanced, set via `extraEnv`):
 | `RENDERER_STARTUP_TIMEOUT_SECONDS` | `600`      | Max time for a renderer to become healthy (includes tokenizer download)        |
 | `RENDERER_MAX_RESTARTS`            | `3`        | Consecutive restarts allowed for a crashed renderer                            |
 | `RENDERER_STABLE_WINDOW_SECONDS`   | `600`      | How long a renderer must run while ready before its budget is restored         |
+| `RENDERER_MAX_IN_FLIGHT`           | `0`        | Max concurrent requests proxied to one renderer; `0` = unlimited               |
 | `HF_TOKEN`                         | —          | Hugging Face token for gated models                                            |
 | `HF_ENDPOINT`                      | —          | Alternative Hugging Face endpoint, e.g. a private mirror                       |
 

@@ -74,6 +74,11 @@ type Config struct {
 	// RendererStableWindow is how long a renderer must run while ready before
 	// its restart budget is restored.
 	RendererStableWindow time.Duration
+	// RendererMaxInFlight caps the number of concurrent requests being proxied
+	// to a single renderer subprocess. When the limit is reached, new requests
+	// receive 503 so the router can fall back to engine-side tokenization.
+	// Set to 0 (the default) for no per-renderer concurrency limit.
+	RendererMaxInFlight int
 	// ProxyTimeout bounds a proxied /tokenize request.
 	ProxyTimeout time.Duration
 }
@@ -94,6 +99,7 @@ func ConfigFromEnv() Config {
 		RendererStartupTimeout: time.Duration(envInt("RENDERER_STARTUP_TIMEOUT_SECONDS", 600)) * time.Second,
 		RendererMaxRestarts:    envInt("RENDERER_MAX_RESTARTS", 3),
 		RendererStableWindow:   time.Duration(envInt("RENDERER_STABLE_WINDOW_SECONDS", 600)) * time.Second,
+		RendererMaxInFlight:    envInt("RENDERER_MAX_IN_FLIGHT", 0),
 		ProxyTimeout:           time.Duration(envInt("PROXY_TIMEOUT_SECONDS", 5)) * time.Second,
 	}
 }

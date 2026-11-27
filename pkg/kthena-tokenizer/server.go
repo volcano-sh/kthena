@@ -116,12 +116,22 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 			return
 		}
 
-		endpoint, ok := s.manager.EndpointFor(payload.Model)
+		// AcquireEndpoint atomically finds the ready renderer, enforces the
+		// per-renderer in-flight limit, and returns a release func bound to
+		// that exact renderer instance. This eliminates the race where
+		// SetModels can swap the renderer between endpoint lookup and release.
+		endpoint, release, ok, atCapacity := s.manager.AcquireEndpoint(payload.Model)
 		if !ok {
-			writeError(w, http.StatusServiceUnavailable,
-				fmt.Sprintf("no ready tokenizer for model %q", payload.Model))
+			if atCapacity {
+				writeError(w, http.StatusServiceUnavailable,
+					fmt.Sprintf("tokenizer for model %q is at capacity", payload.Model))
+			} else {
+				writeError(w, http.StatusServiceUnavailable,
+					fmt.Sprintf("no ready tokenizer for model %q", payload.Model))
+			}
 			return
 		}
+		defer release()
 
 		resp, err := s.client.Post(endpoint+path, "application/json", bytes.NewReader(body))
 		if err != nil {
@@ -138,6 +148,11 @@ func (s *Server) proxy(path string) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", contentType)
 		w.WriteHeader(resp.StatusCode)
+		// Set a write deadline so a stalled downstream client cannot hold
+		// the renderer slot indefinitely. SetWriteDeadline is best-effort;
+		// not all ResponseWriters support it.
+		rc := http.NewResponseController(w)
+		_ = rc.SetWriteDeadline(time.Now().Add(s.config.ProxyTimeout))
 		_, _ = io.Copy(w, resp.Body)
 	}
 }
