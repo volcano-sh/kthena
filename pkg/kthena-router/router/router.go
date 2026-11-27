@@ -67,6 +67,14 @@ const (
 	failedRequestFinishReason     = "request_failed"
 )
 
+// renderableAPIs maps the paths of the APIs the engine can render a prompt of
+// to those APIs.
+var renderableAPIs = map[string]common.API{
+	"/v1/chat/completions": common.APIChatCompletions,
+	"/v1/responses":        common.APIResponses,
+	"/v1/messages":         common.APIMessages,
+}
+
 func requestFinishReason(c *gin.Context) string {
 	if reason, exists := c.Get("finishReason"); exists {
 		if value, ok := reason.(string); ok && value != "" {
@@ -396,6 +404,10 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
 			c.Set("finishReason", "prompt_parsing")
 			return
+		}
+		if api, ok := renderableAPIs[c.Request.URL.Path]; ok {
+			prompt.Request = modelRequest
+			prompt.API = api
 		}
 		// Store parsed prompt to avoid re-parsing in doLoadbalance.
 		c.Set(PromptKey, prompt)

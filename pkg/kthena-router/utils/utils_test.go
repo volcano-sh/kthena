@@ -17,14 +17,29 @@ limitations under the License.
 package utils
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"testing"
 
+	"github.com/cespare/xxhash"
+	"github.com/stretchr/testify/assert"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
+
+func image(source string, offset int) common.MultiModalItem {
+	return common.MultiModalItem{Modality: common.ModalityImage, Hash: xxhash.Sum64String(source), Offset: offset}
+}
+
+func textPart(text string) map[string]interface{} {
+	return map[string]interface{}{"type": "text", "text": text}
+}
+
+func imagePart(url string) map[string]interface{} {
+	return map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": url}}
+}
 
 func TestGetNamespaceName(t *testing.T) {
 	obj := &metav1.ObjectMeta{
@@ -119,13 +134,13 @@ func TestParsePrompt(t *testing.T) {
 			},
 			want: &common.ChatMessage{
 				Messages: []common.Message{
-					{Role: "user", Content: "hello\nworld"},
+					{Role: "user", Content: "hello\nworld", ContentParts: []map[string]interface{}{textPart("hello"), textPart("world")}},
 				},
 			},
 			wantErr: false,
 		},
 		{
-			name: "chat mixed text and image extracts only text",
+			name: "chat mixed text and image keeps text and image",
 			body: map[string]interface{}{
 				"messages": []interface{}{map[string]interface{}{
 					"role": "user",
@@ -135,10 +150,15 @@ func TestParsePrompt(t *testing.T) {
 					},
 				}},
 			},
-			want: &common.ChatMessage{Messages: []common.Message{{Role: "user", Content: "describe"}}},
+			want: &common.ChatMessage{Messages: []common.Message{{
+				Role:         "user",
+				Content:      "describe",
+				MultiModal:   []common.MultiModalItem{image("https://example.com/cat.png", 8)},
+				ContentParts: []map[string]interface{}{textPart("describe"), imagePart("https://example.com/cat.png")},
+			}}},
 		},
 		{
-			name: "chat non-text-only content has an empty schedulable prompt",
+			name: "chat image-only content keeps the message",
 			body: map[string]interface{}{
 				"messages": []interface{}{map[string]interface{}{
 					"role": "user",
@@ -148,7 +168,82 @@ func TestParsePrompt(t *testing.T) {
 					}},
 				}},
 			},
+			want: &common.ChatMessage{Messages: []common.Message{{
+				Role:         "user",
+				MultiModal:   []common.MultiModalItem{image("https://example.com/cat.png", 0)},
+				ContentParts: []map[string]interface{}{imagePart("https://example.com/cat.png")},
+			}}},
+		},
+		{
+			name: "chat content without text or media has an empty schedulable prompt",
+			body: map[string]interface{}{
+				"messages": []interface{}{map[string]interface{}{
+					"role": "user",
+					"content": []interface{}{
+						map[string]interface{}{"type": "file", "file": map[string]interface{}{"file_id": "file-1"}},
+						map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{}},
+					},
+				}},
+			},
 			want: &common.ChatMessage{Messages: []common.Message{}},
+		},
+		{
+			name: "chat media parts of every supported type keep request order",
+			body: map[string]interface{}{
+				"messages": []interface{}{map[string]interface{}{
+					"role": "user",
+					"content": []interface{}{
+						map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "data:image/png;base64,iVBORw0KGgo="}},
+						map[string]interface{}{"type": "text", "text": "compare"},
+						map[string]interface{}{"type": "image_url", "image_url": "https://example.com/dog.png"},
+						map[string]interface{}{"type": "input_audio", "input_audio": map[string]interface{}{"data": "UklGRg==", "format": "wav"}},
+						map[string]interface{}{"type": "audio_url", "audio_url": map[string]interface{}{"url": "https://example.com/a.mp3"}},
+						map[string]interface{}{"type": "video_url", "video_url": map[string]interface{}{"url": "https://example.com/v.mp4"}},
+					},
+				}},
+			},
+			want: &common.ChatMessage{Messages: []common.Message{{
+				Role:    "user",
+				Content: "compare",
+				MultiModal: []common.MultiModalItem{
+					image("data:image/png;base64,iVBORw0KGgo=", 0),
+					image("https://example.com/dog.png", 7),
+					{Modality: common.ModalityAudio, Hash: xxhash.Sum64String("UklGRg=="), Offset: 7},
+					{Modality: common.ModalityAudio, Hash: xxhash.Sum64String("https://example.com/a.mp3"), Offset: 7},
+					{Modality: common.ModalityVideo, Hash: xxhash.Sum64String("https://example.com/v.mp4"), Offset: 7},
+				},
+				ContentParts: []map[string]interface{}{
+					imagePart("data:image/png;base64,iVBORw0KGgo="),
+					textPart("compare"),
+					{"type": "image_url", "image_url": "https://example.com/dog.png"},
+					{"type": "input_audio", "input_audio": map[string]interface{}{"data": "UklGRg==", "format": "wav"}},
+					{"type": "audio_url", "audio_url": map[string]interface{}{"url": "https://example.com/a.mp3"}},
+					{"type": "video_url", "video_url": map[string]interface{}{"url": "https://example.com/v.mp4"}},
+				},
+			}}},
+		},
+		{
+			name: "anthropic image blocks",
+			body: map[string]interface{}{
+				"messages": []interface{}{map[string]interface{}{
+					"role": "user",
+					"content": []interface{}{
+						map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+						map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "url", "url": "https://example.com/cat.png"}},
+						map[string]interface{}{"type": "text", "text": "describe"},
+					},
+				}},
+			},
+			want: &common.ChatMessage{Messages: []common.Message{{
+				Role:       "user",
+				Content:    "describe",
+				MultiModal: []common.MultiModalItem{image("iVBORw0KGgo=", 0), image("https://example.com/cat.png", 0)},
+				ContentParts: []map[string]interface{}{
+					imagePart("data:image/png;base64,iVBORw0KGgo="),
+					imagePart("https://example.com/cat.png"),
+					textPart("describe"),
+				},
+			}}},
 		},
 		{
 			name: "assistant tool call without text has an empty schedulable prompt",
@@ -204,7 +299,7 @@ func TestParsePrompt(t *testing.T) {
 			},
 			want: &common.ChatMessage{
 				Messages: []common.Message{
-					{Role: "system", Content: "Follow policy.\nBe concise."},
+					{Role: "system", Content: "Follow policy.\nBe concise.", ContentParts: []map[string]interface{}{textPart("Follow policy."), textPart("Be concise.")}},
 					{Role: "user", Content: "hello"},
 				},
 			},
@@ -245,14 +340,35 @@ func TestParsePrompt(t *testing.T) {
 			},
 			want: &common.ChatMessage{
 				Messages: []common.Message{
-					{Role: "user", Content: "hello\nworld"},
+					{Role: "user", Content: "hello\nworld", ContentParts: []map[string]interface{}{textPart("hello"), textPart("world")}},
 					{Role: "assistant", Content: "previous answer"},
 				},
 			},
 			wantErr: false,
 		},
 		{
-			name: "responses non-text input has an empty schedulable prompt",
+			name: "responses image url input converts to an image_url part",
+			body: map[string]interface{}{
+				"input": []interface{}{
+					map[string]interface{}{
+						"type": "message",
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "input_text", "text": "describe"},
+							map[string]interface{}{"type": "input_image", "image_url": "https://example.com/image.png", "detail": "high"},
+						},
+					},
+				},
+			},
+			want: &common.ChatMessage{Messages: []common.Message{{
+				Role:         "user",
+				Content:      "describe",
+				MultiModal:   []common.MultiModalItem{image("https://example.com/image.png", 8)},
+				ContentParts: []map[string]interface{}{textPart("describe"), imagePart("https://example.com/image.png")},
+			}}},
+		},
+		{
+			name: "responses image file input leaves the content without parts to render",
 			body: map[string]interface{}{
 				"input": []interface{}{
 					map[string]interface{}{
@@ -260,6 +376,26 @@ func TestParsePrompt(t *testing.T) {
 						"role": "user",
 						"content": []interface{}{
 							map[string]interface{}{"type": "input_image", "image_url": "https://example.com/image.png"},
+							map[string]interface{}{"type": "input_image", "file_id": "file-1"},
+						},
+					},
+				},
+			},
+			want: &common.ChatMessage{Messages: []common.Message{{
+				Role:       "user",
+				MultiModal: []common.MultiModalItem{image("https://example.com/image.png", 0), image("file-1", 0)},
+			}}},
+			wantErr: false,
+		},
+		{
+			name: "responses input without text or media has an empty schedulable prompt",
+			body: map[string]interface{}{
+				"input": []interface{}{
+					map[string]interface{}{
+						"type": "message",
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{"type": "input_file", "file_id": "file-1"},
 						},
 					},
 				},
@@ -327,6 +463,17 @@ func TestGetPromptString(t *testing.T) {
 			chatMessage: common.ChatMessage{},
 			want:        "",
 		},
+		{
+			name: "media not rendered and media-only messages skipped",
+			chatMessage: common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", MultiModal: []common.MultiModalItem{{Modality: common.ModalityImage, Hash: 0x1}}},
+					{Role: "user", Content: "describe", MultiModal: []common.MultiModalItem{{Modality: common.ModalityImage, Hash: 0x2}}},
+					{Role: "assistant", Content: ""},
+				},
+			},
+			want: "<|im_start|>user\ndescribe<|im_end|>\n<|im_start|>assistant\n<|im_end|>\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -336,6 +483,104 @@ func TestGetPromptString(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetPromptSegments(t *testing.T) {
+	text := func(s string) PromptSegment { return PromptSegment{Text: s} }
+	media := func(s string) PromptSegment { return PromptSegment{Text: s, Media: true} }
+	tests := []struct {
+		name        string
+		chatMessage common.ChatMessage
+		want        []PromptSegment
+	}{
+		{
+			name:        "empty prompt",
+			chatMessage: common.ChatMessage{},
+			want:        nil,
+		},
+		{
+			name:        "text prompt",
+			chatMessage: common.ChatMessage{Text: "hello"},
+			want:        []PromptSegment{text("hello")},
+		},
+		{
+			name: "text messages render like GetPromptString",
+			chatMessage: common.ChatMessage{
+				Messages: []common.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}},
+			},
+			want: []PromptSegment{text("<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\nhello<|im_end|>\n")},
+		},
+		{
+			name: "media rendered as placeholders before text",
+			chatMessage: common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", MultiModal: []common.MultiModalItem{{Modality: common.ModalityAudio, Hash: 0xff}}},
+					{Role: "user", Content: "describe", MultiModal: []common.MultiModalItem{
+						{Modality: common.ModalityImage, Hash: 0x1},
+						{Modality: common.ModalityVideo, Hash: 0xabc},
+					}},
+				},
+			},
+			want: []PromptSegment{
+				text("<|im_start|>user\n"),
+				media("<|audio:00000000000000ff|>"),
+				text("<|im_end|>\n<|im_start|>user\n"),
+				media("<|image:0000000000000001|>"),
+				media("<|video:0000000000000abc|>"),
+				text("describe<|im_end|>\n"),
+			},
+		},
+		{
+			name: "media rendered at their offsets in the text",
+			chatMessage: common.ChatMessage{
+				Messages: []common.Message{
+					{Role: "user", Content: "first\nsecond", MultiModal: []common.MultiModalItem{
+						{Modality: common.ModalityImage, Hash: 0x1, Offset: 0},
+						{Modality: common.ModalityImage, Hash: 0x2, Offset: 5},
+						{Modality: common.ModalityAudio, Hash: 0x3, Offset: 12},
+					}},
+				},
+			},
+			want: []PromptSegment{
+				text("<|im_start|>user\n"),
+				media("<|image:0000000000000001|>"),
+				text("first"),
+				media("<|image:0000000000000002|>"),
+				text("\nsecond"),
+				media("<|audio:0000000000000003|>"),
+				text("<|im_end|>\n"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, GetPromptSegments(&tt.chatMessage))
+		})
+	}
+}
+
+func TestGetPromptSegmentsKeepsPartOrder(t *testing.T) {
+	text := map[string]interface{}{"type": "text", "text": "describe"}
+	img := map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "https://example.com/cat.png"}}
+	render := func(parts ...interface{}) []PromptSegment {
+		t.Helper()
+		prompt, err := ParsePrompt(map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"role": "user", "content": parts}},
+		})
+		if err != nil {
+			t.Fatalf("ParsePrompt() error = %v", err)
+		}
+		return GetPromptSegments(prompt)
+	}
+
+	placeholder := PromptSegment{Text: fmt.Sprintf("<|image:%016x|>", xxhash.Sum64String("https://example.com/cat.png")), Media: true}
+	assert.Equal(t, []PromptSegment{
+		{Text: "<|im_start|>user\ndescribe"}, placeholder, {Text: "<|im_end|>\n"},
+	}, render(text, img))
+	assert.Equal(t, []PromptSegment{
+		{Text: "<|im_start|>user\n"}, placeholder, {Text: "describe<|im_end|>\n"},
+	}, render(img, text))
 }
 
 func TestLoadEnv(t *testing.T) {

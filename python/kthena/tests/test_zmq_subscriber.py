@@ -141,3 +141,32 @@ async def test_process_message_decodes_new_map_format_with_bytes_hashes():
     assert publisher.events[0].vllm_event.block_hashes == [expected_hash]
     assert publisher.events[0].vllm_event.token_ids == [1, 2]
     assert publisher.events[1].vllm_event.block_hashes == [expected_hash]
+
+
+@pytest.mark.asyncio
+async def test_process_message_keeps_extra_keys_of_map_format():
+    sub = VLLMZMQSubscriber(pod_identifier="pod-a", model_name="m")
+    publisher = _CapturePublisher()
+    sub.event_publisher = publisher
+
+    # A block holding the start of an image and one holding the rest of it.
+    raw_batch = [
+        2.0,
+        [
+            {
+                "type": "BlockStored",
+                "block_hashes": [1, 2],
+                "parent_block_hash": None,
+                "token_ids": [1, 2, 9, 9, 9, 9, 3, 4],
+                "block_size": 4,
+                "lora_id": None,
+                "extra_keys": [[["content:abc", 2]], ["my-lora", ["content:abc", -2], "salt"]],
+            },
+        ],
+        None,
+    ]
+    await sub._process_message(msgspec.msgpack.encode(raw_batch), "pod-a", "m")
+
+    assert len(publisher.events) == 1
+    assert publisher.events[0].vllm_event.extra_keys == [
+        [["content:abc", 2]], ["my-lora", ["content:abc", -2], "salt"]]

@@ -16,7 +16,7 @@ The tokenizer service moves this work to a cheap CPU-only component that can sca
 ## How it works
 
 1. The service watches ModelServer objects (all namespaces by default) and reads their `spec.model` field.
-2. For each served model with a configured tokenizer source, it launches a `vllm launch render` subprocess — vLLM's tokenizer/renderer frontend that loads no model weights and needs no GPU — and proxies the vLLM-compatible `/tokenize` API to it. The renderer is a Python CLI with an HTTP interface, so a local subprocess per model is the inherent cost of reusing the engine's exact tokenization behavior; the supervising control plane and frontend are a single static Go binary.
+2. For each served model with a configured tokenizer source, it launches a `vllm launch render` subprocess — vLLM's tokenizer/renderer frontend that loads no model weights and needs no GPU — and proxies the vLLM-compatible `/tokenize` API and the `/v1/chat/completions/render`, `/v1/responses/render` and `/v1/messages/render` APIs to it. The router uses the render API for prompts with media (see [Multimodal Requests](./multimodal#kv-cache-aware)). Only prompts whose media is inline (data URLs or `input_audio`) are sent to the service; media passed by URL is rendered on a vLLM pod instead, so the service never fetches client-provided URLs. The renderer is a Python CLI with an HTTP interface, so a local subprocess per model is the inherent cost of reusing the engine's exact tokenization behavior; the supervising control plane and frontend are a single static Go binary.
 3. Because `spec.model` is an engine-side alias (`served-model-name`) and not necessarily a loadable model identifier, the tokenizer source must be configured explicitly per served name via the `models` map (a Hugging Face repository id or a mounted local path). The alias is passed to the renderer via `--served-model-name`.
 4. If no renderer is ready for the requested model (unmapped, still loading, or failed), the frontend returns `503` and the router falls back to engine tokenization (unless fallback is disabled).
 
@@ -125,6 +125,7 @@ Service environment variables (advanced, set via `extraEnv`):
 | `RENDERER_STARTUP_TIMEOUT_SECONDS` | `600`      | Max time for a renderer to become healthy (includes tokenizer download)        |
 | `RENDERER_MAX_RESTARTS`            | `3`        | Consecutive restarts allowed for a crashed renderer                            |
 | `RENDERER_STABLE_WINDOW_SECONDS`   | `600`      | How long a renderer must run while ready before its budget is restored         |
+| `MAX_REQUEST_BODY_BYTES`           | `10485760` | Max proxied request body; raise it for larger inline media. Larger requests get `413` and the router falls back to engine rendering (unless fallback is disabled) |
 | `HF_TOKEN`                         | —          | Hugging Face token for gated models                                            |
 | `HF_ENDPOINT`                      | —          | Alternative Hugging Face endpoint, e.g. a private mirror                       |
 

@@ -78,6 +78,7 @@ const sidebars: SidebarsConfig = {
           label: 'Router',
           items: [
             'user-guide/router-routing',
+            'user-guide/multimodal',
             'user-guide/external-model-provider',
             'user-guide/config-router',
             'user-guide/standalone-router',

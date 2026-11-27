@@ -33,16 +33,19 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	assert.Empty(t, cfg.RendererExtraArgs)
 	assert.Equal(t, 10*time.Minute, cfg.RendererStartupTimeout)
 	assert.Equal(t, 5*time.Second, cfg.ProxyTimeout)
+	assert.Equal(t, int64(10<<20), cfg.MaxRequestBodyBytes)
 }
 
 func TestConfigFromEnvOverrides(t *testing.T) {
 	t.Setenv("TOKENIZER_PORT", "9000")
 	t.Setenv("MODEL_TOKENIZERS", `{"deepseek-v3": "deepseek-ai/DeepSeek-V3", "empty": ""}`)
 	t.Setenv("VLLM_RENDER_EXTRA_ARGS", "--trust-remote-code")
+	t.Setenv("MAX_REQUEST_BODY_BYTES", "67108864")
 	cfg := ConfigFromEnv()
 	assert.Equal(t, 9000, cfg.Port)
 	assert.Equal(t, map[string]string{"deepseek-v3": "deepseek-ai/DeepSeek-V3"}, cfg.ModelTokenizers)
 	assert.Equal(t, []string{"--trust-remote-code"}, cfg.RendererExtraArgs)
+	assert.Equal(t, int64(64<<20), cfg.MaxRequestBodyBytes)
 }
 
 func TestConfigFromEnvInvalidValues(t *testing.T) {

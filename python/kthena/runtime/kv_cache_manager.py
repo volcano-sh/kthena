@@ -15,7 +15,7 @@
 import hashlib
 import logging
 import time
-from typing import List, Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple
 
 from kthena.runtime.events import (
     EventHandler, EventType, EventData, VLLMEventData,
@@ -44,10 +44,23 @@ def get_sglang_mapping_key_prefix() -> str:
 MAPPING_KEY_TTL_SECONDS = 86400
 
 
-def compute_standardized_hash(token_ids: List[int]) -> int:
+def compute_standardized_hash(token_ids: List[int],
+                              mm_keys: Optional[List[Tuple[str, int]]] = None) -> int:
+    """Hash a block of tokens the way the router does.
+
+    The media items in the block, if any, follow the tokens in the hashed
+    bytes, each as the big-endian uint32 byte length of its identifier, the
+    identifier and its offset relative to the block as a big-endian int64.
+    computeStandardizedHash in pkg/kthena-router/scheduler/plugins/kvcache_aware.go
+    must hash the same way; change both together.
+    """
     if not token_ids:
         return 0
     token_bytes = b''.join(token_id.to_bytes(4, byteorder='big') for token_id in token_ids)
+    for identifier, offset in mm_keys or ():
+        encoded = identifier.encode()
+        token_bytes += len(encoded).to_bytes(4, byteorder='big') + encoded
+        token_bytes += offset.to_bytes(8, byteorder='big', signed=True)
     hash_obj = hashlib.sha256(token_bytes)
     full_hash = int.from_bytes(hash_obj.digest()[:8], byteorder='big')
     result = full_hash & 0x7FFFFFFFFFFFFFFF
@@ -56,12 +69,34 @@ def compute_standardized_hash(token_ids: List[int]) -> int:
     return result
 
 
-def standardize_block_hashes(engine_hashes: List[int],
-                             token_ids: List[int]) -> Optional[List[Tuple[int, int]]]:
-    """Split token_ids evenly across engine_hashes and pair each engine hash
-    with the standardized hash of its token block.
+def multimodal_block_keys(block_extra_keys: Optional[List[Any]]) -> List[Tuple[str, int]]:
+    """Return the (identifier, offset) pairs of the media items among the extra
+    keys vLLM reports for a block, in order, skipping other keys such as a
+    LoRA name or a cache salt."""
+    keys: List[Tuple[str, int]] = []
+    for key in block_extra_keys or ():
+        if not isinstance(key, (list, tuple)):
+            continue
+        # vLLM tags media keys as ("mm", identifier, offset) internally and
+        # publishes them untagged; accept both.
+        if len(key) == 3 and key[0] == "mm":
+            key = key[1:]
+        if (len(key) == 2 and isinstance(key[0], str)
+                and isinstance(key[1], int) and not isinstance(key[1], bool)):
+            keys.append((key[0], key[1]))
+    return keys
 
-    Returns None when the token count does not divide evenly across the hashes.
+
+def standardize_block_hashes(engine_hashes: List[int],
+                             token_ids: List[int],
+                             extra_keys: Optional[List[Any]] = None
+                             ) -> Optional[List[Tuple[int, int]]]:
+    """Split token_ids evenly across engine_hashes and pair each engine hash
+    with the standardized hash of its token block and of the media items the
+    engine reports in its extra keys.
+
+    Returns None when the token count does not divide evenly across the hashes,
+    or when the extra keys are not one entry per hash.
     """
     if not engine_hashes or not token_ids:
         return None
@@ -72,13 +107,19 @@ def standardize_block_hashes(engine_hashes: List[int],
             f"Token count ({len(token_ids)}) cannot match block size with "
             f"{len(engine_hashes)} hashes")
         return None
+    if extra_keys is not None and len(extra_keys) != len(engine_hashes):
+        logger.error(
+            f"Extra keys count ({len(extra_keys)}) does not match "
+            f"{len(engine_hashes)} hashes")
+        return None
 
     pairs: List[Tuple[int, int]] = []
     for i, engine_hash in enumerate(engine_hashes):
         block_tokens = token_ids[i * block_size:(i + 1) * block_size]
         if not block_tokens:
             continue
-        pairs.append((engine_hash, compute_standardized_hash(block_tokens)))
+        mm_keys = multimodal_block_keys(extra_keys[i]) if extra_keys else None
+        pairs.append((engine_hash, compute_standardized_hash(block_tokens, mm_keys)))
     return pairs
 
 
@@ -99,7 +140,8 @@ class VLLMKVCacheRedisManager:
         return f"{cls.MAPPING_KEY_PREFIX}:{pod_identifier}@{engine_hash}"
 
     async def add_blocks(self, model_name: str, block_hashes: List[int],
-                         pod_identifier: str, token_ids: Optional[List[int]] = None) -> bool:
+                         pod_identifier: str, token_ids: Optional[List[int]] = None,
+                         extra_keys: Optional[List[Any]] = None) -> bool:
         if not block_hashes or not model_name or not pod_identifier:
             return not block_hashes
 
@@ -112,7 +154,8 @@ class VLLMKVCacheRedisManager:
             timestamp = str(int(time.time()))
 
             success = await self._process_token_blocks_with_mapping(
-                model_name, block_hashes, token_ids, pod_identifier, timestamp, pipe)
+                model_name, block_hashes, token_ids, pod_identifier, timestamp, pipe,
+                extra_keys)
 
             if not success:
                 return False
@@ -130,8 +173,9 @@ class VLLMKVCacheRedisManager:
 
     async def _process_token_blocks_with_mapping(self, model_name: str, engine_hashes: List[int],
                                                  token_ids: List[int], pod_identifier: str,
-                                                 timestamp: str, pipe) -> bool:
-        pairs = standardize_block_hashes(engine_hashes, token_ids)
+                                                 timestamp: str, pipe,
+                                                 extra_keys: Optional[List[Any]] = None) -> bool:
+        pairs = standardize_block_hashes(engine_hashes, token_ids, extra_keys)
         if pairs is None:
             return False
 
@@ -314,7 +358,8 @@ class VLLMKVCacheEventHandler(EventHandler):
             model_name=event_data.model_name,
             block_hashes=block_event.block_hashes,
             pod_identifier=event_data.pod_identifier,
-            token_ids=block_event.token_ids
+            token_ids=block_event.token_ids,
+            extra_keys=block_event.extra_keys,
         )
 
     async def _handle_block_removed(self, event_data: VLLMEventData) -> None:
