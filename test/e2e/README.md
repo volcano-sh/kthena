@@ -14,6 +14,7 @@ The E2E tests use helm to install kthena into a Kind cluster and verify core fun
 | `router` | ModelRoute without Gateway API and router scheduler plugins | `make test-e2e-router` |
 | `gateway-api` | ModelRoute with Gateway API | `make test-e2e-gateway-api` |
 | `gateway-inference-extension` | HTTPRoute, InferencePool | `make test-e2e-gateway-inference-extension` |
+| `tokenizer` | kthena-tokenizer service in standalone and sidecar modes | `make test-e2e-tokenizer` |
 
 ### Router Scheduler Plugin Coverage
 
@@ -62,6 +63,7 @@ The GitHub Actions E2E workflow runs the same category targets in parallel by us
 | `E2E (router)` | `make test-e2e-router` | `kthena-router` |
 | `E2E (gateway-api)` | `make test-e2e-gateway-api` | `kthena-gateway-api` |
 | `E2E (gateway-inference-extension)` | `make test-e2e-gateway-inference-extension` | `kthena-gateway-inference-extension` |
+| `E2E (tokenizer)` | `make test-e2e-tokenizer` | `kthena-tokenizer` |
 
 The KV-cache-aware tests remain part of the Router package, so the existing `E2E (router)` job runs them without another matrix entry. The focused target is for local development.
 
@@ -85,6 +87,7 @@ Each category installs only the external CRDs it needs:
 | `router` | None |
 | `gateway-api` | Gateway API |
 | `gateway-inference-extension` | Gateway API and Gateway API Inference Extension |
+| `tokenizer` | None |
 | `all` | Gateway API, Gateway API Inference Extension, and LeaderWorkerSet |
 
 ### Router External Provider Mock
@@ -122,6 +125,9 @@ make test-e2e-gateway-api
 # Gateway Inference Extension tests
 make test-e2e-gateway-inference-extension
 
+# Tokenizer service tests (standalone + sidecar modes)
+make test-e2e-tokenizer
+
 # Cleanup after any test
 make test-e2e-cleanup
 ```
@@ -158,6 +164,8 @@ Replace `gateway-api` with the category that failed in CI.
 - `HUB`: Docker image registry (default: `ghcr.io/volcano-sh`)
 - `TAG`: Docker image tag (default: `latest`)
 - `E2E_EXTERNAL_PROVIDER_MOCK_IMAGE`: Internal image reference supplied by `make test-e2e-router`; it is not an API key or other credential
+- `IMG_TOKENIZER`: Override the tokenizer image reference used by `make test-e2e-tokenizer` (default: `${HUB}/kthena-tokenizer:${TAG}`)
+- `IMG_TOKENIZER_ENGINE_MOCK`: Override the engine mock image reference (default: `${HUB}/kthena-tokenizer-engine-mock:${TAG}`)
 
 ## Local Testing Considerations
 

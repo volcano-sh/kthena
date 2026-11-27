@@ -1,0 +1,15 @@
+apiVersion: networking.serving.volcano.sh/v1alpha1
+kind: ModelServer
+metadata:
+  name: tokenizer-test-model
+  namespace: default
+spec:
+  workloadSelector:
+    matchLabels:
+      app: tokenizer-test-engine
+  workloadPort:
+    port: 8000
+  model: "tokenizer-test-model"
+  inferenceEngine: "vLLM"
+  trafficPolicy:
+    timeout: 10s
