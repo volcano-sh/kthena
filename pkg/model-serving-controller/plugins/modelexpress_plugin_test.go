@@ -120,7 +120,7 @@ func TestModelExpressPluginInjectsEngineEnv(t *testing.T) {
 	assert.Empty(t, pod.Annotations, "source identity lives in MX_MODEL_REVISION, not in Pod metadata")
 
 	engine := engineEnv(pod.Spec.Containers[0])
-	assert.Equal(t, "default/ms/tmpl-hash-0", engine[EnvModelRevision].Value, "the entry is position 0 of the replica")
+	assert.Equal(t, "tmpl-hash-0", engine[EnvModelRevision].Value, "the entry is position 0 of the replica")
 	assert.Equal(t, "mx.modelexpress:8001", engine[EnvServerAddress].Value)
 	assert.Equal(t, "http://127.0.0.1:8000/health", engine[EnvArtifactReadyURL].Value)
 	assert.Equal(t, "1", engine[EnvP2PMetadata].Value)
@@ -134,26 +134,18 @@ func TestModelExpressPluginInjectsEngineEnv(t *testing.T) {
 	assert.Equal(t, "INFO", engine[EnvModelExpressLog].Value)
 	assert.Equal(t, "INFO", engine[EnvNIXLLog].Value)
 	assert.Equal(t, "WARN", engine[EnvUCXLog].Value)
-	assert.Equal(t, "auto", engine[EnvRDMANICPin].Value)
-	for name, fieldPath := range map[string]string{
-		EnvWorkerHost:   "status.podIP",
-		EnvPodName:      "metadata.name",
-		EnvPodUID:       "metadata.uid",
-		EnvPodNamespace: "metadata.namespace",
-	} {
-		require.NotNil(t, engine[name].ValueFrom, name)
-		assert.Equal(t, fieldPath, engine[name].ValueFrom.FieldRef.FieldPath, name)
-	}
+	require.NotNil(t, engine[EnvWorkerHost].ValueFrom)
+	assert.Equal(t, "status.podIP", engine[EnvWorkerHost].ValueFrom.FieldRef.FieldPath)
 	_, deprecated := engine["MODEL_EXPRESS_URL"]
 	assert.False(t, deprecated, "the deprecated endpoint variable is never injected")
-	assert.Len(t, engine, 19)
+	assert.Len(t, engine, 15)
 
 	assert.Empty(t, pod.Spec.Containers[1].Env, "unselected containers are untouched")
 	assert.Empty(t, pod.Spec.InitContainers[0].Env, "init containers are untouched")
 
 	// Idempotent: a second run does not duplicate variables.
 	require.NoError(t, plugin.OnPodCreate(context.Background(), pluginRequest(ms, "prefill", pod)))
-	assert.Len(t, pod.Spec.Containers[0].Env, 19)
+	assert.Len(t, pod.Spec.Containers[0].Env, 15)
 }
 
 func TestModelExpressPluginModelRevisionPerPosition(t *testing.T) {
@@ -163,62 +155,21 @@ func TestModelExpressPluginModelRevisionPerPosition(t *testing.T) {
 
 	worker := enginePod("ms-0-prefill-0-2")
 	require.NoError(t, plugin.OnPodCreate(context.Background(), workerRequest(ms, "prefill", worker)))
-	assert.Equal(t, "default/ms/tmpl-hash-2", engineEnv(worker.Spec.Containers[0])[EnvModelRevision].Value, "workers use their index from the Pod name")
+	assert.Equal(t, "tmpl-hash-2", engineEnv(worker.Spec.Containers[0])[EnvModelRevision].Value, "workers use their index from the Pod name")
 
 	indexed := enginePod("ms-0-prefill-0-2")
 	indexed.Spec.Containers[0].Env = append(indexed.Spec.Containers[0].Env, corev1.EnvVar{Name: workloadv1alpha1.WorkerIndexEnv, Value: "3"})
 	require.NoError(t, plugin.OnPodCreate(context.Background(), workerRequest(ms, "prefill", indexed)))
-	assert.Equal(t, "default/ms/tmpl-hash-3", engineEnv(indexed.Spec.Containers[0])[EnvModelRevision].Value, "the WORKER_INDEX the engine observes wins")
+	assert.Equal(t, "tmpl-hash-3", engineEnv(indexed.Spec.Containers[0])[EnvModelRevision].Value, "the WORKER_INDEX the engine observes wins")
 
 	entry := enginePod("ms-0-prefill-0-0")
 	entry.Spec.Containers[0].Env = append(entry.Spec.Containers[0].Env, corev1.EnvVar{Name: workloadv1alpha1.WorkerIndexEnv, Value: "0"})
 	require.NoError(t, plugin.OnPodCreate(context.Background(), pluginRequest(ms, "prefill", entry)))
-	assert.Equal(t, "default/ms/tmpl-hash-0", engineEnv(entry.Spec.Containers[0])[EnvModelRevision].Value)
+	assert.Equal(t, "tmpl-hash-0", engineEnv(entry.Spec.Containers[0])[EnvModelRevision].Value)
 
 	unnamed := enginePod("nodash")
 	err := plugin.OnPodCreate(context.Background(), workerRequest(ms, "prefill", unnamed))
 	require.ErrorContains(t, err, "cannot derive worker-index")
-}
-
-// Identical role templates of other ModelServings can mount different weights,
-// so their Pods must never match as sources of each other.
-func TestModelExpressPluginModelRevisionPerModelServing(t *testing.T) {
-	revision := func(namespace, name string) string {
-		ms := mxTestModelServing([]string{"prefill"}, mxTestRole("prefill"))
-		ms.Namespace, ms.Name = namespace, name
-		ms.Spec.BootstrapAccelerateStrategy.ModelExpress = &workloadv1alpha1.ModelExpressConfig{EngineContainers: []string{"engine"}}
-		pod := enginePod(name + "-0-prefill-0-0")
-		require.NoError(t, NewModelExpressPlugin(ms, "").OnPodCreate(context.Background(), pluginRequest(ms, "prefill", pod)))
-		return engineEnv(pod.Spec.Containers[0])[EnvModelRevision].Value
-	}
-	assert.Equal(t, "team-a/llm/tmpl-hash-0", revision("team-a", "llm"))
-	assert.Equal(t, revision("team-a", "llm"), revision("team-a", "llm"), "replicas of one ModelServing share sources")
-	assert.NotEqual(t, revision("team-a", "llm"), revision("team-b", "llm"), "same template in another namespace")
-	assert.NotEqual(t, revision("team-a", "llm"), revision("team-a", "other"), "same template in another ModelServing")
-}
-
-func TestModelExpressPluginKeepsUserNICSelection(t *testing.T) {
-	ms := mxTestModelServing([]string{"prefill"}, mxTestRole("prefill"))
-	ms.Spec.BootstrapAccelerateStrategy.ModelExpress = &workloadv1alpha1.ModelExpressConfig{EngineContainers: []string{"engine"}}
-	plugin := NewModelExpressPlugin(ms, "")
-
-	devices := enginePod("ms-0-prefill-0-0")
-	devices.Spec.Containers[0].Env = append(devices.Spec.Containers[0].Env, corev1.EnvVar{Name: EnvUCXNetDevices, Value: "mlx5_0:1"})
-	require.NoError(t, plugin.OnPodCreate(context.Background(), pluginRequest(ms, "prefill", devices)))
-	engine := engineEnv(devices.Spec.Containers[0])
-	_, pinned := engine[EnvRDMANICPin]
-	assert.False(t, pinned, "the auto probe would overwrite the user's UCX_NET_DEVICES")
-	assert.Equal(t, "mlx5_0:1", engine[EnvUCXNetDevices].Value)
-
-	explicit := enginePod("ms-0-prefill-0-0")
-	explicit.Spec.Containers[0].Env = append(explicit.Spec.Containers[0].Env,
-		corev1.EnvVar{Name: EnvRDMANICPin, Value: "mlx5_0,mlx5_1"},
-		corev1.EnvVar{Name: EnvPodName, Value: "custom"})
-	require.NoError(t, plugin.OnPodCreate(context.Background(), pluginRequest(ms, "prefill", explicit)))
-	engine = engineEnv(explicit.Spec.Containers[0])
-	assert.Equal(t, "mlx5_0,mlx5_1", engine[EnvRDMANICPin].Value, "an explicit NIC list wins")
-	assert.Equal(t, "custom", engine[EnvPodName].Value, "an existing variable wins")
-	assert.Nil(t, engine[EnvPodName].ValueFrom)
 }
 
 func TestModelExpressPluginOptionalValues(t *testing.T) {

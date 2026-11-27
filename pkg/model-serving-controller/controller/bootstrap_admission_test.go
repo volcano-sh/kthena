@@ -146,7 +146,7 @@ func TestBootstrapCreatesSeedThenRemainingGroups(t *testing.T) {
 	roleHash, err := utils.RoleRevisionHash(ms, "prefill")
 	require.NoError(t, err)
 	assert.Equal(t, bootstrapTestServerAddress, env[plugins.EnvServerAddress])
-	assert.Equal(t, ms.Namespace+"/"+ms.Name+"/"+roleHash+"-0", env[plugins.EnvModelRevision])
+	assert.Equal(t, roleHash+"-0", env[plugins.EnvModelRevision])
 	assert.Equal(t, "http://127.0.0.1:8000/health", env[plugins.EnvArtifactReadyURL])
 	assert.Equal(t, "1", env[plugins.EnvP2PMetadata])
 	events := drainEvents(recorder)
@@ -418,8 +418,8 @@ func TestBootstrapMultiPodReplicaRequiresAllPodsReady(t *testing.T) {
 			}
 		}
 	}
-	assert.Equal(t, ms.Namespace+"/"+ms.Name+"/"+roleHash+"-0", revisionsByPod[group0+"-prefill-0-0"], "entry pod uses position 0")
-	assert.Equal(t, ms.Namespace+"/"+ms.Name+"/"+roleHash+"-1", revisionsByPod[group0+"-prefill-0-1"], "worker pod uses position 1")
+	assert.Equal(t, roleHash+"-0", revisionsByPod[group0+"-prefill-0-0"], "entry pod uses position 0")
+	assert.Equal(t, roleHash+"-1", revisionsByPod[group0+"-prefill-0-1"], "worker pod uses position 1")
 
 	// Mark only the entry pod Ready; the worker pod remains NotReady.
 	entryPod, err := h.kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), group0+"-prefill-0-0", metav1.GetOptions{})

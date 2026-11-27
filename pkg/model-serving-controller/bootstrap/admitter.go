@@ -29,9 +29,8 @@ import (
 )
 
 // PoolKey identifies the replicas that can serve each other as weight sources.
-// It mirrors MX_MODEL_REVISION, which the managed plugin derives from the
-// ModelServing and the role template hash, so the controller and ModelExpress
-// agree on compatibility.
+// It mirrors MX_MODEL_REVISION, which the managed plugin derives from the role
+// template hash, so the controller and ModelExpress agree on compatibility.
 type PoolKey struct {
 	Role         string
 	TemplateHash string

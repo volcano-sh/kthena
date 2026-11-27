@@ -51,9 +51,8 @@ const (
 
 // TestModelServingBootstrapAcceleration verifies end-to-end ModelExpress bootstrap acceleration:
 //  1. Cold start admits only the initial seed ServingGroup while out-of-scope roles remain ungated.
-//  2. Managed ModelExpress environment variables (including the per-ModelServing, per-position
-//     MX_MODEL_REVISION, MX_SERVER_ADDRESS, MX_RDMA_NIC_PIN, and the Pod identity) are injected only
-//     into in-scope engine containers.
+//  2. Managed ModelExpress environment variables (including per-position MX_MODEL_REVISION,
+//     MX_SERVER_ADDRESS, MX_POOL_REG, and MX_VMM_ARENA) are injected only into in-scope engine containers.
 //  3. Entry-only readiness on a multi-Pod role replica does not release the remaining groups.
 //  4. Full seed replica readiness releases all remaining ServingGroups and emits BootstrapBatchCreated events.
 func TestModelServingBootstrapAcceleration(t *testing.T) {
@@ -133,8 +132,8 @@ func TestModelServingBootstrapAcceleration(t *testing.T) {
 	require.NotEmpty(t, roleHash, "Entry Pod must carry RoleTemplateHashLabelKey")
 	assert.Equal(t, roleHash, workerPod.Labels[workload.RoleTemplateHashLabelKey])
 
-	assertModelExpressContainerEnv(t, entryPod.Spec.Containers[0], bootstrapModelRevision(ms.Name, roleHash, 0))
-	assertModelExpressContainerEnv(t, workerPod.Spec.Containers[0], bootstrapModelRevision(ms.Name, roleHash, 1))
+	assertModelExpressContainerEnv(t, entryPod.Spec.Containers[0], roleHash+"-0")
+	assertModelExpressContainerEnv(t, workerPod.Spec.Containers[0], roleHash+"-1")
 	for _, env := range decodePod.Spec.Containers[0].Env {
 		assert.False(t, strings.HasPrefix(env.Name, "MX_"), "Out-of-scope decode Pod should not have %s injected", env.Name)
 	}
@@ -351,7 +350,7 @@ func TestModelServingBootstrapRollingUpdateAndInPlaceFallback(t *testing.T) {
 	v2RoleHash := v2SeedPod.Labels[workload.RoleTemplateHashLabelKey]
 	require.NotEmpty(t, v2RoleHash)
 	assert.NotEqual(t, v1RoleHash, v2RoleHash, "Image change must produce a new RoleTemplateHash pool")
-	assertModelExpressContainerEnvWithReadyURL(t, v2SeedPod.Spec.Containers[0], bootstrapModelRevision(ms.Name, v2RoleHash, 0), updatedReadyURL)
+	assertModelExpressContainerEnvWithReadyURL(t, v2SeedPod.Spec.Containers[0], v2RoleHash+"-0", updatedReadyURL)
 
 	// Phase 4: Release v2 seed gate; remaining 2 v2 ServingGroups are created and converge Ready.
 	t.Log("Phase 4: Releasing v2 seed gate to complete rolling update")
@@ -359,7 +358,7 @@ func TestModelServingBootstrapRollingUpdateAndInPlaceFallback(t *testing.T) {
 	v2Pods := waitForActiveBootstrapPodsAndReleaseGates(t, ctx, kubeClient, labelSelector, 3)
 	for _, pod := range v2Pods {
 		assert.Equal(t, nginxAlpineImage, pod.Spec.Containers[0].Image)
-		assertModelExpressContainerEnvWithReadyURL(t, pod.Spec.Containers[0], bootstrapModelRevision(ms.Name, v2RoleHash, 0), updatedReadyURL)
+		assertModelExpressContainerEnvWithReadyURL(t, pod.Spec.Containers[0], v2RoleHash+"-0", updatedReadyURL)
 	}
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, ms.Name)
 }
@@ -416,7 +415,7 @@ func TestModelServingBootstrapPercentageSeedAndDynamicDisable(t *testing.T) {
 	require.NotEmpty(t, roleHash)
 	engineEnv := containerEnvMap(seed0.Spec.Containers[0])
 	assert.Equal(t, "LIBFABRIC", engineEnv[plugins.EnvNIXLBackend].Value, "User-defined MX env var must take precedence")
-	assert.Equal(t, bootstrapModelRevision(ms.Name, roleHash, 0), engineEnv[plugins.EnvModelRevision].Value)
+	assert.Equal(t, roleHash+"-0", engineEnv[plugins.EnvModelRevision].Value)
 	assert.Equal(t, bootstrapE2EServerAddress, engineEnv[plugins.EnvServerAddress].Value)
 	assert.Equal(t, bootstrapE2EReadyURL, engineEnv[plugins.EnvArtifactReadyURL].Value)
 	for _, env := range seed0.Spec.InitContainers[0].Env {
@@ -563,23 +562,10 @@ func assertModelExpressContainerEnvWithReadyURL(t *testing.T, container corev1.C
 	assert.Equal(t, "1", envByName[plugins.EnvArtifactTransfer].Value)
 	assert.Equal(t, "1", envByName[plugins.EnvPoolRegistration].Value)
 	assert.Equal(t, "1", envByName[plugins.EnvVMMArena].Value)
-	assert.Equal(t, "auto", envByName[plugins.EnvRDMANICPin].Value)
-	for name, fieldPath := range map[string]string{
-		plugins.EnvWorkerHost:   "status.podIP",
-		plugins.EnvPodName:      "metadata.name",
-		plugins.EnvPodUID:       "metadata.uid",
-		plugins.EnvPodNamespace: "metadata.namespace",
-	} {
-		if assert.NotNil(t, envByName[name].ValueFrom, name) && assert.NotNil(t, envByName[name].ValueFrom.FieldRef, name) {
-			assert.Equal(t, fieldPath, envByName[name].ValueFrom.FieldRef.FieldPath, name)
-		}
+	if assert.NotNil(t, envByName[plugins.EnvWorkerHost].ValueFrom) &&
+		assert.NotNil(t, envByName[plugins.EnvWorkerHost].ValueFrom.FieldRef) {
+		assert.Equal(t, "status.podIP", envByName[plugins.EnvWorkerHost].ValueFrom.FieldRef.FieldPath)
 	}
-}
-
-// bootstrapModelRevision is the MX_MODEL_REVISION the managed plugin injects
-// into the Pod at the given position of a role replica.
-func bootstrapModelRevision(msName, roleTemplateHash string, position int) string {
-	return fmt.Sprintf("%s/%s/%s-%d", testNamespace, msName, roleTemplateHash, position)
 }
 
 func listActiveModelServingPods(ctx context.Context, kubeClient *kubernetes.Clientset, labelSelector string) ([]corev1.Pod, error) {

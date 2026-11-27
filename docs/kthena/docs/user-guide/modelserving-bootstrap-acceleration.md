@@ -63,12 +63,10 @@ For in-scope roles the controller appends a managed `modelexpress` plugin after 
 
 | Variable | Value |
 |----------|-------|
-| `MX_MODEL_REVISION` | `<namespace>/<ModelServing name>/<role template hash>-<WORKER_INDEX>`, so sources are shared only within one ModelServing, one template revision and one position in the replica (entry `0`, workers `1..N`), never across workloads or weight shards |
+| `MX_MODEL_REVISION` | `<role template hash>-<WORKER_INDEX>`, so sources are shared only within one template revision and one position in the replica (entry `0`, workers `1..N`), never across weight shards |
 | `MX_SERVER_ADDRESS` | The controller's `--modelexpress-server-address` |
 | `MX_ARTIFACT_READY_URL` | `modelExpress.readyURL` |
 | `MX_WORKER_HOST` | The Pod IP (downward API) |
-| `POD_NAME` / `POD_UID` / `POD_NAMESPACE` | The Pod's name, UID and namespace (downward API). ModelExpress reports them with each source so that its Kubernetes metadata backend removes the source record together with the Pod |
-| `MX_RDMA_NIC_PIN` | `auto`, which gives each GPU rank its own RDMA NIC. Not set when the container defines `UCX_NET_DEVICES`, because the probe would overwrite it |
 | `MX_P2P_METADATA` / `MX_METADATA_PORT` / `MX_WORKER_GRPC_PORT` | `1` / `5555` / `6555` |
 | `MX_NIXL_BACKEND` / `MX_INSTANT_TENSOR` / `MX_ARTIFACT_TRANSFER` | `UCX` / `0` / `1` |
 | `MX_POOL_REG` / `MX_VMM_ARENA` | `1` / `1` (pooled NIXL registration and VMM arena receive buffers) |
