@@ -56,3 +56,59 @@ type File struct {
 func (f *File) expired(now int64) bool {
 	return f.ExpiresAt != 0 && now >= f.ExpiresAt
 }
+
+// ErrNoInputFile means a batch names an input file that is missing, deleted, expired or another tenant's.
+var ErrNoInputFile = errors.New("batch: no such input file")
+
+// ErrNotBatchFile means a batch names an input file that was not uploaded with purpose batch.
+var ErrNotBatchFile = errors.New("batch: the input file does not have purpose batch")
+
+// Status is a batch status from the OpenAI batch object.
+type Status string
+
+// Batch statuses from the OpenAI batch object.
+const (
+	StatusValidating Status = "validating"
+	StatusInProgress Status = "in_progress"
+	StatusFinalizing Status = "finalizing"
+	StatusCompleted  Status = "completed"
+	StatusFailed     Status = "failed"
+	StatusExpired    Status = "expired"
+	StatusCancelling Status = "cancelling"
+	StatusCancelled  Status = "cancelled"
+)
+
+// Origin is how the create request reached the router; every line of the batch is sent the same way.
+type Origin struct {
+	Host     string `json:"host,omitempty"`
+	Gateway  string `json:"gateway,omitempty"`
+	Listener string `json:"listener,omitempty"`
+	Port     int    `json:"port,omitempty"`
+}
+
+// Job is the stored record of one batch.
+type Job struct {
+	ID     string
+	Tenant string
+	// Subject is the token subject the lines run as, so fairness counts them for their owner.
+	Subject          string
+	Status           Status
+	Endpoint         string
+	InputFileID      string
+	CompletionWindow string
+	Metadata         map[string]string
+	Origin           Origin
+	OutputFileID     string
+	ErrorFileID      string
+	Total            int64
+	Completed        int64
+	Failed           int64
+	CreatedAt        int64
+	ExpiresAt        int64
+	InProgressAt     int64
+	FinalizingAt     int64
+	CompletedAt      int64
+	// Holder and Fence name the run that owns the batch; every write of that run checks the fence.
+	Holder string
+	Fence  string
+}

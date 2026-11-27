@@ -30,6 +30,10 @@ type Store interface {
 	ListFiles(ctx context.Context, query FileQuery) ([]*File, bool, error)
 	// ClaimVolume records volumeID as the volume of these records unless one is recorded, and returns the recorded one.
 	ClaimVolume(ctx context.Context, volumeID string) (string, error)
+	// CreateJob holds the input file for the batch and queues it in one step; a retry of the same ID changes nothing.
+	CreateJob(ctx context.Context, job *Job) error
+	// GetJob returns one batch record, or ErrNotFound.
+	GetJob(ctx context.Context, id string) (*Job, error)
 }
 
 // FileQuery selects one page of a tenant's files.
