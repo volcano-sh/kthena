@@ -76,6 +76,17 @@ type renderer struct {
 	readyAt  time.Time
 	exitedAt time.Time
 
+	// nextRetryAfter is the earliest time restartCrashed may relaunch this
+	// renderer. Zero means "retry immediately". It is set when the renderer
+	// is observed to fail (in setFailed) and cleared on a successful ready
+	// transition.
+	nextRetryAfter time.Time
+	// consecutiveFailures counts how many times this renderer has failed since
+	// it last became ready. It drives the exponential backoff exponent and is
+	// reset to zero on each successful StatusReady transition. Unlike budgetUsed
+	// it is not capped by RendererMaxRestarts.
+	consecutiveFailures int
+
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
 	// done is closed when the current subprocess exits.
@@ -318,6 +329,8 @@ func (m *RendererManager) waitReady(r *renderer) {
 				r.status = StatusReady
 				r.lastErr = ""
 				r.readyAt = time.Now()
+				r.nextRetryAfter = time.Time{} // reset backoff on success
+				r.consecutiveFailures = 0      // reset backoff exponent on success
 				klog.Infof("Tokenizer for model %s ready at %s", r.model, r.endpoint())
 			}
 			m.mu.Unlock()
@@ -336,6 +349,13 @@ func (m *RendererManager) setFailed(r *renderer, msg string) {
 	}
 	r.status = StatusFailed
 	r.lastErr = msg
+	r.consecutiveFailures++
+	// Set the backoff window at failure-observation time, not at restart-schedule
+	// time, so that a slow startup failure (e.g. health-check timeout after 25s)
+	// doesn't consume the window before we ever get to restartCrashed.
+	if m.config.RendererBackoffBase > 0 {
+		r.nextRetryAfter = time.Now().Add(rendererBackoffDelay(m.config, r.consecutiveFailures))
+	}
 	klog.Errorf("Renderer for model %s failed: %s", r.model, msg)
 }
 
@@ -393,16 +413,65 @@ func (m *RendererManager) restartCrashed() {
 			}
 			continue
 		}
+		// Respect exponential backoff: skip this tick if the delay has not
+		// elapsed since the last restart attempt.
+		if !r.nextRetryAfter.IsZero() && time.Now().Before(r.nextRetryAfter) {
+			continue
+		}
 		r.restarts++
 		r.budgetUsed++
+		// A ready renderer that crashes exits without going through setFailed,
+		// so set the backoff window here for that case. For renderers that went
+		// through setFailed (startup failures) the window was already set there.
+		if r.status == StatusReady && m.config.RendererBackoffBase > 0 {
+			r.consecutiveFailures++
+			r.nextRetryAfter = time.Now().Add(rendererBackoffDelay(m.config, r.consecutiveFailures))
+		}
 		r.status = StatusLoading
 		toRestart = append(toRestart, r)
 	}
 	m.mu.Unlock()
 
 	for _, r := range toRestart {
-		klog.Warningf("Restarting renderer for model %s (%d/%d)",
-			r.model, r.budgetUsed, m.config.RendererMaxRestarts)
+		klog.Warningf("Restarting renderer for model %s (budget %d/%d, consecutive failures %d), next backoff window ends at %s",
+			r.model, r.budgetUsed, m.config.RendererMaxRestarts, r.consecutiveFailures,
+			func() string {
+				if r.nextRetryAfter.IsZero() {
+					return "none"
+				}
+				return r.nextRetryAfter.Format(time.RFC3339)
+			}())
 		go m.launch(r)
 	}
+}
+
+// rendererBackoffDelay returns the restart delay for the given attempt number
+// (1-indexed, already incremented before this call) using exponential backoff.
+// The delay is cfg.RendererBackoffBase * 2^(attempt-1), capped at
+// cfg.RendererBackoffMax. When RendererBackoffMax is zero, the delay is
+// uncapped.
+func rendererBackoffDelay(cfg Config, attempt int) time.Duration {
+	if cfg.RendererBackoffBase <= 0 {
+		return 0
+	}
+	delay := cfg.RendererBackoffBase
+	for i := 1; i < attempt; i++ {
+		next := delay * 2
+		// Guard against int64 overflow and enforce the cap.
+		if next <= delay {
+			// Overflow: pin at the maximum representable delay.
+			if cfg.RendererBackoffMax > 0 {
+				return cfg.RendererBackoffMax
+			}
+			return delay
+		}
+		delay = next
+		if cfg.RendererBackoffMax > 0 && delay >= cfg.RendererBackoffMax {
+			return cfg.RendererBackoffMax
+		}
+	}
+	if cfg.RendererBackoffMax > 0 && delay > cfg.RendererBackoffMax {
+		return cfg.RendererBackoffMax
+	}
+	return delay
 }

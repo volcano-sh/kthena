@@ -300,3 +300,151 @@ func TestRendererManagerRestartBudgetIsNotRestoredByFlapping(t *testing.T) {
 		"an exhausted renderer was relaunched after the window passed with it dead")
 	assert.Equal(t, cfg.RendererMaxRestarts, infos[0].Restarts)
 }
+
+// TestRendererManagerBackoffDelaysRestart verifies that with RendererBackoffBase
+// set, restartCrashed does not relaunch a failed renderer until the backoff
+// window elapses.
+func TestRendererManagerBackoffDelaysRestart(t *testing.T) {
+	cfg := testConfig(t, 18370, map[string]string{"served": "some/source"})
+	cfg.RendererCommand = []string{filepath.Join(t.TempDir(), "no-such-renderer")}
+	cfg.RendererMaxRestarts = 3
+	// 500 ms backoff: short enough for the test not to be flaky on slow CI,
+	// long enough to verify that an immediately following tick is suppressed.
+	cfg.RendererBackoffBase = 500 * time.Millisecond
+	cfg.RendererBackoffMax = 5 * time.Second
+	m := NewRendererManager(cfg)
+	defer m.shutdown()
+
+	m.SetModels(map[string]struct{}{"served": {}})
+	waitForStatus(t, m, "served", StatusFailed)
+
+	// setFailed() set nextRetryAfter at failure-observation time, so an
+	// immediate restartCrashed call must be suppressed by the backoff window.
+	m.restartCrashed()
+	infos := m.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, 0, infos[0].Restarts, "call within backoff window must be suppressed")
+
+	// After the window expires, the restart must proceed.
+	require.Eventually(t, func() bool {
+		m.restartCrashed()
+		for _, info := range m.Snapshot() {
+			if info.Model == "served" && info.Restarts >= 1 {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "restart should proceed after backoff window")
+
+	// Another immediate call after the restart must again be suppressed.
+	waitForStatus(t, m, "served", StatusFailed)
+	m.restartCrashed()
+	infos = m.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, 1, infos[0].Restarts, "second call within window must be suppressed")
+}
+
+// TestRendererManagerBackoffExponentialIncrease verifies that the delay doubles
+// with each consecutive restart.
+func TestRendererManagerBackoffExponentialIncrease(t *testing.T) {
+	tests := []struct {
+		name      string
+		base      time.Duration
+		max       time.Duration
+		attempt   int
+		wantDelay time.Duration
+	}{
+		{name: "attempt_1_no_cap", base: 10 * time.Second, max: 0, attempt: 1, wantDelay: 10 * time.Second},
+		{name: "attempt_2_no_cap", base: 10 * time.Second, max: 0, attempt: 2, wantDelay: 20 * time.Second},
+		{name: "attempt_3_no_cap", base: 10 * time.Second, max: 0, attempt: 3, wantDelay: 40 * time.Second},
+		{name: "attempt_4_capped", base: 10 * time.Second, max: 30 * time.Second, attempt: 4, wantDelay: 30 * time.Second},
+		{name: "attempt_2_hits_cap", base: 10 * time.Second, max: 15 * time.Second, attempt: 2, wantDelay: 15 * time.Second},
+		{name: "zero_base_returns_zero", base: 0, max: 300 * time.Second, attempt: 1, wantDelay: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{RendererBackoffBase: tt.base, RendererBackoffMax: tt.max}
+			got := rendererBackoffDelay(cfg, tt.attempt)
+			assert.Equal(t, tt.wantDelay, got)
+		})
+	}
+}
+
+// TestRendererManagerNoBackoffWhenBaseIsZero verifies backward-compatibility:
+// when RendererBackoffBase is zero, restartCrashed retries on every call.
+func TestRendererManagerNoBackoffWhenBaseIsZero(t *testing.T) {
+	cfg := testConfig(t, 18380, map[string]string{"served": "some/source"})
+	cfg.RendererCommand = []string{filepath.Join(t.TempDir(), "no-such-renderer")}
+	cfg.RendererMaxRestarts = 3
+	// Explicit zero disables backoff.
+	cfg.RendererBackoffBase = 0
+	m := NewRendererManager(cfg)
+	defer m.shutdown()
+
+	m.SetModels(map[string]struct{}{"served": {}})
+	waitForStatus(t, m, "served", StatusFailed)
+
+	// Three consecutive restartCrashed calls should each increment the counter
+	// (no backoff suppression).
+	for want := 1; want <= 3; want++ {
+		require.Eventually(t, func() bool {
+			m.restartCrashed()
+			for _, info := range m.Snapshot() {
+				if info.Model == "served" && info.Restarts == want {
+					return true
+				}
+			}
+			return false
+		}, 5*time.Second, 50*time.Millisecond, "restart %d did not fire", want)
+		waitForStatus(t, m, "served", StatusFailed)
+	}
+
+	// Budget is now exhausted; a further call must not increment.
+	m.restartCrashed()
+	waitForStatus(t, m, "served", StatusFailed)
+	infos := m.Snapshot()
+	require.Len(t, infos, 1)
+	assert.Equal(t, 3, infos[0].Restarts, "restart counter must not exceed budget")
+}
+
+// TestRendererManagerBackoffResetOnRecovery verifies that nextRetryAfter is
+// cleared when a renderer transitions to StatusReady, so a subsequent crash
+// starts the backoff sequence fresh rather than reusing a stale future window.
+func TestRendererManagerBackoffResetOnRecovery(t *testing.T) {
+	cfg := testConfig(t, 18390, map[string]string{"served": "some/source"})
+	marker := filepath.Join(t.TempDir(), "started-once")
+	cfg.RendererCommand = []string{"sh", "-c", fmt.Sprintf(
+		`if [ ! -f %q ]; then touch %q; exit 1; fi; exec %q -test.run=TestHelperRenderer -- "$@"`,
+		marker, marker, os.Args[0]), "renderer"}
+	cfg.RendererMaxRestarts = 3
+	cfg.RendererBackoffBase = 100 * time.Millisecond
+	cfg.RendererBackoffMax = 1 * time.Second
+	m := NewRendererManager(cfg)
+	defer m.shutdown()
+
+	m.SetModels(map[string]struct{}{"served": {}})
+	// First launch fails, sets a backoff window.
+	waitForStatus(t, m, "served", StatusFailed)
+
+	// Drive restarts until the renderer recovers.
+	require.Eventually(t, func() bool {
+		m.restartCrashed()
+		for _, info := range m.Snapshot() {
+			if info.Model == "served" && info.Status == string(StatusReady) {
+				return true
+			}
+		}
+		return false
+	}, 10*time.Second, 100*time.Millisecond, "renderer did not recover")
+
+	// Verify both backoff fields are cleared: nextRetryAfter must be zero and
+	// consecutiveFailures must be reset so the next crash starts from base delay.
+	m.mu.Lock()
+	r := m.renderers["served"]
+	m.mu.Unlock()
+	require.NotNil(t, r)
+	assert.True(t, r.nextRetryAfter.IsZero(),
+		"nextRetryAfter should be cleared after a successful ready transition")
+	assert.Equal(t, 0, r.consecutiveFailures,
+		"consecutiveFailures should reset to 0 after a successful ready transition")
+}
