@@ -852,7 +852,7 @@ func (r *Router) getPodsAndServer(modelServerName types.NamespacedName) ([]*data
 		return nil, nil, fmt.Errorf("can't find model server: %v", modelServerName)
 	}
 
-	pods, err := r.store.GetPodsByModelServer(modelServerName)
+	pods, err := r.store.GetSchedulablePodsByModelServer(modelServerName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("can't find target pods of model server: %v, err: %w", modelServerName, err)
 	}

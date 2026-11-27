@@ -213,6 +213,8 @@ type Store interface {
 	// Get modelServer
 	GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServer
 	GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, error)
+	// GetSchedulablePodsByModelServer returns pods eligible for traffic routing (excludes draining).
+	GetSchedulablePodsByModelServer(name types.NamespacedName) ([]*PodInfo, error)
 
 	// Refresh Store and ModelServer when add a new pod or update a pod
 	AddOrUpdatePod(pod *corev1.Pod, modelServer []*aiv1alpha1.ModelServer) error
@@ -1008,6 +1010,7 @@ func (s *store) GetModelServer(name types.NamespacedName) *aiv1alpha1.ModelServe
 	return nil
 }
 
+// GetPodsByModelServer returns all pods, including draining ones.
 func (s *store) GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, error) {
 	value, ok := s.modelServer.Load(name)
 	if !ok {
@@ -1020,15 +1023,27 @@ func (s *store) GetPodsByModelServer(name types.NamespacedName) ([]*PodInfo, err
 
 	for _, podName := range podNames {
 		if value, ok := s.pods.Load(podName); ok {
-			pi := value.(*PodInfo)
-			if pi.IsDraining() {
-				continue
-			}
-			pods = append(pods, pi)
+			pods = append(pods, value.(*PodInfo))
 		}
 	}
 
 	return pods, nil
+}
+
+// GetSchedulablePodsByModelServer returns pods eligible for traffic routing (excludes draining).
+func (s *store) GetSchedulablePodsByModelServer(name types.NamespacedName) ([]*PodInfo, error) {
+	pods, err := s.GetPodsByModelServer(name)
+	if err != nil {
+		return nil, err
+	}
+	schedulable := make([]*PodInfo, 0, len(pods))
+	for _, pi := range pods {
+		if pi.IsDraining() {
+			continue
+		}
+		schedulable = append(schedulable, pi)
+	}
+	return schedulable, nil
 }
 
 func (s *store) AddOrUpdateExternalModelProvider(provider *aiv1alpha1.ExternalModelProvider) error {

@@ -1254,7 +1254,7 @@ func TestModelServerController_TerminatingPodTracked(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, waitForObjectInCache(t, 5*time.Second, func() bool {
-		pods, err := store.GetPodsByModelServer(msName)
+		pods, err := store.GetSchedulablePodsByModelServer(msName)
 		return err == nil && len(pods) == 0
 	}), "terminating pod must be excluded from scheduling candidates")
 
