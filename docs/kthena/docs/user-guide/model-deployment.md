@@ -113,8 +113,7 @@ spec:
         value: "8200"
       - name: "RUNTIME_URL"   # default http://localhost:8000/metrics
         value: "http://localhost:8100/metrics"
-    minReplicas: 1
-    maxReplicas: 2
+    replicas: 1
     workers:
       - type: server
         image: openeuler/vllm-ascend:latest
@@ -156,8 +155,7 @@ spec:
     type: vLLMDisaggregated
     modelURI: hf://deepseek-ai/DeepSeek-V2-Lite
     cacheURI: hostpath://mnt/cache/
-    minReplicas: 1
-    maxReplicas: 1
+    replicas: 1
     workers:
       - type: prefill
         image: ghcr.io/volcano-sh/kthena-engine:vllm-ascend_v0.10.1rc1_mooncake_v0.3.5
@@ -290,7 +288,7 @@ This example demonstrates a disaggregated deployment using NVIDIA GPUs with pref
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:
-  name: PD-sample
+  name: pd-sample
   namespace: default
 spec:
   schedulerName: volcano

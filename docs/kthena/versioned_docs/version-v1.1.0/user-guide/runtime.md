@@ -112,8 +112,7 @@ spec:
         value: "http://localhost:8100"
       - name: "RUNTIME_METRICS_PATH" # default /metrics
         value: "/metrics"
-    minReplicas: 1
-    maxReplicas: 1
+    replicas: 1
     workers:
       - type: server
         image: openeuler/vllm-ascend:latest
@@ -173,8 +172,7 @@ spec:
         value: "https://obs.test.com"
       - name: "VLLM_ALLOW_RUNTIME_LORA_UPDATING"
         value: "True"  # Enable dynamic LoRA load/unload
-    minReplicas: 1
-    maxReplicas: 1
+    replicas: 1
     workers:
       - type: server
         image: openeuler/vllm-ascend:latest

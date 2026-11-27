@@ -174,8 +174,7 @@ spec:
     env:
       - name: "VLLM_USE_V1"
         value: "1"
-    minReplicas: 3
-    maxReplicas: 3
+    replicas: 3
     workers:
       - type: server
         image: vllm/vllm-openai:latest
