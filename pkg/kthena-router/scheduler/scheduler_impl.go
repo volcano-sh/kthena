@@ -183,9 +183,12 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 
 		klog.V(4).Info("Running score plugins for decode pod")
 		scores := s.RunScorePlugins(decodePods, ctx)
-		topNDecodePods := TopNPodInfos(scores, topN)
+		rankedDecodePods := TopNPodInfos(scores, len(decodePods))
 
-		for _, decodePod := range topNDecodePods {
+		for _, decodePod := range rankedDecodePods {
+			if len(decodeCandidates) >= topN {
+				break
+			}
 			decodePodName := decodePod.GetPodNamespacedName()
 			if decodePodName.Name == "" {
 				continue
