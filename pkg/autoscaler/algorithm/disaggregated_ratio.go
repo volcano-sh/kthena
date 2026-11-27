@@ -19,9 +19,11 @@ package algorithm
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // ReplicaBounds defines the inclusive replica range for a scalable unit.
@@ -30,10 +32,10 @@ type ReplicaBounds struct {
 	Max int32
 }
 
-// EnforceRoleRatio projects replicas into the feasible region described by the
-// role ratio constraint. It follows the scale-up-biased repair from the P/D
-// disaggregated autoscaling proposal: raise the deficient role first, and only
-// reduce the other side if raising would exceed that role's max bound.
+// EnforceRoleRatio projects replicas into the feasible integer region described
+// by the role ratio constraint. It preserves the scale-up bias from the P/D
+// disaggregated autoscaling proposal by preferring candidates that avoid
+// reducing the metric-derived replica counts.
 func EnforceRoleRatio(replicas map[string]int32, bounds map[string]ReplicaBounds, constraint *workload.RoleRatioConstraint) (map[string]int32, bool, string, error) {
 	// Work on a copy so callers can keep the metric/behavior-corrected input for
 	// status reporting and tests.
@@ -74,10 +76,10 @@ func EnforceRoleRatio(replicas map[string]int32, bounds map[string]ReplicaBounds
 		return finalReplicas, false, "", nil
 	}
 
-	minRatio := constraint.MinRatio.AsFloat64Slow()
-	maxRatio := constraint.MaxRatio.AsFloat64Slow()
-	if math.IsNaN(minRatio) || math.IsNaN(maxRatio) || math.IsInf(minRatio, 0) || math.IsInf(maxRatio, 0) {
-		return finalReplicas, false, "", fmt.Errorf("ratio constraint contains non-finite value")
+	minRatio := quantityToRat(constraint.MinRatio)
+	maxRatio := quantityToRat(constraint.MaxRatio)
+	if minRatio.Sign() < 0 || maxRatio.Sign() <= 0 || minRatio.Cmp(maxRatio) > 0 {
+		return finalReplicas, false, "", fmt.Errorf("ratio constraint must satisfy 0 <= minRatio <= maxRatio and maxRatio > 0")
 	}
 
 	adjusted := false
@@ -89,36 +91,18 @@ func EnforceRoleRatio(replicas map[string]int32, bounds map[string]ReplicaBounds
 		denominator = min(max(int32(1), denominatorBounds.Min), denominatorBounds.Max)
 		adjusted = true
 	}
-	ratio := float64(numerator) / float64(denominator)
-	switch {
-	case ratio < minRatio:
-		// The numerator side is deficient. Raise it first so the final result
-		// preserves metric-requested capacity whenever the max bound allows it.
-		raisedNumerator := ceilInt32(minRatio * float64(denominator))
-		if raisedNumerator <= numeratorBounds.Max {
-			numerator = max(raisedNumerator, numeratorBounds.Min)
-		} else if minRatio > 0 {
-			// If raising numerator is impossible, saturate it before reducing denominator so we keep as much capacity as possible.
-			numerator = numeratorBounds.Max
-			denominator = floorInt32(float64(numerator) / minRatio)
-			denominator = min(max(denominator, denominatorBounds.Min), denominatorBounds.Max)
-		}
-		adjusted = true
-	case ratio > maxRatio:
-		if maxRatio <= 0 {
-			numerator = 0
-		} else {
-			// The denominator side is deficient. Raise it first for the same
-			// scale-up-biased reason used in the minimum-ratio branch.
-			raisedDenominator := ceilInt32(float64(numerator) / maxRatio)
-			if raisedDenominator <= denominatorBounds.Max {
-				denominator = max(raisedDenominator, denominatorBounds.Min)
-			} else {
-				// If denominator cannot be raised enough, saturate it before lowering numerator so we keep as much capacity as possible.
-				denominator = denominatorBounds.Max
-				numerator = floorInt32(maxRatio * float64(denominator))
-				numerator = min(max(numerator, numeratorBounds.Min), numeratorBounds.Max)
-			}
+	ratioViolated := denominator == 0
+	if denominator != 0 {
+		ratio := new(big.Rat).SetFrac(big.NewInt(int64(numerator)), big.NewInt(int64(denominator)))
+		ratioViolated = ratio.Cmp(minRatio) < 0 || ratio.Cmp(maxRatio) > 0
+	}
+	if ratioViolated {
+		var err error
+		numerator, denominator, err = closestRatioConstrainedReplicas(
+			numerator, denominator, numeratorBounds, denominatorBounds, minRatio, maxRatio,
+		)
+		if err != nil {
+			return finalReplicas, false, "", err
 		}
 		adjusted = true
 	}
@@ -132,32 +116,98 @@ func EnforceRoleRatio(replicas map[string]int32, bounds map[string]ReplicaBounds
 	return finalReplicas, adjusted, currentRatio, nil
 }
 
-// ceilInt32 returns ceil(value) with int32 saturation.
-func ceilInt32(value float64) int32 {
-	if math.IsNaN(value) {
-		return 0
+// closestRatioConstrainedReplicas returns the first feasible integer replica
+// pair from a deterministic search within the denominator range that can
+// intersect the numerator bounds.
+func closestRatioConstrainedReplicas(numerator, denominator int32, numeratorBounds, denominatorBounds ReplicaBounds, minRatio, maxRatio *big.Rat) (int32, int32, error) {
+	minimumDenominator := max(
+		int32(1),
+		denominatorBounds.Min,
+		ceilRatToInt32(new(big.Rat).Quo(big.NewRat(int64(numeratorBounds.Min), 1), maxRatio)),
+	)
+	maximumDenominator := denominatorBounds.Max
+	if minRatio.Sign() > 0 {
+		maximumDenominator = min(maximumDenominator, floorRatToInt32(new(big.Rat).Quo(big.NewRat(int64(numeratorBounds.Max), 1), minRatio)))
 	}
-	value = math.Ceil(value)
-	if value > float64(math.MaxInt32) {
-		return math.MaxInt32
+	if minimumDenominator > maximumDenominator {
+		return 0, 0, fmt.Errorf("ratio constraint has no feasible integer replica pair within role bounds")
 	}
-	if value < float64(math.MinInt32) {
-		return math.MinInt32
+
+	candidateNumerator := func(candidateDenominator int32) (int32, bool) {
+		candidateDenominatorRat := big.NewRat(int64(candidateDenominator), 1)
+		minimumNumerator := max(numeratorBounds.Min, ceilRatToInt32(new(big.Rat).Mul(minRatio, candidateDenominatorRat)))
+		maximumNumerator := min(numeratorBounds.Max, floorRatToInt32(new(big.Rat).Mul(maxRatio, candidateDenominatorRat)))
+		if minimumNumerator > maximumNumerator {
+			return 0, false
+		}
+		return min(max(numerator, minimumNumerator), maximumNumerator), true
 	}
-	return int32(value)
+
+	startingDenominator := min(max(denominator, minimumDenominator), maximumDenominator)
+	if denominator != 0 && new(big.Rat).SetFrac(big.NewInt(int64(numerator)), big.NewInt(int64(denominator))).Cmp(maxRatio) > 0 {
+		startingDenominator = min(max(
+			startingDenominator,
+			ceilRatToInt32(new(big.Rat).Quo(big.NewRat(int64(numerator), 1), maxRatio)),
+		), maximumDenominator)
+	}
+
+	for candidateDenominator := startingDenominator; ; candidateDenominator++ {
+		candidate, feasible := candidateNumerator(candidateDenominator)
+		if feasible {
+			return candidate, candidateDenominator, nil
+		}
+		if candidateDenominator == maximumDenominator {
+			break
+		}
+	}
+
+	for candidateDenominator := startingDenominator - 1; candidateDenominator >= minimumDenominator; candidateDenominator-- {
+		candidate, feasible := candidateNumerator(candidateDenominator)
+		if feasible {
+			return candidate, candidateDenominator, nil
+		}
+	}
+
+	return 0, 0, fmt.Errorf("ratio constraint has no feasible integer replica pair within role bounds")
 }
 
-// floorInt32 returns floor(value) with int32 saturation.
-func floorInt32(value float64) int32 {
-	if math.IsNaN(value) {
-		return 0
+func quantityToRat(quantity resource.Quantity) *big.Rat {
+	decimal := quantity.AsDec()
+	numerator := new(big.Int).Set(decimal.UnscaledBig())
+	denominator := big.NewInt(1)
+	scale := int64(decimal.Scale())
+	if scale < 0 {
+		numerator.Mul(numerator, new(big.Int).Exp(big.NewInt(10), big.NewInt(-scale), nil))
+	} else {
+		denominator.Exp(big.NewInt(10), big.NewInt(scale), nil)
 	}
-	value = math.Floor(value)
-	if value > float64(math.MaxInt32) {
+	return new(big.Rat).SetFrac(numerator, denominator)
+}
+
+func ceilRatToInt32(value *big.Rat) int32 {
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(value.Num(), value.Denom(), remainder)
+	if remainder.Sign() != 0 && value.Sign() > 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	return bigIntToInt32(quotient)
+}
+
+func floorRatToInt32(value *big.Rat) int32 {
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(value.Num(), value.Denom(), remainder)
+	if remainder.Sign() != 0 && value.Sign() < 0 {
+		quotient.Sub(quotient, big.NewInt(1))
+	}
+	return bigIntToInt32(quotient)
+}
+
+func bigIntToInt32(value *big.Int) int32 {
+	if value.Cmp(big.NewInt(math.MaxInt32)) > 0 {
 		return math.MaxInt32
 	}
-	if value < float64(math.MinInt32) {
+	if value.Cmp(big.NewInt(math.MinInt32)) < 0 {
 		return math.MinInt32
 	}
-	return int32(value)
+	return int32(value.Int64())
 }
