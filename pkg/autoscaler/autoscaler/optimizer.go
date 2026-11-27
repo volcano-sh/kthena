@@ -205,6 +205,7 @@ func (optimizer *Optimizer) Optimize(ctx context.Context, podLister listerv1.Pod
 	for name, samples := range externalSamples {
 		externalMetrics[name] = aggregateExternalSamples(name, samples)
 	}
+	optimizer.Status.RecordInitialRecommendation(instancesCountSum)
 	// Get recommended replicas of all model serving instances
 	instancesAlgorithm := algorithm.RecommendedInstancesAlgorithm{
 		MinInstances:                  optimizer.Meta.MinReplicas,
