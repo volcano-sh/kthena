@@ -478,6 +478,69 @@ func TestHTTPRouteController_SyncHandler_MovesRouteWithGatewayOnlyInInformer(t *
 	assert.Len(t, store.GetHTTPRoutesByGateway(ns+"/gateway-b"), 1)
 }
 
+func TestHTTPRouteController_SyncHandler_RemovesRouteMovedToMissingGateway(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
+	gatewayClient := gatewayfake.NewSimpleClientset() //nolint:staticcheck
+	gatewayInformerFactory := gatewayinformers.NewSharedInformerFactory(gatewayClient, 0)
+	store := datastore.New()
+
+	ctx := context.Background()
+	ns := "default"
+
+	oldRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "route"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName("gateway-a")},
+				},
+			},
+		},
+	}
+	assert.NoError(t, store.AddOrUpdateHTTPRoute(oldRoute))
+	require.Len(t, store.GetHTTPRoutesByGateway(ns+"/gateway-a"), 1)
+
+	// gateway-b does not exist yet. The status still reports the route as
+	// accepted by gateway-a.
+	httpRoute := oldRoute.DeepCopy()
+	httpRoute.Spec.ParentRefs = []gatewayv1.ParentReference{
+		{Kind: ptr(gatewayv1.Kind("Gateway")), Name: gatewayv1.ObjectName("gateway-b")},
+	}
+	httpRoute.Status.Parents = []gatewayv1.RouteParentStatus{{
+		ParentRef:      oldRoute.Spec.ParentRefs[0],
+		ControllerName: gatewayv1.GatewayController(ControllerName),
+		Conditions: []metav1.Condition{{
+			Type:   string(gatewayv1.RouteConditionAccepted),
+			Status: metav1.ConditionTrue,
+			Reason: string(gatewayv1.RouteReasonAccepted),
+		}},
+	}}
+	_, err := gatewayClient.GatewayV1().HTTPRoutes(ns).Create(ctx, httpRoute, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	ctrl, err := NewHTTPRouteController(gatewayInformerFactory, kubeInformerFactory, store, gatewayClient)
+	require.NoError(t, err)
+	stop := make(chan struct{})
+	defer close(stop)
+	gatewayInformerFactory.Start(stop)
+
+	if !cache.WaitForCacheSync(stop, gatewayInformerFactory.Gateway().V1().HTTPRoutes().Informer().HasSynced, gatewayInformerFactory.Gateway().V1().Gateways().Informer().HasSynced) {
+		t.Fatal("cache sync timeout")
+	}
+
+	err = ctrl.syncHandler(ns + "/route")
+	assert.NoError(t, err)
+	assert.Empty(t, store.GetHTTPRoutesByGateway(ns+"/gateway-a"))
+	assert.Nil(t, store.GetHTTPRoute(ns+"/route"))
+
+	updated, err := gatewayClient.GatewayV1().HTTPRoutes(ns).Get(ctx, "route", metav1.GetOptions{})
+	require.NoError(t, err)
+	// The CRD rejects a null status.parents, which the fake client does not check.
+	assert.NotNil(t, updated.Status.Parents)
+	assert.Empty(t, updated.Status.Parents)
+}
+
 func TestHTTPRouteController_SyncHandler_WaitsForGatewayCreatedLater(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
@@ -511,7 +574,7 @@ func TestHTTPRouteController_SyncHandler_WaitsForGatewayCreatedLater(t *testing.
 	}
 
 	err = ctrl.syncHandler(ns + "/route")
-	assert.Error(t, err)
+	assert.NoError(t, err)
 	assert.Nil(t, store.GetHTTPRoute(ns+"/route"))
 
 	gw := &gatewayv1.Gateway{

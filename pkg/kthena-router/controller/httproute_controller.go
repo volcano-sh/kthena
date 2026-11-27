@@ -229,7 +229,15 @@ func (c *HTTPRouteController) syncHandler(key string) error {
 		return nil
 	}
 	if gatewayPending {
-		return fmt.Errorf("gateway not synced yet")
+		// No Gateway accepts the route now. Stop serving it and remove the
+		// status entries this controller wrote for it. The route is queued
+		// again when a kthena-router Gateway it references is created or updated.
+		_ = c.store.DeleteHTTPRoute(key)
+		if err := c.updateHTTPRouteStatus(httpRoute, nil); err != nil {
+			klog.Errorf("Failed to update HTTPRoute %s/%s status: %v", namespace, name, err)
+		}
+		klog.V(2).Infof("HTTPRoute %s/%s is waiting for its Gateway", namespace, name)
+		return nil
 	}
 	klog.V(4).Infof("Skipping HTTPRoute %s/%s: does not reference kthena-router Gateway", namespace, name)
 	_ = c.store.DeleteHTTPRoute(key)
@@ -422,7 +430,8 @@ func (c *HTTPRouteController) updateHTTPRouteStatus(httpRoute *gatewayv1.HTTPRou
 
 	// Merge: preserve foreign controller entries, update only our own.
 	updated := current.DeepCopy()
-	var newParents []gatewayv1.RouteParentStatus
+	// status.parents is required, so an empty list must be sent as [] and not null.
+	newParents := []gatewayv1.RouteParentStatus{}
 	ourEntriesSet := make(map[string]bool)
 
 	for _, existing := range updated.Status.Parents {
