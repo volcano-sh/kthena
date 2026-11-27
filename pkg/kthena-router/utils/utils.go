@@ -17,7 +17,9 @@ limitations under the License.
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 
@@ -44,13 +46,7 @@ func GetNamespaceName(obj metav1.Object) types.NamespacedName {
 
 func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 	if prompt, ok := body["prompt"]; ok {
-		promptStr, ok := prompt.(string)
-		if !ok {
-			return nil, fmt.Errorf("prompt is not a string")
-		}
-		return &common.ChatMessage{
-			Text: promptStr,
-		}, nil
+		return parseCompletionPrompt(prompt)
 	}
 
 	if messages, ok := body["messages"]; ok {
@@ -98,6 +94,76 @@ func ParsePrompt(body map[string]interface{}) (*common.ChatMessage, error) {
 	}
 
 	return nil, fmt.Errorf("prompt or messages not found in request body")
+}
+
+// parseCompletionPrompt parses the prompt of a Completions request, which may be a
+// string, a list of strings, a list of token IDs or a list of token-ID lists. The
+// request body itself is forwarded unchanged.
+//
+// Only a string prompt is one sequence the router can tokenize, so only it sets
+// Text, which the cache-affinity plugins score. Token IDs set the exact
+// InputTokens instead, and a list of strings sets BatchText, which is used to
+// estimate input tokens only.
+func parseCompletionPrompt(prompt any) (*common.ChatMessage, error) {
+	switch p := prompt.(type) {
+	case string:
+		return &common.ChatMessage{Text: p}, nil
+	case []interface{}:
+		if len(p) == 0 {
+			return nil, fmt.Errorf("prompt is an empty list")
+		}
+		if count, ok := countTokenIDs(p); ok {
+			return &common.ChatMessage{InputTokens: count}, nil
+		}
+		if _, ok := p[0].(string); ok {
+			texts := make([]string, 0, len(p))
+			for _, item := range p {
+				text, ok := item.(string)
+				if !ok {
+					return nil, fmt.Errorf("prompt list mixes strings with other values")
+				}
+				texts = append(texts, text)
+			}
+			return &common.ChatMessage{BatchText: strings.Join(texts, "\n")}, nil
+		}
+		total := 0
+		for _, item := range p {
+			ids, ok := item.([]interface{})
+			if !ok || len(ids) == 0 {
+				return nil, fmt.Errorf("prompt list item is neither a string nor a list of token IDs")
+			}
+			count, ok := countTokenIDs(ids)
+			if !ok {
+				return nil, fmt.Errorf("prompt list item is neither a string nor a list of token IDs")
+			}
+			total += count
+		}
+		return &common.ChatMessage{InputTokens: total}, nil
+	default:
+		return nil, fmt.Errorf("prompt is neither a string nor a list")
+	}
+}
+
+// countTokenIDs returns the number of token IDs in items. It reports false if
+// any item is not a non-negative integer that fits in an int64.
+func countTokenIDs(items []interface{}) (int, bool) {
+	for _, item := range items {
+		switch v := item.(type) {
+		case json.Number:
+			id, err := v.Int64()
+			if err != nil || id < 0 {
+				return 0, false
+			}
+		case float64:
+			// float64(math.MaxInt64) rounds up to 2^63, so ">=" rejects 2^63.
+			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v >= math.MaxInt64 || v != math.Trunc(v) {
+				return 0, false
+			}
+		default:
+			return 0, false
+		}
+	}
+	return len(items), true
 }
 
 func parseResponsesPrompt(instructions, input any) (*common.ChatMessage, error) {

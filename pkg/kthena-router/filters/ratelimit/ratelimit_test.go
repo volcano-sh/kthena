@@ -53,6 +53,45 @@ func TestTokenRateLimiter_Basic(t *testing.T) {
 	}
 }
 
+func TestTokenRateLimiter_RateLimitTokens(t *testing.T) {
+	model := "test-model"
+	tokens := uint32(20)
+	// A minute-based unit keeps refill negligible during the test.
+	unit := networkingv1alpha1.Minute
+
+	tests := []struct {
+		name      string
+		requests  []int
+		wantError []bool
+	}{
+		{name: "a request that uses the whole quota is allowed", requests: []int{20}, wantError: []bool{false}},
+		{name: "the quota is charged by the given count", requests: []int{15, 5, 1}, wantError: []bool{false, false, true}},
+		{name: "a request above the quota is rejected", requests: []int{21}, wantError: []bool{true}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rl := NewTokenRateLimiter()
+			if err := rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+				InputTokensPerUnit: &tokens,
+				Unit:               unit,
+			}); err != nil {
+				t.Fatalf("AddOrUpdateLimiter: %v", err)
+			}
+			for i, n := range tt.requests {
+				err := rl.RateLimitTokens(model, n)
+				if tt.wantError[i] {
+					if _, ok := err.(*InputRateLimitExceededError); !ok {
+						t.Fatalf("request %d (%d tokens): expected InputRateLimitExceededError, got %v", i, n, err)
+					}
+				} else if err != nil {
+					t.Fatalf("request %d (%d tokens): unexpected error: %v", i, n, err)
+				}
+			}
+		})
+	}
+}
+
 func TestTokenRateLimiter_NoLimiter(t *testing.T) {
 	rl := NewTokenRateLimiter()
 	// No limiter added, should always allow

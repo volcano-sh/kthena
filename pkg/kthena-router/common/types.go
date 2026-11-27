@@ -37,4 +37,13 @@ type ChatMessage struct {
 
 	// Messages is used for chat conversation input (chat mode)
 	Messages []Message `json:"messages,omitempty"`
+
+	// InputTokens is the exact input token count of a Completions prompt sent as
+	// token IDs. Zero means the count is estimated from the prompt text.
+	InputTokens int `json:"-"`
+
+	// BatchText is a list-of-strings Completions prompt joined by newlines. It is
+	// only used to estimate input tokens: the backend runs each prompt as its own
+	// sequence, so the joined text is not used for cache affinity.
+	BatchText string `json:"-"`
 }
