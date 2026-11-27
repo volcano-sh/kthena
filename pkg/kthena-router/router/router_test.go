@@ -30,6 +30,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2704,6 +2705,14 @@ func TestRouter_HandlerFunc_UpstreamErrorStatus(t *testing.T) {
 			expectedCalls:    1,
 		},
 		{
+			name:             "413 is forwarded without trying the other pod",
+			upstreamStatus:   http.StatusRequestEntityTooLarge,
+			expectedStatus:   http.StatusRequestEntityTooLarge,
+			expectedResponse: upstreamBody,
+			expectedReason:   "upstream_response",
+			expectedCalls:    1,
+		},
+		{
 			name:             "422 is forwarded without trying the other pod",
 			upstreamStatus:   http.StatusUnprocessableEntity,
 			expectedStatus:   http.StatusUnprocessableEntity,
@@ -2799,12 +2808,18 @@ func TestRouter_HandlerFunc_UpstreamErrorStatus(t *testing.T) {
 			c.Request, err = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(requestBody))
 			require.NoError(t, err)
 			c.Request.Header.Set("Content-Type", "application/json")
+			accessCtx := accesslog.NewAccessLogContext("upstream-error", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "upstream-error-model")
+			c.Set(accesslog.AccessLogContextKey, accessCtx)
 
 			router.HandlerFunc()(c)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
 			assert.Contains(t, w.Body.String(), tt.expectedResponse)
 			assert.Equal(t, tt.expectedCalls, calls.Load(), "upstream calls")
+			// A forwarded rejection must keep its upstream_response label rather
+			// than being relabeled as a router-side proxy failure.
+			require.NotNil(t, accessCtx.Error)
+			assert.Equal(t, tt.expectedReason, accessCtx.Error.Type, "access log error type")
 			if tt.expectedReason == "upstream_response" {
 				assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 			}
@@ -3712,6 +3727,91 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHandleFairnessScheduling_SessionCompletion checks that only a served request
+// marks its session completed (and so boosts the session's follow-ups): a request
+// the model server rejects did not warm any prefix cache.
+func TestHandleFairnessScheduling_SessionCompletion(t *testing.T) {
+	tests := []struct {
+		name           string
+		upstreamStatus int
+		wantMarked     bool
+	}{
+		{name: "served request marks the session", upstreamStatus: http.StatusOK, wantMarked: true},
+		{name: "forwarded 400 does not mark the session", upstreamStatus: http.StatusBadRequest},
+		{name: "forwarded 413 does not mark the session", upstreamStatus: http.StatusRequestEntityTooLarge},
+		{name: "forwarded 422 does not mark the session", upstreamStatus: http.StatusUnprocessableEntity},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.upstreamStatus)
+				_, _ = w.Write([]byte(`{"id":"session-test"}`))
+			})
+			router, store, backend := setupFairnessTestRouter(t, backendHandler)
+			defer backend.Close()
+
+			router.queueTimeout = 5 * time.Second
+			recorder := &sessionRecordingStore{Store: store}
+			router.store = recorder
+
+			ctx, cancel := context.WithCancel(context.Background())
+			router.store.Run(ctx)
+			defer cancel()
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions",
+				bytes.NewBufferString(`{"model":"fair-model","prompt":"hello session"}`))
+			c.Request.Header.Set("Content-Type", "application/json")
+			c.Request.Header.Set(sessionRecordingHeader, "session-1")
+
+			modelRequest, err := ParseModelRequest(c)
+			require.NoError(t, err)
+			prompt, err := utils.ParsePrompt(modelRequest)
+			require.NoError(t, err)
+			c.Set(PromptKey, prompt)
+			c.Set(common.UserIdKey, "user-test")
+			c.Set("metricsRecorder", metrics.NewRequestMetricsRecorder(router.metrics, "fair-model", "/v1/chat/completions"))
+
+			require.NoError(t, router.handleFairnessScheduling(c, modelRequest, "req-session", "fair-model"))
+
+			assert.Equal(t, tt.upstreamStatus, w.Code)
+			if tt.wantMarked {
+				assert.Equal(t, []string{"fair-model/session-1"}, recorder.completed())
+			} else {
+				assert.Empty(t, recorder.completed())
+			}
+		})
+	}
+}
+
+const sessionRecordingHeader = "X-Session-ID"
+
+// sessionRecordingStore reports a session header, as a store with session boost
+// enabled does, and records which sessions were marked completed.
+type sessionRecordingStore struct {
+	datastore.Store
+	mu     sync.Mutex
+	marked []string
+}
+
+func (s *sessionRecordingStore) GetSessionIDHeader() string { return sessionRecordingHeader }
+
+func (s *sessionRecordingStore) MarkSessionRequestCompleted(modelName, sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.marked = append(s.marked, modelName+"/"+sessionID)
+	s.Store.MarkSessionRequestCompleted(modelName, sessionID)
+}
+
+func (s *sessionRecordingStore) completed() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.marked...)
 }
 
 // --- Test helper: store wrapper that accepts Enqueue but never notifies ---

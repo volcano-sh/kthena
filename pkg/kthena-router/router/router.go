@@ -777,6 +777,11 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	req := c.Request
 	upstreamTimeout := upstreamTimeoutFor(modelServer)
 	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port, upstreamTimeout); err != nil {
+		if errors.Is(err, errUpstreamRejectedRequest) {
+			// The model server's response is already forwarded and labeled
+			// upstream_response; don't relabel it as a router failure.
+			return err
+		}
 		klog.Errorf("request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
 		accesslog.SetError(c, "proxy", "request processing failed")
 		if !c.Writer.Written() {
@@ -1067,7 +1072,9 @@ func (r *Router) proxy(
 		if errors.Is(err, errUpstreamRejectedRequest) {
 			// The pod's error response has been forwarded to the client. Any
 			// other pod would reject the request the same way, so stop here.
-			return nil
+			// Skip the prefix-cache post-hooks and return the error so callers
+			// don't count the request as served (no session boost either).
+			return err
 		}
 		if err != nil {
 			klog.Errorf(" pod request error: %v", err)
@@ -1332,6 +1339,7 @@ func (r *Router) AccessLog() gin.HandlerFunc {
 
 // errUpstreamRejectedRequest is returned by proxyRequest after it has forwarded
 // a pod's response that rejects the request itself (see upstreamRejectedRequest).
+// It travels up to doLoadbalance so the request isn't counted as successful.
 var errUpstreamRejectedRequest = errors.New("model server rejected the request")
 
 // upstreamRejectedRequest reports whether an upstream status means the request
