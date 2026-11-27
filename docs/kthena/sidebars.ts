@@ -55,7 +55,6 @@ const sidebars: SidebarsConfig = {
             'user-guide/downloader',
             'user-guide/lws-integration',
             'user-guide/modelserving-plugin-framework',
-            'user-guide/modelserving-bootstrap-acceleration',
           ],
         },
         'user-guide/multi-node-inference',

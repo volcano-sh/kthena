@@ -85,8 +85,7 @@ func SetupController(ctx context.Context, cc Config) {
 			case ModelBoosterController:
 				mc = modelbooster.NewModelBoosterController(kubeClient, client)
 			case ModelServingController:
-				msc, err = modelserving.NewModelServingController(kubeClient, client, volcanoClient, apiextClient,
-					modelserving.WithModelExpressServerAddress(cc.ModelExpressServerAddress))
+				msc, err = modelserving.NewModelServingController(kubeClient, client, volcanoClient, apiextClient)
 				if err != nil {
 					klog.Fatalf("failed to create ModelServing controller: %v", err)
 				}
