@@ -754,6 +754,41 @@ func TestStoreGetPodsByModelServer(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestStoreGetSchedulablePodsByModelServer(t *testing.T) {
+	s := &store{
+		modelServer: sync.Map{},
+		pods:        sync.Map{},
+	}
+	ms := &aiv1alpha1.ModelServer{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "model1"},
+	}
+	msName := utils.GetNamespaceName(ms)
+	modelSrv := newModelServer(ms)
+	running := types.NamespacedName{Namespace: "default", Name: "pod-running"}
+	draining := types.NamespacedName{Namespace: "default", Name: "pod-draining"}
+	modelSrv.addPod(running)
+	modelSrv.addPod(draining)
+	s.modelServer.Store(msName, modelSrv)
+
+	now := metav1.Now()
+	runningInfo := &PodInfo{Pod: &corev1.Pod{}, modelServer: sets.New[types.NamespacedName](msName), models: sets.New[string]()}
+	drainingInfo := &PodInfo{
+		Pod:         &corev1.Pod{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now}},
+		modelServer: sets.New[types.NamespacedName](msName),
+		models:      sets.New[string](),
+	}
+	s.pods.Store(running, runningInfo)
+	s.pods.Store(draining, drainingInfo)
+
+	all, err := s.GetPodsByModelServer(msName)
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []*PodInfo{runningInfo, drainingInfo}, all, "GetPodsByModelServer must include draining pods")
+
+	schedulable, err := s.GetSchedulablePodsByModelServer(msName)
+	assert.NoError(t, err)
+	assert.Equal(t, []*PodInfo{runningInfo}, schedulable, "GetSchedulablePodsByModelServer must exclude draining pods")
+}
+
 // TestStoreDeleteModelRoute tests various scenarios for DeleteModelRoute method
 func TestStoreDeleteModelRoute(t *testing.T) {
 	t.Run("delete route with model name", func(t *testing.T) {
