@@ -178,6 +178,18 @@ func TestPrefixCacheEviction(t *testing.T) {
 	}
 }
 
+func TestAccessLogClaimMissing(t *testing.T) {
+	m := DefaultMetrics
+	const field = "metricstest_claim_missing"
+
+	before := counterVal(t, &m.AccessLogClaimMissingTotal, field)
+	m.RecordAccessLogClaimMissing(field)
+	m.RecordAccessLogClaimMissing(field)
+	if got := counterVal(t, &m.AccessLogClaimMissingTotal, field) - before; got != 2 {
+		t.Errorf("claim missing delta = %v, want 2", got)
+	}
+}
+
 func TestPrefixCacheEntriesProvider(t *testing.T) {
 	m := DefaultMetrics
 	m.SetPrefixCacheEntriesProvider(func() float64 { return 42 })

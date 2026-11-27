@@ -18,6 +18,7 @@ package accesslog
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -478,4 +479,93 @@ func TestAccessLogContext_SetUpstreamUsage(t *testing.T) {
 	entry = ctx.ToAccessLogEntry(200)
 	assert.Equal(t, intPtr(24), entry.UpstreamInputTokens)
 	assert.Nil(t, entry.CachedInputTokens)
+}
+
+func TestAccessLogEntry_ClaimFields(t *testing.T) {
+	const (
+		jsonBase = `{"timestamp":"2024-01-15T10:30:45.123Z","method":"POST","path":"/v1/chat/completions","protocol":"HTTP/1.1","status_code":200,` +
+			`"model_name":"llama2-7b","model_route":"default/llama2-route-v1","model_server":"default/llama2-server",` +
+			`"selected_pod":"llama2-deployment-5f7b8c9d-xk2p4","request_id":"test-request-id","input_tokens":150,` +
+			`"output_tokens":75,"duration_total":2350,"duration_request_processing":45,` +
+			`"duration_upstream_processing":2180,"duration_response_processing":5`
+		textBase = `[2024-01-15T10:30:45.123Z] "POST /v1/chat/completions HTTP/1.1" 200 model_name=llama2-7b ` +
+			`model_route=default/llama2-route-v1 model_server=default/llama2-server selected_pod=llama2-deployment-5f7b8c9d-xk2p4 ` +
+			`request_id=test-request-id tokens=150/75`
+		textTimings = ` timings=2350ms(45+2180+5)`
+	)
+
+	tests := []struct {
+		name     string
+		fields   []ClaimField
+		wantJSON string
+		wantText string
+	}{
+		{
+			// Matches the output before claim fields existed.
+			name:     "no claim fields",
+			wantJSON: jsonBase + `}`,
+			wantText: textBase + textTimings,
+		},
+		{
+			name:     "empty claim fields",
+			fields:   []ClaimField{},
+			wantJSON: jsonBase + `}`,
+			wantText: textBase + textTimings,
+		},
+		{
+			name:     "claim fields",
+			fields:   []ClaimField{{Name: "tenant", Value: "team-search"}, {Name: "user_id", Value: "u-1024"}},
+			wantJSON: jsonBase + `,"tenant":"team-search","user_id":"u-1024"}`,
+			wantText: textBase + ` tenant=team-search user_id=u-1024` + textTimings,
+		},
+		{
+			// A client-controlled value cannot add fields to either format.
+			name:     "forged fields are escaped",
+			fields:   []ClaimField{{Name: "user_id", Value: `u" timings=0ms(0+0+0) model_name="x`}},
+			wantJSON: jsonBase + `,"user_id":"u\" timings=0ms(0+0+0) model_name=\"x"}`,
+			wantText: textBase + ` user_id="u\" timings=0ms(0+0+0) model_name=\"x"` + textTimings,
+		},
+		{
+			name:     "control characters are escaped",
+			fields:   []ClaimField{{Name: "user_id", Value: "u\n[2024-01-15T00:00:00Z] \"GET / HTTP/1.1\" 200"}},
+			wantJSON: jsonBase + `,"user_id":"u\n[2024-01-15T00:00:00Z] \"GET / HTTP/1.1\" 200"}`,
+			wantText: textBase + ` user_id="u\n[2024-01-15T00:00:00Z] \"GET / HTTP/1.1\" 200"` + textTimings,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := upstreamUsageTestEntry()
+			entry.ClaimFields = tt.fields
+
+			jsonOutput, err := (&accessLoggerImpl{config: &AccessLoggerConfig{Format: FormatJSON}}).formatJSON(entry)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantJSON, jsonOutput)
+			var decoded map[string]any
+			require.NoError(t, json.Unmarshal([]byte(jsonOutput), &decoded))
+			for _, field := range tt.fields {
+				assert.Equal(t, field.Value, decoded[field.Name])
+			}
+
+			textOutput, err := (&accessLoggerImpl{config: &AccessLoggerConfig{Format: FormatText}}).formatText(entry)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantText, textOutput)
+		})
+	}
+}
+
+func TestAccessLogEntry_ClaimFieldsWithUpstreamUsage(t *testing.T) {
+	entry := upstreamUsageTestEntry()
+	entry.UpstreamInputTokens = intPtr(1830)
+	entry.CachedInputTokens = intPtr(1536)
+	entry.ClaimFields = []ClaimField{{Name: "user_id", Value: "u-1024"}}
+
+	textOutput, err := (&accessLoggerImpl{config: &AccessLoggerConfig{Format: FormatText}}).formatText(entry)
+	require.NoError(t, err)
+	assert.True(t, strings.HasSuffix(textOutput,
+		` tokens=150/75 upstream_input_tokens=1830 cached_input_tokens=1536 user_id=u-1024 timings=2350ms(45+2180+5)`), textOutput)
+
+	jsonOutput, err := (&accessLoggerImpl{config: &AccessLoggerConfig{Format: FormatJSON}}).formatJSON(entry)
+	require.NoError(t, err)
+	assert.True(t, strings.HasSuffix(jsonOutput, `"duration_response_processing":5,"user_id":"u-1024"}`), jsonOutput)
 }

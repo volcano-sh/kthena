@@ -130,6 +130,10 @@ type Router struct {
 	// includeUpstreamUsage records upstream-reported input and cached-input
 	// token counts in the access log (accessLog.includeUpstreamUsage).
 	includeUpstreamUsage bool
+
+	// claimFields reads accessLog.claimFields from the validated JWT; nil when
+	// no claim field is configured or none could be logged.
+	claimFields *accesslog.ClaimFieldExtractor
 }
 
 // ActiveRequestCount returns the number of requests currently being handled by the router.
@@ -212,14 +216,17 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 	if err != nil {
 		klog.Fatalf("failed to create access logger: %v", err)
 	}
-	if routerConfig.AccessLog.IncludeUpstreamUsage && !accessLogConfig.Enabled {
-		klog.Infof("accessLog.includeUpstreamUsage is set but access logging is disabled; upstream usage is not logged")
+	authenticator := auth.NewJWTAuthenticator(routerConfig)
+	for _, note := range inactiveAccessLogOptions(routerConfig.AccessLog, accessLogConfig.Enabled, authenticator.IsEnabled()) {
+		klog.Info(note)
 	}
+	claimFields := newClaimFieldExtractor(routerConfig.AccessLog, accessLogConfig.Enabled, authenticator.IsEnabled(),
+		metricsInstance.RecordAccessLogClaimMissing)
 
 	return &Router{
 		store:             store,
 		scheduler:         scheduler.NewScheduler(store, routerConfig),
-		authenticator:     auth.NewJWTAuthenticator(routerConfig),
+		authenticator:     authenticator,
 		loadRateLimiter:   loadRateLimiter,
 		accessLogger:      accessLogger,
 		metrics:           metricsInstance,
@@ -234,7 +241,39 @@ func NewRouter(store datastore.Store, routerConfigPath string, transportRegistry
 		sessionStickyStore:  sessionStickyStore,
 
 		includeUpstreamUsage: routerConfig.AccessLog.IncludeUpstreamUsage,
+		claimFields:          claimFields,
 	}
+}
+
+// inactiveAccessLogOptions explains each configured accessLog option that
+// takes no effect: with access logging disabled nothing is logged, and claim
+// fields are read only from a JWT the router validated, so they need JWT
+// authentication.
+func inactiveAccessLogOptions(cfg conf.AccessLogConfig, accessLogEnabled, jwtEnabled bool) []string {
+	var notes []string
+	if cfg.IncludeUpstreamUsage && !accessLogEnabled {
+		notes = append(notes, "accessLog.includeUpstreamUsage is set but access logging is disabled; upstream usage is not logged")
+	}
+	if len(cfg.ClaimFields) > 0 {
+		if !accessLogEnabled {
+			notes = append(notes, "accessLog.claimFields is set but access logging is disabled; claim fields are not logged")
+		}
+		if !jwtEnabled {
+			notes = append(notes, "accessLog.claimFields is set but JWT authentication is disabled (auth.jwksUri is empty); claim fields are not logged")
+		}
+	}
+	return notes
+}
+
+// newClaimFieldExtractor returns the extractor for cfg.ClaimFields, or nil
+// when no claim field is configured or inactiveAccessLogOptions explains why
+// none can be logged; claims are then neither read nor counted as missing.
+func newClaimFieldExtractor(cfg conf.AccessLogConfig, accessLogEnabled, jwtEnabled bool,
+	onMissing func(field string)) *accesslog.ClaimFieldExtractor {
+	if !accessLogEnabled || !jwtEnabled {
+		return nil
+	}
+	return accesslog.NewClaimFieldExtractor(cfg.ClaimFields, onMissing)
 }
 
 // recordUpstreamUsage copies the upstream-reported input and cached-input
@@ -1322,7 +1361,7 @@ func (r *Router) Auth() gin.HandlerFunc {
 }
 
 func (r *Router) AccessLog() gin.HandlerFunc {
-	return accesslog.AccessLogMiddleware(r.accessLogger)
+	return accesslog.AccessLogMiddleware(r.accessLogger, r.claimFields)
 }
 
 // proxyRequest proxies the request to the model server pods, returns response to downstream.

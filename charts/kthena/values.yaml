@@ -84,6 +84,12 @@ networking:
       output: "stdout"
       # -- Record the upstream-reported input and cached-input token counts as `upstream_input_tokens` and `cached_input_tokens`.
       includeUpstreamUsage: false
+      # -- Map access-log field names to top-level JWT claim names, for example `user_id: sub`. Logged only for requests with a validated JWT.
+      claimFields: {}
+      # Example mappings for common issuers; check the claims your tokens carry:
+      #   Keycloak:           user_id: sub, client_id: azp, tenant: <custom realm claim>
+      #   Microsoft Entra ID: user_id: oid, tenant: tid
+      #   Auth0:              user_id: sub, tenant: https://example.com/tenant
     tls:
       # -- Enable TLS for Kthena Router server.
       enabled: false

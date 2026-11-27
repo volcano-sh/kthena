@@ -141,7 +141,30 @@ func (l *accessLoggerImpl) formatJSON(entry *AccessLogEntry) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(data), nil
+	if len(entry.ClaimFields) == 0 {
+		return string(data), nil
+	}
+
+	// Append the claim fields inside the closing brace. Their names are
+	// validated not to collide with the fields marshaled above.
+	var line strings.Builder
+	line.Write(data[:len(data)-1])
+	for _, field := range entry.ClaimFields {
+		name, err := json.Marshal(field.Name)
+		if err != nil {
+			return "", err
+		}
+		value, err := json.Marshal(field.Value)
+		if err != nil {
+			return "", err
+		}
+		line.WriteByte(',')
+		line.Write(name)
+		line.WriteByte(':')
+		line.Write(value)
+	}
+	line.WriteByte('}')
+	return line.String(), nil
 }
 
 // writeTextField appends " key=value" to line, skipping empty values. A value
@@ -214,6 +237,12 @@ func (l *accessLoggerImpl) formatText(entry *AccessLogEntry) (string, error) {
 	}
 	if entry.CachedInputTokens != nil {
 		fmt.Fprintf(&line, " cached_input_tokens=%d", *entry.CachedInputTokens)
+	}
+
+	// Claim values come from the client's token, so they go through
+	// writeTextField like every other string value.
+	for _, field := range entry.ClaimFields {
+		writeTextField(&line, field.Name, field.Value)
 	}
 
 	// Add complete timing breakdown with total and breakdown

@@ -114,6 +114,27 @@ kthenaRouter:
     # in the upstream usage as upstream_input_tokens and cached_input_tokens.
     # Rendered into the router ConfigMap as accessLog.includeUpstreamUsage.
     includeUpstreamUsage: false
+    # claimFields maps access log field names to top-level JWT claim names. Each
+    # request with a JWT validated by the router's auth section logs the mapped
+    # claims under these names; it has no effect while JWT authentication or
+    # access logging is disabled. Field names must match ^[a-z][a-z0-9_]*$ and
+    # cannot reuse a built-in field; at most 8 fields are allowed.
+    # Rendered into the router ConfigMap as accessLog.claimFields.
+    # Example mappings for common issuers; check the claims your tokens carry:
+    #   Keycloak:
+    #     claimFields:
+    #       user_id: sub
+    #       client_id: azp
+    #       tenant: <custom realm claim, added with a protocol mapper>
+    #   Microsoft Entra ID:
+    #     claimFields:
+    #       user_id: oid
+    #       tenant: tid
+    #   Auth0 (namespaced custom claims are top-level claim names):
+    #     claimFields:
+    #       user_id: sub
+    #       tenant: https://example.com/tenant
+    claimFields: {}
   # gatewayAPI configuration
   gatewayAPI:
     # enabled controls whether Gateway API related features are enabled

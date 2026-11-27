@@ -18,6 +18,7 @@ A Helm chart for deploying Kthena
 | global.certManagementMode | string | `"auto"` | Certificate Management Mode.<br/>  Three mutually exclusive options for managing TLS certificates:<br/>  - `auto`: Webhook servers generate self-signed certificates automatically.<br/>  - `cert-manager`: Use cert-manager to generate and manage certificates (requires cert-manager installation).<br/>  - `manual`: Provide your own certificates via caBundle. |
 | global.webhook.caBundle | string | `""` | CA bundle for webhook server certificates (base64-encoded).<br/> This is ONLY required when `certManagementMode` is set to "manual".<br/> You can generate it with: `cat /path/to/your/ca.crt | base64 | tr -d '\n'`<br/> |
 | networking.enabled | bool | `true` | Enable the networking subchart. |
+| networking.kthenaRouter.accessLog.claimFields | object | `{}` | Map access-log field names to top-level JWT claim names, for example `user_id: sub`. Logged only for requests with a validated JWT. |
 | networking.kthenaRouter.accessLog.enabled | bool | `true` | Enable router access logging. |
 | networking.kthenaRouter.accessLog.format | string | `"text"` | Access-log format. Supported values are `text` and `json`. |
 | networking.kthenaRouter.accessLog.includeUpstreamUsage | bool | `false` | Record the upstream-reported input and cached-input token counts as `upstream_input_tokens` and `cached_input_tokens`. |

@@ -66,6 +66,10 @@ type AccessLogEntry struct {
 	DurationRequestProcessing  int64 `json:"duration_request_processing"`
 	DurationUpstreamProcessing int64 `json:"duration_upstream_processing"`
 	DurationResponseProcessing int64 `json:"duration_response_processing"`
+
+	// ClaimFields are the configured JWT claim fields, in field name order.
+	// JSON writes them after every other field and text just before timings.
+	ClaimFields []ClaimField `json:"-"`
 }
 
 // ErrorInfo contains error details for failed requests
@@ -104,6 +108,9 @@ type AccessLogContext struct {
 	// Upstream-reported token counts; nil when not reported.
 	UpstreamInputTokens *int
 	CachedInputTokens   *int
+
+	// Claim fields read from the validated JWT.
+	ClaimFields []ClaimField
 
 	// Timing checkpoints
 	RequestProcessingStart  time.Time
@@ -279,6 +286,7 @@ func (ctx *AccessLogContext) ToAccessLogEntry(statusCode int) *AccessLogEntry {
 		DurationRequestProcessing:  requestProcessing,
 		DurationUpstreamProcessing: upstreamProcessing,
 		DurationResponseProcessing: responseProcessing,
+		ClaimFields:                ctx.ClaimFields,
 	}
 
 	return entry
