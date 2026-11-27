@@ -4,11 +4,13 @@ on:
   pull_request:
     branches:
       - main
+      - release-*
     paths:
       - 'docs/kthena/**'
   push:
     branches:
       - main
+      - release-*
     paths:
       - 'docs/kthena/**'
 
