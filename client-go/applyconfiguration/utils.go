@@ -120,8 +120,6 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("BootstrapAccelerateStrategy"):
 		return &applyconfigurationworkloadv1alpha1.BootstrapAccelerateStrategyApplyConfiguration{}
-	case workloadv1alpha1.SchemeGroupVersion.WithKind("BootstrapRole"):
-		return &applyconfigurationworkloadv1alpha1.BootstrapRoleApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("DisaggregatedScalingStatus"):
 		return &applyconfigurationworkloadv1alpha1.DisaggregatedScalingStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("DisaggregatedTarget"):

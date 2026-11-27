@@ -35,7 +35,7 @@ type ModelServingSpecApplyConfiguration struct {
 	// Plugins defines optional plugins that customize serving pods or manage
 	// auxiliary resources through controller lifecycle hooks.
 	Plugins []PluginSpecApplyConfiguration `json:"plugins,omitempty"`
-	// BootstrapAccelerateStrategy creates role replicas in source-aware batches
+	// BootstrapAccelerateStrategy creates ServingGroups in source-aware batches
 	// for peer-to-peer model weight loading. If unset, creation is unchanged.
 	BootstrapAccelerateStrategy *BootstrapAccelerateStrategyApplyConfiguration `json:"bootstrapAccelerateStrategy,omitempty"`
 	// Template defines the template for ServingGroup

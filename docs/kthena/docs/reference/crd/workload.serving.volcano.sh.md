@@ -191,7 +191,7 @@ _Appears in:_
 
 
 
-BootstrapAccelerateStrategy configures source-aware creation of role replicas.
+BootstrapAccelerateStrategy configures source-aware creation of ServingGroups.
 
 
 
@@ -201,7 +201,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `provider` _[BootstrapAccelerateStrategyProvider](#bootstrapacceleratestrategyprovider)_ | Provider is the weight transfer system used by the inference engines. | ModelExpress | Enum: [ModelExpress] <br /> |
-| `roles` _[BootstrapRole](#bootstraprole) array_ | Roles limits acceleration to the listed roles and configures each of them.<br />At least one role must be specified. |  | MinItems: 1 <br /> |
+| `initialSeedReplicas` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | InitialSeedReplicas is the number of seed ServingGroups that may be created<br />while any in-scope role pool of the group has no ready source. It is a<br />positive integer or a percentage from 1% to 100% of spec.replicas, rounded<br />up (10% of 3 is 1). A desired count of zero creates nothing. | 1 | XIntOrString: \{\} <br /> |
+| `roles` _string array_ | Roles optionally restricts weight-transfer source tracking and provider<br />environment injection to the named roles in spec.template.roles (for example,<br />excluding a non-engine router or tokenizer role). When empty, all roles in<br />spec.template.roles are in scope. Seed admission is always whole-ServingGroup. |  | items:MinLength: 1 <br /> |
 | `modelExpress` _[ModelExpressConfig](#modelexpressconfig)_ | ModelExpress configures environment injection for inference engines.<br />If unset, users configure the engine environment themselves. |  |  |
 
 
@@ -220,23 +221,6 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `ModelExpress` |  |
-
-
-#### BootstrapRole
-
-
-
-BootstrapRole configures bootstrap acceleration for one role.
-
-
-
-_Appears in:_
-- [BootstrapAccelerateStrategy](#bootstrapacceleratestrategy)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ | Name is the name of a role in spec.template.roles. |  | MinLength: 1 <br /> |
-| `initialSeedReplicas` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | InitialSeedReplicas is the number of this role's replicas that may be<br />created while no ready source exists for it. It is a positive integer or a<br />percentage from 1% to 100% of spec.replicas * role.replicas, rounded up<br />(10% of 3 is 1). The effective budget is at least the role's gang minimum<br />in one ServingGroup. A desired count of zero creates nothing. | 1 | XIntOrString: \{\} <br /> |
 
 
 #### DisaggregatedScalingStatus
@@ -663,7 +647,7 @@ _Appears in:_
 | `replicas` _integer_ | Number of ServingGroups. That is the number of instances that run serving tasks<br />Default to 1. | 1 |  |
 | `schedulerName` _string_ | SchedulerName defines the name of the scheduler used by ModelServing | volcano |  |
 | `plugins` _[PluginSpec](#pluginspec) array_ | Plugins defines optional plugins that customize serving pods or manage<br />auxiliary resources through controller lifecycle hooks. |  |  |
-| `bootstrapAccelerateStrategy` _[BootstrapAccelerateStrategy](#bootstrapacceleratestrategy)_ | BootstrapAccelerateStrategy creates role replicas in source-aware batches<br />for peer-to-peer model weight loading. If unset, creation is unchanged. |  |  |
+| `bootstrapAccelerateStrategy` _[BootstrapAccelerateStrategy](#bootstrapacceleratestrategy)_ | BootstrapAccelerateStrategy creates ServingGroups in source-aware batches<br />for peer-to-peer model weight loading. If unset, creation is unchanged. |  |  |
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
 | `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |

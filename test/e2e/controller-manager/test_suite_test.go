@@ -48,6 +48,7 @@ func TestMain(m *testing.M) {
 	kthenaNamespace = config.Namespace
 	// Controller manager tests need workload enabled
 	config.WorkloadEnabled = true
+	config.ModelExpressServerAddress = bootstrapE2EServerAddress
 
 	if err := framework.InstallKthena(config); err != nil {
 		fmt.Printf("Failed to install kthena: %v\n", err)
