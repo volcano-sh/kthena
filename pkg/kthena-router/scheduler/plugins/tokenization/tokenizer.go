@@ -41,7 +41,7 @@ func newRemoteTokenizer(config RemoteTokenizerConfig, client *httpClient, ownsCl
 	switch engine {
 	case EngineSGLang:
 		adapter = newSGLangAdapter(config.Model)
-	case EngineVLLM:
+	case EngineVLLM, EngineTriton:
 		adapter = newVLLMAdapter(config.Model)
 	}
 

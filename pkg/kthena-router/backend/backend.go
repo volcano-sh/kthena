@@ -24,6 +24,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/sglang"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/triton"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/backend/vllm"
 )
 
@@ -37,6 +38,7 @@ type MetricsProvider interface {
 var engineRegistry = map[string]MetricsProvider{
 	"SGLang": sglang.NewSglangEngine(),
 	"vLLM":   vllm.NewVllmEngine(),
+	"Triton": triton.NewTritonEngine(),
 }
 
 func GetPodMetrics(engine string, pod *corev1.Pod, port uint32, previousHistogram map[string]*dto.Histogram) (map[string]float64, map[string]*dto.Histogram) {
