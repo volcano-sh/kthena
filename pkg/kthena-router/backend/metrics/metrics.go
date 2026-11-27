@@ -20,7 +20,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
@@ -91,4 +93,47 @@ func LastPeriodAvg(previous, current *dto.Histogram) float64 {
 	}
 
 	return deltaSum / float64(deltaCount)
+}
+
+// MergeHistograms adds up the sample counts and sums across every series,
+// so a pod that exports one series per engine is counted whole.
+func MergeHistograms(series []*dto.Metric) *dto.Histogram {
+	var count uint64
+	var sum float64
+	for _, metric := range series {
+		count += metric.GetHistogram().GetSampleCount()
+		sum += metric.GetHistogram().GetSampleSum()
+	}
+	return &dto.Histogram{SampleCount: &count, SampleSum: &sum}
+}
+
+// SeriesKey names one series of a histogram by its labels.
+func SeriesKey(name string, metric *dto.Metric) string {
+	pairs := make([]string, 0, len(metric.GetLabel()))
+	for _, label := range metric.GetLabel() {
+		pairs = append(pairs, label.GetName()+"="+strconv.Quote(label.GetValue()))
+	}
+	slices.Sort(pairs)
+	return name + "{" + strings.Join(pairs, ",") + "}"
+}
+
+// SeriesPeriodAvg averages the samples each series gained since the previous scrape.
+func SeriesPeriodAvg(name string, series []*dto.Metric, previous map[string]*dto.Histogram) float64 {
+	var sum float64
+	var count uint64
+	for _, metric := range series {
+		current := metric.GetHistogram()
+		seriesSum, seriesCount := current.GetSampleSum(), current.GetSampleCount()
+		// A series without a previous value, or with smaller totals, started or restarted since the last scrape.
+		if prev := previous[SeriesKey(name, metric)]; prev != nil && seriesCount >= prev.GetSampleCount() && seriesSum >= prev.GetSampleSum() {
+			seriesSum -= prev.GetSampleSum()
+			seriesCount -= prev.GetSampleCount()
+		}
+		sum += seriesSum
+		count += seriesCount
+	}
+	if count == 0 {
+		return 0
+	}
+	return sum / float64(count)
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package sglang
 
 import (
+	"strconv"
 	"testing"
 
 	dto "github.com/prometheus/client_model/go"
@@ -42,6 +43,20 @@ func histogramMetricFamily(sum float64, count uint64) *dto.MetricFamily {
 			{Histogram: &dto.Histogram{SampleSum: &sum, SampleCount: &count}},
 		},
 	}
+}
+
+// multiSeries joins families into one, labelling each series with a data
+// parallel rank, which is what a pod started with --dp-size exposes.
+func multiSeries(families ...*dto.MetricFamily) *dto.MetricFamily {
+	joined := &dto.MetricFamily{}
+	for i, family := range families {
+		for _, metric := range family.Metric {
+			name, value := "dp_rank", strconv.Itoa(i)
+			metric.Label = append(metric.Label, &dto.LabelPair{Name: &name, Value: &value})
+			joined.Metric = append(joined.Metric, metric)
+		}
+	}
+	return joined
 }
 
 // makePreviousHistogram builds a *dto.Histogram for use as prior scrape data.
@@ -149,7 +164,7 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 				utils.TPOT: 0.0,
 				utils.TTFT: 0.0,
 			},
-			wantHistogramKeys: []string{utils.TPOT, utils.TTFT},
+			wantHistogramKeys: []string{utils.TPOT, utils.TPOT + "{}", utils.TTFT, utils.TTFT + "{}"},
 		},
 		{
 			name: "with previous histogram computes correct delta average",
@@ -158,12 +173,13 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 				TPOT: histogramMetricFamily(20.0, 10),
 			},
 			previousHistogram: map[string]*dto.Histogram{
-				utils.TPOT: makePreviousHistogram(10.0, 5),
+				utils.TPOT:        makePreviousHistogram(10.0, 5),
+				utils.TPOT + "{}": makePreviousHistogram(10.0, 5),
 			},
 			wantMetrics: map[string]float64{
 				utils.TPOT: 2.0,
 			},
-			wantHistogramKeys: []string{utils.TPOT},
+			wantHistogramKeys: []string{utils.TPOT, utils.TPOT + "{}"},
 		},
 		{
 			name: "zero delta count returns zero to avoid division by zero",
@@ -172,12 +188,13 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 				TTFT: histogramMetricFamily(15.0, 5),
 			},
 			previousHistogram: map[string]*dto.Histogram{
-				utils.TTFT: makePreviousHistogram(10.0, 5),
+				utils.TTFT:        makePreviousHistogram(10.0, 5),
+				utils.TTFT + "{}": makePreviousHistogram(10.0, 5),
 			},
 			wantMetrics: map[string]float64{
 				utils.TTFT: 0.0,
 			},
-			wantHistogramKeys: []string{utils.TTFT},
+			wantHistogramKeys: []string{utils.TTFT, utils.TTFT + "{}"},
 		},
 		{
 			name:              "empty input returns empty maps",
@@ -193,12 +210,13 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 				TPOT: histogramMetricFamily(6.0, 3),
 			},
 			previousHistogram: map[string]*dto.Histogram{
-				utils.TPOT: makePreviousHistogram(100.0, 50),
+				utils.TPOT:        makePreviousHistogram(100.0, 50),
+				utils.TPOT + "{}": makePreviousHistogram(100.0, 50),
 			},
 			wantMetrics: map[string]float64{
 				utils.TPOT: 2.0,
 			},
-			wantHistogramKeys: []string{utils.TPOT},
+			wantHistogramKeys: []string{utils.TPOT, utils.TPOT + "{}"},
 		},
 		{
 			name: "unknown metrics are ignored",
@@ -218,7 +236,7 @@ func TestGetHistogramPodMetrics(t *testing.T) {
 			wantMetrics: map[string]float64{
 				utils.TTFT: 0.0,
 			},
-			wantHistogramKeys: []string{utils.TTFT},
+			wantHistogramKeys: []string{utils.TTFT, utils.TTFT + "{}"},
 		},
 	}
 
@@ -256,4 +274,48 @@ func TestGetHistogramPodMetrics_StoredHistogramContent(t *testing.T) {
 	require.NotNil(t, stored)
 	assert.InDelta(t, 30.0, stored.GetSampleSum(), 1e-9)
 	assert.Equal(t, uint64(15), stored.GetSampleCount())
+}
+func TestGetCountMetricsInfo_EveryRank(t *testing.T) {
+	engine := NewSglangEngine()
+
+	got := engine.GetCountMetricsInfo(map[string]*dto.MetricFamily{
+		RequestRunningNum: multiSeries(gaugeMetricFamily(3), gaugeMetricFamily(13)),
+		KVCacheUsage:      multiSeries(gaugeMetricFamily(0.1), gaugeMetricFamily(0.9)),
+	})
+
+	// Running requests add up across ranks; cache usage is a fraction, so it averages.
+	assert.InDelta(t, 16.0, got[utils.RequestRunningNum], 1e-9)
+	assert.InDelta(t, 0.5, got[utils.KVCacheUsage], 1e-9)
+}
+
+func TestGetHistogramPodMetrics_TwoScrapes(t *testing.T) {
+	engine := NewSglangEngine()
+
+	_, stored := engine.GetHistogramPodMetrics(map[string]*dto.MetricFamily{
+		TPOT: multiSeries(histogramMetricFamily(10.0, 5), histogramMetricFamily(30.0, 5)),
+	}, map[string]*dto.Histogram{})
+	require.NotNil(t, stored[utils.TPOT])
+	assert.InDelta(t, 40.0, stored[utils.TPOT].GetSampleSum(), 1e-9)
+	assert.Equal(t, uint64(10), stored[utils.TPOT].GetSampleCount())
+
+	got, _ := engine.GetHistogramPodMetrics(map[string]*dto.MetricFamily{
+		TPOT: multiSeries(histogramMetricFamily(14.0, 7), histogramMetricFamily(42.0, 8)),
+	}, stored)
+	// (56 - 40) / (15 - 10)
+	assert.InDelta(t, 3.2, got[utils.TPOT], 1e-9)
+}
+
+func TestGetHistogramPodMetrics_OneRankResets(t *testing.T) {
+	engine := NewSglangEngine()
+
+	_, stored := engine.GetHistogramPodMetrics(map[string]*dto.MetricFamily{
+		TPOT: multiSeries(histogramMetricFamily(100.0, 100), histogramMetricFamily(100.0, 100)),
+	}, map[string]*dto.Histogram{})
+
+	got, _ := engine.GetHistogramPodMetrics(map[string]*dto.MetricFamily{
+		TPOT: multiSeries(histogramMetricFamily(10.0, 10), histogramMetricFamily(300.0, 150)),
+	}, stored)
+	// rank 0 restarted and counts whole: 10 over 10 samples. rank 1 gained 200
+	// over 50. Reading rank 1 alone would answer 4.
+	assert.InDelta(t, 3.5, got[utils.TPOT], 1e-9)
 }
