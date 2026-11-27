@@ -1,0 +1,52 @@
+name: "tier2-p1.1-engine-mix"
+description: "P1.1: mixed engine types (sglang + vllm)"
+
+load:
+  schedule:
+    mode: "rate"
+    rate: 5
+  traffic:
+    burstiness: 1.0
+    ramp:
+      strategy: "none"
+  prompts:
+    - tokens: 512
+      weight: 10
+  max_tokens:
+    - tokens: 128
+      weight: 10
+  duration: "60s"
+
+backends:
+  common:
+    model: "Qwen/Qwen3-0.6B"
+  profiles:
+    - name: "sglang-pool"
+      count: 4
+      engineType: "sglang"
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+    - name: "vllm-pool"
+      count: 4
+      engineType: "vllm"
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "256Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+
+metrics:
+  prometheus: true
+  pprof: false
+
+aiperf:
+  extraArgs:
+    - "--tokenizer"
+    - "Qwen/Qwen3-0.6B"
