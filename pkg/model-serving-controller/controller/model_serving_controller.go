@@ -419,8 +419,8 @@ func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 		c.handleInPlaceUpdatingPod(ms, servingGroupName, newPod)
 	case utils.IsPodRunningAndReady(newPod):
 		klog.V(4).Infof("handleReadyPod: %s/%s", newPod.Namespace, newPod.Name)
-		if inPlaceState.InProgress() || shouldEnqueueOnPodReadinessChange(oldPod, newPod) {
-			// Every patched container restarted or Pod readiness transitioned: reconcile.
+		if inPlaceState.InProgress() {
+			// Every patched container restarted: let the rollout finish the update.
 			defer c.enqueueModelServing(ms)
 		}
 		// The pod is available, that is, the state is running, and the container is ready
@@ -435,30 +435,12 @@ func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 			klog.Errorf("handle error pod %s/%s failed for ModelServing %s/%s: %v", newPod.Namespace, newPod.Name, ms.Namespace, ms.Name, err)
 		}
 	default:
-		if roleCoordination(ms) != nil || shouldEnqueueOnPodReadinessChange(oldPod, newPod) {
+		if roleCoordination(ms) != nil {
 			c.enqueueModelServing(ms)
 		}
 		klog.V(4).Infof("handleDefault: %s/%s", newPod.Namespace, newPod.Name)
 		c.addServingGroupAndRoleFromPod(ms, servingGroupName, newPod)
 	}
-}
-
-func shouldEnqueueOnPodReadinessChange(oldPod, newPod *corev1.Pod) bool {
-	if newPod == nil {
-		return false
-	}
-	newReady := utils.IsPodRunningAndReady(newPod)
-	newContainersReady := utils.IsPodContainersReady(newPod)
-	if oldPod == nil {
-		if newReady {
-			return true
-		}
-		return len(newPod.Spec.ReadinessGates) > 0 && newPod.Status.Phase == corev1.PodRunning && newContainersReady
-	}
-	if utils.IsPodRunningAndReady(oldPod) != newReady {
-		return true
-	}
-	return utils.IsPodContainersReady(oldPod) != newContainersReady
 }
 
 func (c *ModelServingController) addServingGroupAndRoleFromPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) {
