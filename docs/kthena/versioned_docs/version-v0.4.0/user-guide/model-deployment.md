@@ -294,7 +294,9 @@ spec:
                   - name: VLLM_SERVER_DEV_MODE
                     value: "1"
                   - name: VLLM_NIXL_SIDE_CHANNEL_HOST
-                    value: "0.0.0.0"
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: status.podIP
                   - name: VLLM_NIXL_SIDE_CHANNEL_PORT
                     value: "5558"
                   - name: VLLM_WORKER_MULTIPROC_METHOD
@@ -383,7 +385,9 @@ spec:
                   - name: VLLM_SERVER_DEV_MODE
                     value: "1"
                   - name: VLLM_NIXL_SIDE_CHANNEL_HOST
-                    value: "0.0.0.0"
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: status.podIP
                   - name: VLLM_NIXL_SIDE_CHANNEL_PORT
                     value: "5558"
                   - name: VLLM_WORKER_MULTIPROC_METHOD
