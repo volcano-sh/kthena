@@ -17,6 +17,7 @@ limitations under the License.
 package vllm
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -75,7 +76,7 @@ func TestFetchPodModels(t *testing.T) {
 			port, err := strconv.ParseUint(u.Port(), 10, 32)
 			require.NoError(t, err)
 
-			models, err := FetchPodModels(u.Hostname(), uint32(port))
+			models, err := FetchPodModels(u.Hostname(), uint32(port), "")
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				assert.Nil(t, models)
@@ -97,7 +98,52 @@ func TestFetchPodModelsUnreachable(t *testing.T) {
 
 	server.Close()
 
-	models, err := FetchPodModels(u.Hostname(), uint32(port))
+	models, err := FetchPodModels(u.Hostname(), uint32(port), "")
 	require.Error(t, err)
 	assert.Nil(t, models)
+}
+
+// Mimics vLLM started with --api-key.
+func apiKeyProtectedBackend(t *testing.T, apiKey string) (string, uint32) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+apiKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"qwen"}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	host, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	require.NoError(t, err)
+	parsed, err := strconv.ParseUint(port, 10, 32)
+	require.NoError(t, err)
+	return host, uint32(parsed)
+}
+
+func TestFetchPodModelsWithAPIKey(t *testing.T) {
+	host, port := apiKeyProtectedBackend(t, "s3cret")
+
+	models, err := FetchPodModels(host, port, "s3cret")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"qwen"}, models)
+}
+
+func TestFetchPodModelsWithoutAPIKeyIsUnauthorized(t *testing.T) {
+	host, port := apiKeyProtectedBackend(t, "s3cret")
+
+	_, err := FetchPodModels(host, port, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP 401")
+}
+
+func TestFetchPodModelsReportsUnauthorizedDistinctly(t *testing.T) {
+	host, port := apiKeyProtectedBackend(t, "s3cret")
+
+	_, err := FetchPodModels(host, port, "wrong-key")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUnauthorized, "a rejected key must be distinguishable from any other failure")
 }
