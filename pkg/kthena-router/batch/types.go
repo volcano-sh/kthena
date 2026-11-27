@@ -78,6 +78,33 @@ const (
 	StatusCancelled  Status = "cancelled"
 )
 
+// terminal reports whether nothing more happens to a batch in this status.
+func (s Status) terminal() bool {
+	return s == StatusCompleted || s == StatusFailed || s == StatusExpired || s == StatusCancelled
+}
+
+// stampField is the batch object field that records when the batch entered this status.
+func (s Status) stampField() string {
+	switch s {
+	case StatusInProgress, StatusFinalizing, StatusCompleted:
+		return string(s) + "_at"
+	}
+	return ""
+}
+
+// ErrNotOwner means another run owns the batch now, so this run must not change it.
+var ErrNotOwner = errors.New("batch: this run no longer owns the batch")
+
+// ErrStatusChanged means the batch is not in the status this run expected.
+var ErrStatusChanged = errors.New("batch: the batch status changed")
+
+// Lease is one run's claim on a batch; every claim gets a new random fence.
+type Lease struct {
+	JobID  string
+	Holder string
+	Fence  string
+}
+
 // Origin is how the create request reached the router; every line of the batch is sent the same way.
 type Origin struct {
 	Host     string `json:"host,omitempty"`

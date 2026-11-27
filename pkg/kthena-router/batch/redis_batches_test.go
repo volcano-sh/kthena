@@ -175,3 +175,175 @@ func TestCreateJobNeedsAnID(t *testing.T) {
 	assert.Error(t, store.CreateJob(context.Background(), nil))
 	assert.Error(t, store.CreateJob(context.Background(), &Job{Tenant: "alice", InputFileID: "file-1"}))
 }
+
+// queueJob creates a batch of tenant alice created at createdAt and returns its ID.
+func queueJob(t *testing.T, store *RedisStore, id string, createdAt int64) string {
+	t.Helper()
+	job := newJob(id, "alice", addInput(t, store, "alice"))
+	job.CreatedAt = createdAt
+	require.NoError(t, store.CreateJob(context.Background(), job))
+	return id
+}
+
+func TestClaimTakesTheOldestQueuedBatch(t *testing.T) {
+	mini, store := newTestStore(t)
+	ctx := context.Background()
+	queueJob(t, store, "batch_new", 2000)
+	queueJob(t, store, "batch_old", 1000)
+	mini.SetTime(time.Unix(3000, 0))
+
+	lease, err := store.Claim(ctx, "pod-a")
+	require.NoError(t, err)
+	require.NotNil(t, lease)
+	assert.Equal(t, "batch_old", lease.JobID)
+	assert.Equal(t, "pod-a", lease.Holder)
+	assert.Regexp(t, `^[0-9a-f]{32}$`, lease.Fence, "the fence is random, so it is never handed out twice")
+
+	job, err := store.GetJob(ctx, "batch_old")
+	require.NoError(t, err)
+	assert.Equal(t, StatusInProgress, job.Status)
+	assert.Equal(t, int64(3000), job.InProgressAt, "the start time comes from Redis")
+	assert.Equal(t, "pod-a", job.Holder)
+	assert.Equal(t, lease.Fence, job.Fence)
+	members, err := mini.ZMembers(store.queueKey())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"batch_new"}, members)
+}
+
+func TestClaimWithNothingQueued(t *testing.T) {
+	_, store := newTestStore(t)
+	lease, err := store.Claim(context.Background(), "pod-a")
+	require.NoError(t, err)
+	assert.Nil(t, lease)
+}
+
+func TestTwoClaimsNeverTakeTheSameBatch(t *testing.T) {
+	_, store := newTestStore(t)
+	ctx := context.Background()
+	queueJob(t, store, "batch_1", 1000)
+	first, err := store.Claim(ctx, "pod-a")
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	second, err := store.Claim(ctx, "pod-b")
+	require.NoError(t, err)
+	assert.Nil(t, second, "one batch has one owner")
+}
+
+func TestClaimSkipsBatchesThatCannotRun(t *testing.T) {
+	mini, store := newTestStore(t)
+	ctx := context.Background()
+	queueJob(t, store, "batch_done", 1000)
+	mini.HSet(store.jobKey("batch_done"), "status", string(StatusCompleted))
+	_, err := mini.ZAdd(store.queueKey(), 1500, "batch_gone")
+	require.NoError(t, err)
+	queueJob(t, store, "batch_next", 2000)
+
+	lease, err := store.Claim(ctx, "pod-a")
+	require.NoError(t, err)
+	require.NotNil(t, lease)
+	assert.Equal(t, "batch_next", lease.JobID)
+	assert.False(t, mini.Exists(store.queueKey()), "the entries that cannot run are taken out of the queue")
+}
+
+func TestARetriedClaimReturnsTheSameBatch(t *testing.T) {
+	mini, store := newTestStore(t)
+	ctx := context.Background()
+	queueJob(t, store, "batch_1", 1000)
+	queueJob(t, store, "batch_2", 2000)
+	claim := func() any {
+		res, err := claimJobScript.Run(ctx, store.client, []string{store.queueKey(), store.claimedKey("f00d")}, store.prefix, "pod-a", "f00d", claimScan).Result()
+		require.NoError(t, err)
+		return res
+	}
+	// A reply lost on the way back makes go-redis run the same script again with the same fence.
+	assert.Equal(t, "batch_1", claim())
+	assert.Equal(t, "batch_1", claim())
+	members, err := mini.ZMembers(store.queueKey())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"batch_2"}, members, "the retry did not take a second batch")
+}
+
+func TestProgressIsWrittenOnlyByTheOwner(t *testing.T) {
+	_, store := newTestStore(t)
+	ctx := context.Background()
+	queueJob(t, store, "batch_1", 1000)
+	lease, err := store.Claim(ctx, "pod-a")
+	require.NoError(t, err)
+
+	require.NoError(t, store.Progress(ctx, lease, 10, 4, 1))
+	require.NoError(t, store.Progress(ctx, lease, 10, 4, 1), "a retry writes the same counts")
+	stale := &Lease{JobID: "batch_1", Holder: "pod-b", Fence: "0123"}
+	assert.ErrorIs(t, store.Progress(ctx, stale, 10, 9, 0), ErrNotOwner)
+
+	job, err := store.GetJob(ctx, "batch_1")
+	require.NoError(t, err)
+	assert.Equal(t, []int64{10, 4, 1}, []int64{job.Total, job.Completed, job.Failed})
+}
+
+func TestTransitionMovesOnlyTheOwnersBatchOnward(t *testing.T) {
+	mini, store := newTestStore(t)
+	ctx := context.Background()
+	queueJob(t, store, "batch_1", 1000)
+	lease, err := store.Claim(ctx, "pod-a")
+	require.NoError(t, err)
+	job, err := store.GetJob(ctx, "batch_1")
+	require.NoError(t, err)
+	mini.SetTime(time.Unix(5000, 0))
+
+	stale := &Lease{JobID: "batch_1", Holder: "pod-b", Fence: "0123"}
+	assert.ErrorIs(t, store.Transition(ctx, stale, StatusInProgress, StatusFinalizing, nil), ErrNotOwner)
+	assert.ErrorIs(t, store.Transition(ctx, lease, StatusValidating, StatusFinalizing, nil), ErrStatusChanged)
+	require.NoError(t, store.Transition(ctx, lease, StatusInProgress, StatusFinalizing, nil))
+	require.NoError(t, store.Transition(ctx, lease, StatusInProgress, StatusFinalizing, nil), "a retry finds the step done")
+
+	holders, err := mini.Members(store.fileRefsKey(job.InputFileID))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"batch_1"}, holders, "the input is held until the batch ends")
+	require.NoError(t, store.Transition(ctx, lease, StatusFinalizing, StatusCompleted, map[string]string{"output_file_id": "file-out", "completed": "3"}))
+
+	got, err := store.GetJob(ctx, "batch_1")
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, got.Status)
+	assert.Equal(t, int64(5000), got.FinalizingAt)
+	assert.Equal(t, int64(5000), got.CompletedAt)
+	assert.Equal(t, "file-out", got.OutputFileID)
+	assert.Equal(t, int64(3), got.Completed)
+	assert.False(t, mini.Exists(store.fileRefsKey(job.InputFileID)), "a finished batch lets go of its input")
+}
+
+func TestReleaseHandsTheBatchBackAtItsPlace(t *testing.T) {
+	mini, store := newTestStore(t)
+	ctx := context.Background()
+	queueJob(t, store, "batch_1", 1000)
+	lease, err := store.Claim(ctx, "pod-a")
+	require.NoError(t, err)
+
+	require.NoError(t, store.Release(ctx, lease))
+	require.NoError(t, store.Release(ctx, lease), "a retry finds the batch queued")
+	score, err := mini.ZScore(store.queueKey(), "batch_1")
+	require.NoError(t, err)
+	assert.Equal(t, float64(1000), score, "a released batch keeps its place in the queue")
+	job, err := store.GetJob(ctx, "batch_1")
+	require.NoError(t, err)
+	assert.Empty(t, job.Holder)
+	assert.Empty(t, job.Fence)
+	assert.ErrorIs(t, store.Progress(ctx, lease, 1, 1, 0), ErrNotOwner, "the old run can no longer write")
+
+	next, err := store.Claim(ctx, "pod-b")
+	require.NoError(t, err)
+	require.NotNil(t, next)
+	assert.Equal(t, "batch_1", next.JobID)
+	assert.ErrorIs(t, store.Release(ctx, lease), ErrNotOwner, "the old run cannot hand back a batch it lost")
+}
+
+func TestReleaseLeavesAFinishingBatchAlone(t *testing.T) {
+	mini, store := newTestStore(t)
+	ctx := context.Background()
+	queueJob(t, store, "batch_1", 1000)
+	lease, err := store.Claim(ctx, "pod-a")
+	require.NoError(t, err)
+	require.NoError(t, store.Transition(ctx, lease, StatusInProgress, StatusFinalizing, nil))
+
+	assert.ErrorIs(t, store.Release(ctx, lease), ErrStatusChanged)
+	assert.False(t, mini.Exists(store.queueKey()), "a batch past its lines is not run again")
+}

@@ -34,6 +34,14 @@ type Store interface {
 	CreateJob(ctx context.Context, job *Job) error
 	// GetJob returns one batch record, or ErrNotFound.
 	GetJob(ctx context.Context, id string) (*Job, error)
+	// Claim takes the oldest queued batch for holder, or returns nil when none is waiting; a retry returns the same batch.
+	Claim(ctx context.Context, holder string) (*Lease, error)
+	// Progress records the counts of a run, or returns ErrNotOwner.
+	Progress(ctx context.Context, lease *Lease, total, completed, failed int64) error
+	// Transition moves the batch from one status to the next and sets fields; a final status lets go of the input file.
+	Transition(ctx context.Context, lease *Lease, from, to Status, fields map[string]string) error
+	// Release hands a running batch back to the queue at its original place.
+	Release(ctx context.Context, lease *Lease) error
 }
 
 // FileQuery selects one page of a tenant's files.
