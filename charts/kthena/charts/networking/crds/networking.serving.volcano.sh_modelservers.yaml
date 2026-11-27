@@ -282,6 +282,7 @@ spec:
                     description: |-
                       The base labels to match the model serving instances.
                       All serving instances must match these labels.
+                    minProperties: 1
                     type: object
                   pdGroup:
                     description: |-
@@ -310,6 +311,8 @@ spec:
                     - groupKey
                     - prefillLabels
                     type: object
+                required:
+                - matchLabels
                 type: object
             required:
             - inferenceEngine
