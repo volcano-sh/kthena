@@ -19,7 +19,6 @@ package datastore
 import (
 	"context"
 	"fmt"
-	"maps"
 	"math"
 	"math/rand"
 	"net/http"
@@ -256,6 +255,13 @@ type Store interface {
 	// GetPodInfo returns the pod info for a given pod name (for testing)
 	GetPodInfo(podName types.NamespacedName) *PodInfo
 
+	// PodScrapeFailures returns the number of consecutive metrics scrape
+	// failures for the named pod. Returns 0 when the pod is not in the store
+	// or when no failures have occurred. Scheduler plugins can use this count
+	// together with their own threshold to skip or down-weight pods whose
+	// metric-based scores may be outdated.
+	PodScrapeFailures(podName types.NamespacedName) int32
+
 	// SyncOnFlightCounts fetches the current on-flight counts for all tracked
 	// pods from Redis in a single round-trip and updates their local counters.
 	// Call this immediately before scheduling so scores reflect cross-router
@@ -344,14 +350,23 @@ type PodInfo struct {
 	TimePerOutputToken *dto.Histogram
 	TPOT               float64
 	TTFT               float64
-	// histogramSeries keeps the per-series histograms of the last query, keyed by the engine's series key.
-	histogramSeries map[string]*dto.Histogram
 
 	// onFlightRequestNum tracks requests actively in-flight from the router to this pod.
 	// Updated atomically with zero delay — not subject to the ~1 s engine-metrics poll lag.
 	// When a Redis-backed OnFlightCounter is configured on the store this field is also
 	// kept in sync with the global Redis counter so it reflects cross-router traffic.
 	onFlightRequestNum atomic.Int64
+
+	// consecutiveScrapeFailures counts how many consecutive times metrics
+	// scraping returned no data (pod has an IP but the endpoint is
+	// unreachable or returned nothing). Reset to zero on the next successful
+	// scrape. Used by IsPodMetricsStale to flag pods whose scheduling scores
+	// are based on stale data, and optionally to trigger automatic eviction.
+	consecutiveScrapeFailures atomic.Int32
+	// lastSuccessfulScrapeNs is the Unix nanosecond timestamp of the last
+	// successful metrics scrape. Zero means a successful scrape has not
+	// occurred since the pod was added to the store.
+	lastSuccessfulScrapeNs atomic.Int64
 
 	mutex sync.RWMutex // Protects concurrent access to Pod, engine, metrics, models and modelServer fields
 	// Protected fields - use accessor methods for thread-safe access
@@ -407,7 +422,13 @@ type store struct {
 	// at most one Redis HMGET per onFlightSyncInterval.
 	lastOnFlightSync atomic.Int64
 
-	routeMutex sync.RWMutex
+	// podScrapeFailureThreshold is the number of consecutive metrics scrape
+	// failures (pod has an IP but endpoint returned nothing) after which the
+	// pod is considered to have stale metrics. Configured via
+	// POD_SCRAPE_FAILURE_THRESHOLD (default 5). Set to 0 to disable staleness
+	// detection.
+	podScrapeFailureThreshold int32
+	routeMutex                sync.RWMutex
 	// Model routing fields
 	routeInfo          map[string]*modelRouteInfo
 	routes             map[string][]*aiv1alpha1.ModelRoute // key: model name, value: list of ModelRoutes
@@ -458,10 +479,11 @@ func New(opts ...Option) Store {
 		initialSynced:       &atomic.Bool{},
 		requestWaitingQueue: sync.Map{},
 		// Create token tracker with environment-based configuration
-		tokenTracker:          createTokenTracker(),
-		podRuntimeInspector:   realPodRuntimeInspector{},
-		fairnessQueueConfig:   createFairnessQueueConfig(),
-		metricsScrapeInterval: parseMetricsScrapeInterval(),
+		tokenTracker:              createTokenTracker(),
+		podRuntimeInspector:       realPodRuntimeInspector{},
+		fairnessQueueConfig:       createFairnessQueueConfig(),
+		metricsScrapeInterval:     parseMetricsScrapeInterval(),
+		podScrapeFailureThreshold: parsePodScrapeFailureThreshold(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -615,6 +637,23 @@ func parseMetricsScrapeInterval() time.Duration {
 	return defaultMetricsScrapeInterval
 }
 
+// parsePodScrapeFailureThreshold reads POD_SCRAPE_FAILURE_THRESHOLD from the
+// environment. The default of 5 means a pod is flagged as having stale metrics
+// after five consecutive scrape failures. Set to 0 to disable detection.
+func parsePodScrapeFailureThreshold() int32 {
+	const defaultThreshold int32 = 5
+	v := os.Getenv("POD_SCRAPE_FAILURE_THRESHOLD")
+	if v == "" {
+		return defaultThreshold
+	}
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil || n < 0 {
+		klog.Warningf("Invalid POD_SCRAPE_FAILURE_THRESHOLD: %q, using default %d", v, defaultThreshold)
+		return defaultThreshold
+	}
+	return int32(n)
+}
+
 func (s *store) Run(ctx context.Context) {
 	s.rootCtx = ctx
 	go func() {
@@ -634,12 +673,8 @@ func (s *store) Run(ctx context.Context) {
 					go func(pod *PodInfo) {
 						defer wg.Done()
 						defer func() { <-sem }()
-						if s.updatePodMetrics(pod) {
-							s.recheckSessionBoostQueues()
-						}
-						if s.updatePodModels(pod) {
-							s.recheckSessionBoostQueues()
-						}
+						s.updatePodMetrics(pod)
+						s.updatePodModels(pod)
 					}(p)
 				}
 				return true
@@ -830,22 +865,6 @@ func (s *store) GetSessionIDHeader() string {
 	return s.fairnessQueueConfig.SessionIDHeader
 }
 
-// recheckSessionBoostQueues asks every session-boost queue that still holds
-// requests to re-evaluate admission against the metrics just scraped. All queues
-// are visited because queues are keyed by the requested model name, which need
-// not match the model name the backend pods serve.
-func (s *store) recheckSessionBoostQueues() {
-	if !s.fairnessQueueConfig.SessionBoostEnabled {
-		return
-	}
-	s.requestWaitingQueue.Range(func(_, value any) bool {
-		if queue, ok := value.(*RequestPriorityQueue); ok && queue != nil {
-			queue.RecheckBackpressure()
-		}
-		return true
-	})
-}
-
 func (s *store) GetRequestWaitingQueueStats() []QueueStat {
 	stats := make([]QueueStat, 0)
 	s.requestWaitingQueue.Range(func(modelName, queueVal interface{}) bool {
@@ -872,6 +891,18 @@ func (s *store) GetPodInfo(podName types.NamespacedName) *PodInfo {
 		return value.(*PodInfo)
 	}
 	return nil
+}
+
+// PodScrapeFailures returns the consecutive metrics scrape failure count for
+// the named pod. Returns 0 when the pod is not in the store. Scheduler plugins
+// can compare this count against their own threshold to skip or down-weight
+// pods whose metric-based scores may be outdated.
+func (s *store) PodScrapeFailures(podName types.NamespacedName) int32 {
+	value, ok := s.pods.Load(podName)
+	if !ok {
+		return 0
+	}
+	return value.(*PodInfo).ConsecutiveScrapeFailures()
 }
 
 // IncrPodOnFlightRequests increments the in-flight counter for the given pod.
@@ -976,7 +1007,6 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 	}
 	modelServerObj := value.(*modelServer)
 	podNames := modelServerObj.getPods()
-	podRemoved := false
 	// then delete the model server from all pod info
 	for _, podName := range podNames {
 		if value, ok := s.pods.Load(podName); ok {
@@ -984,7 +1014,6 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 			podInfo.RemoveModelServer(ms)
 			if podInfo.GetModelServerCount() == 0 {
 				s.pods.Delete(podName)
-				podRemoved = true
 				// Dispatched after the removal, as DeletePod does.
 				s.triggerCallbacks("Pod", EventData{
 					EventType: EventDelete,
@@ -994,11 +1023,6 @@ func (s *store) DeleteModelServer(ms types.NamespacedName) error {
 		} else {
 			klog.Warningf("pod %s not found", podName)
 		}
-	}
-	// As in DeletePod: removing the last pod serving a model changes the
-	// checker's answer, and no later scrape will signal it.
-	if podRemoved {
-		s.recheckSessionBoostQueues()
 	}
 
 	return nil
@@ -1193,13 +1217,8 @@ func (s *store) AddOrUpdatePod(pod *corev1.Pod, modelServers []*aiv1alpha1.Model
 		EventType: EventAdd,
 		Pod:       podName,
 	})
-	metricsUpdated := s.updatePodMetrics(newPodInfo)
-	modelsUpdated := s.updatePodModels(newPodInfo)
-	// Recheck once both are in: the pod only counts toward a model's capacity
-	// after its models are known.
-	if metricsUpdated || modelsUpdated {
-		s.recheckSessionBoostQueues()
-	}
+	s.updatePodMetrics(newPodInfo)
+	s.updatePodModels(newPodInfo)
 
 	return nil
 }
@@ -1256,9 +1275,6 @@ func (s *store) DeletePod(podName types.NamespacedName) error {
 			}
 		}
 		s.pods.Delete(podName)
-		// Removing the last pod serving a model changes the checker's answer
-		// (no pods -> allow), and no later scrape will signal it.
-		s.recheckSessionBoostQueues()
 		// Remove the pod's Redis counter so stale keys do not accumulate.
 		if s.onFlightCounter != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -1819,21 +1835,23 @@ func selectFromWeightedSlice(weights []uint32) (int, error) {
 	return 0, nil
 }
 
-func (s *store) updatePodMetrics(pod *PodInfo) bool {
+func (s *store) updatePodMetrics(pod *PodInfo) {
 	engine := pod.GetEngine()
 	if engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
-		return false
+		return
 	}
 	podObj := pod.GetPod()
 	if podObj == nil {
 		klog.V(2).Info("failed to find pod")
-		return false
+		return
 	}
 
 	if podObj.Status.PodIP == "" {
-		return false
+		return
 	}
+	// From here the pod has an IP: a failure to scrape is a real network or
+	// endpoint error, not a pod that hasn't started yet. Track it.
 	port := s.getPodWorkloadPort(pod)
 	previousHistogram := getPreviousHistogram(pod)
 	gaugeMetrics, histogramMetrics := s.getPodRuntimeInspector().GetPodMetrics(engine, podObj, port, previousHistogram)
@@ -1843,33 +1861,39 @@ func (s *store) updatePodMetrics(pod *PodInfo) bool {
 	if histogramMetrics != nil {
 		updateHistogramMetrics(pod, histogramMetrics)
 	}
-	return gaugeMetrics != nil
+	success := len(gaugeMetrics) > 0
+	pod.markScrapeResult(success)
+	if !success && s.podScrapeFailureThreshold > 0 {
+		if failures := pod.ConsecutiveScrapeFailures(); failures == s.podScrapeFailureThreshold {
+			klog.Warningf("pod %s/%s: metrics scrape failed %d consecutive times — scores are stale; scheduling accuracy may be reduced",
+				podObj.Namespace, podObj.Name, failures)
+		}
+	}
 }
 
-func (s *store) updatePodModels(podInfo *PodInfo) bool {
+func (s *store) updatePodModels(podInfo *PodInfo) {
 	engine := podInfo.GetEngine()
 	if engine == "" {
 		klog.V(2).Info("failed to find backend in pod")
-		return false
+		return
 	}
 	podObj := podInfo.GetPod()
 	if podObj == nil {
 		klog.V(2).Info("failed to find pod")
-		return false
+		return
 	}
 
 	if podObj.Status.PodIP == "" {
-		return false
+		return
 	}
 	port := s.getPodWorkloadPort(podInfo)
 	models, err := s.getPodRuntimeInspector().GetPodModels(engine, podObj, port)
 	if err != nil {
 		klog.V(4).Infof("failed to get models of pod %s/%s: %v", podObj.GetNamespace(), podObj.GetName(), err)
-		return false
+		return
 	}
 
 	podInfo.UpdateModels(models)
-	return true
 }
 
 func (s *store) getPodWorkloadPort(podInfo *PodInfo) uint32 {
@@ -1902,7 +1926,6 @@ func getPreviousHistogram(podinfo *PodInfo) map[string]*dto.Histogram {
 	if podinfo.TimeToFirstToken != nil {
 		previousHistogram[utils.TTFT] = podinfo.TimeToFirstToken
 	}
-	maps.Copy(previousHistogram, podinfo.histogramSeries)
 	return previousHistogram
 }
 
@@ -1928,13 +1951,6 @@ func updateHistogramMetrics(podinfo *PodInfo, histogramMetrics map[string]*dto.H
 			updateFunc(podinfo, histogramMetrics[name])
 		} else {
 			klog.V(4).Infof("Unknown histogram metric: %s", name)
-		}
-	}
-
-	podinfo.histogramSeries = make(map[string]*dto.Histogram)
-	for name, histogram := range histogramMetrics {
-		if _, known := histogramUpdateFuncs[name]; !known {
-			podinfo.histogramSeries[name] = histogram
 		}
 	}
 }
@@ -2175,6 +2191,43 @@ func (p *PodInfo) GetTTFT() float64 {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
 	return p.TTFT
+}
+
+// markScrapeResult updates the consecutive scrape failure counter and the
+// last-successful-scrape timestamp. Only call this when the pod has an IP
+// (see updatePodMetrics); earlier exits represent "pod not ready" rather than
+// an unreachable metrics endpoint.
+func (p *PodInfo) markScrapeResult(success bool) {
+	if success {
+		p.consecutiveScrapeFailures.Store(0)
+		p.lastSuccessfulScrapeNs.Store(time.Now().UnixNano())
+	} else {
+		p.consecutiveScrapeFailures.Add(1)
+	}
+}
+
+// IsMetricsStale reports whether consecutive scrape failures have reached
+// threshold. A threshold of 0 (or below) always returns false.
+func (p *PodInfo) IsMetricsStale(threshold int32) bool {
+	if threshold <= 0 {
+		return false
+	}
+	return p.consecutiveScrapeFailures.Load() >= threshold
+}
+
+// ConsecutiveScrapeFailures returns the current consecutive failure count.
+func (p *PodInfo) ConsecutiveScrapeFailures() int32 {
+	return p.consecutiveScrapeFailures.Load()
+}
+
+// LastSuccessfulScrapeTime returns the time of the last successful metrics
+// scrape. Returns zero time when a successful scrape has never occurred.
+func (p *PodInfo) LastSuccessfulScrapeTime() time.Time {
+	ns := p.lastSuccessfulScrapeNs.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 // Debug interface implementations
