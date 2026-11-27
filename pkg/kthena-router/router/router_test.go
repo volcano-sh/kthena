@@ -2599,7 +2599,7 @@ func TestRouter_HandlerFunc_BackendUnavailable(t *testing.T) {
 			addModelServer:   true,
 			addPod:           true,
 			expectedStatus:   http.StatusServiceUnavailable,
-			expectedResponse: "request to all pods failed",
+			expectedResponse: "upstream unavailable",
 			expectedReason:   "proxy",
 		},
 	}
@@ -2608,6 +2608,7 @@ func TestRouter_HandlerFunc_BackendUnavailable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusServiceUnavailable)
+				fmt.Fprint(w, "upstream unavailable")
 			})
 			router, store, backend := setupTestRouter(t, backendHandler)
 			defer backend.Close()
@@ -3719,6 +3720,105 @@ func TestDoRequestHonorsTimeout(t *testing.T) {
 	assert.GreaterOrEqual(t, elapsed, 250*time.Millisecond, "should not fail before the timeout")
 }
 
+// TestDoRequest_Non2xxReturnsDecodeUpstreamError verifies a non-2xx decode
+// response is returned as *connectors.DecodeUpstreamError carrying the body, so
+// the retry loop can forward the real status/body instead of masking it as 503.
+func TestDoRequest_Non2xxReturnsDecodeUpstreamError(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"maximum context length exceeded"}`)
+	}))
+	defer backend.Close()
+
+	host, port := splitHostPort(t, backend.URL)
+	req, err := http.NewRequest(http.MethodPost, backend.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	require.NoError(t, err)
+
+	resp, err := doRequest(req, host, port, 0, proxyTransport)
+	require.NotNil(t, resp)
+
+	var decodeErr *connectors.DecodeUpstreamError
+	require.ErrorAs(t, err, &decodeErr, "non-2xx must be a *DecodeUpstreamError so it can be forwarded")
+	assert.Equal(t, http.StatusBadRequest, decodeErr.StatusCode)
+	assert.Contains(t, string(decodeErr.Body), "maximum context length exceeded")
+}
+
+// TestProxy_ForwardsUpstream4xx verifies a deterministic 4xx from the decode
+// upstream is forwarded to the client (status + body) without retrying other
+// pods, instead of being retried into a 503.
+func TestProxy_ForwardsUpstream4xx(t *testing.T) {
+	var receivedBodies []string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/metrics":
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			return
+		case "/v1/models":
+			fmt.Fprint(w, `{"data":[]}`)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		receivedBodies = append(receivedBodies, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"maximum context length exceeded"}`)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendIP := backendURL.Hostname()
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", common.NewTransportRegistry())
+
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-4xx", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("base-model"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-4xx-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-4xx-2", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-4xx", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "4xx-model",
+			Rules: []*aiv1alpha1.Rule{
+				{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-4xx"}}},
+			},
+		},
+	}
+
+	store.AddOrUpdateModelServer(modelServer, sets.New(
+		types.NamespacedName{Name: "pod-4xx-1", Namespace: "default"},
+		types.NamespacedName{Name: "pod-4xx-2", Namespace: "default"},
+	))
+	store.AddOrUpdatePod(pod1, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdatePod(pod2, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdateModelRoute(modelRoute)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"4xx-model","prompt":"hi"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, "must forward the upstream 400, not retry into 503")
+	assert.Contains(t, w.Body.String(), "maximum context length exceeded")
+	assert.Len(t, receivedBodies, 1, "a deterministic 4xx must not be retried across pods")
+}
+
 // With no timeout configured the request is bounded only by its context
 func TestDoRequestWithoutTimeoutStillWaits(t *testing.T) {
 	release := make(chan struct{})
@@ -3738,6 +3838,119 @@ func TestDoRequestWithoutTimeoutStillWaits(t *testing.T) {
 	_, err = doRequest(req, host, port, 0, proxyTransport)
 	assert.Error(t, err, "without a policy timeout only the request context bounds the call")
 	close(release)
+}
+
+// newUpstream4xxRouter builds a router whose two pods both point at one
+// httptest backend serving handler, mirroring TestProxy_ForwardsUpstream4xx.
+func newUpstream4xxRouter(t *testing.T, handler http.HandlerFunc) *Router {
+	t.Helper()
+	backend := httptest.NewServer(handler)
+	t.Cleanup(backend.Close)
+
+	backendURL, _ := url.Parse(backend.URL)
+	backendIP := backendURL.Hostname()
+	backendPort, _ := strconv.Atoi(backendURL.Port())
+
+	store := datastore.New()
+	router := NewRouter(store, "../scheduler/testdata/configmap.yaml", common.NewTransportRegistry())
+
+	modelServer := &aiv1alpha1.ModelServer{
+		ObjectMeta: v1.ObjectMeta{Name: "ms-4xx", Namespace: "default"},
+		Spec: aiv1alpha1.ModelServerSpec{
+			Model:           func(s string) *string { return &s }("base-model"),
+			WorkloadPort:    aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+			InferenceEngine: "vLLM",
+		},
+	}
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-4xx-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-4xx-2", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: backendIP, Phase: corev1.PodRunning},
+	}
+	modelRoute := &aiv1alpha1.ModelRoute{
+		ObjectMeta: v1.ObjectMeta{Name: "mr-4xx", Namespace: "default"},
+		Spec: aiv1alpha1.ModelRouteSpec{
+			ModelName: "4xx-model",
+			Rules: []*aiv1alpha1.Rule{
+				{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: "ms-4xx"}}},
+			},
+		},
+	}
+
+	store.AddOrUpdateModelServer(modelServer, sets.New(
+		types.NamespacedName{Name: "pod-4xx-1", Namespace: "default"},
+		types.NamespacedName{Name: "pod-4xx-2", Namespace: "default"},
+	))
+	store.AddOrUpdatePod(pod1, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdatePod(pod2, []*aiv1alpha1.ModelServer{modelServer})
+	store.AddOrUpdateModelRoute(modelRoute)
+	return router
+}
+
+// TestProxy_RetriesPodState4xx verifies a pod-state 4xx (e.g. 429 rate limit)
+// is retried on the next pod instead of being short-circuited.
+func TestProxy_RetriesPodState4xx(t *testing.T) {
+	var calls int32
+	router := newUpstream4xxRouter(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/metrics", "/v1/models":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "")
+			return
+		}
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"error":"rate limited"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"retry-429-ok"}`)
+	})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"4xx-model","prompt":"hi"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusOK, w.Code, "pod-state 429 must be retried on the next pod")
+	assert.Contains(t, w.Body.String(), "retry-429-ok")
+	assert.EqualValues(t, 2, atomic.LoadInt32(&calls))
+}
+
+// TestProxy_ForwardsLastUpstreamError verifies the non-PD loop forwards the
+// last upstream 5xx (status + body) once retries are exhausted, instead of the
+// generic 503 "request to all pods failed".
+func TestProxy_ForwardsLastUpstreamError(t *testing.T) {
+	var calls int32
+	router := newUpstream4xxRouter(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/metrics", "/v1/models":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "")
+			return
+		}
+		n := atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, `{"error":"backend %d failed"}`, n)
+	})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request, _ = http.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"4xx-model","prompt":"hi"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	router.HandlerFunc()(c)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "last upstream 5xx must be forwarded, not masked as 503")
+	assert.Contains(t, w.Body.String(), "backend 2 failed")
+	assert.EqualValues(t, 2, atomic.LoadInt32(&calls))
 }
 
 func splitHostPort(t *testing.T, rawURL string) (string, int32) {
@@ -4061,6 +4274,72 @@ func TestRouter_ProxyToPDDisaggregated_DecodeUpstreamError(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 		assert.Equal(t, `{"error":"pod 2 overloaded"}`, w.Body.String())
 		assert.Equal(t, "pod-2", w.Header().Get("X-Upstream-Pod"))
+	})
+
+	t.Run("retries a pod-state 4xx such as 429", func(t *testing.T) {
+		store := datastore.New()
+		router := NewRouter(store, "../scheduler/testdata/configmap.yaml", common.NewTransportRegistry())
+		ctx := &framework.Context{
+			Model:       "responses-model",
+			PrefillPods: []*datastore.PodInfo{info1, info2},
+			DecodePods:  []*datastore.PodInfo{info1, info2},
+		}
+
+		mockConnector := &mockKVConnector{}
+		mockConnector.proxyHandler = func(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *connectors.OnFlightHooks) (int, error) {
+			if mockConnector.calls.Load() == 1 {
+				return 0, &connectors.DecodeUpstreamError{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     http.Header{},
+					Body:       []byte(`{"error":"rate limited"}`),
+				}
+			}
+			c.Writer.WriteHeader(http.StatusOK)
+			_, _ = c.Writer.Write([]byte(`{"id":"resp_429_retry"}`))
+			return 7, nil
+		}
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest("POST", "/v1/responses", bytes.NewBufferString(`{"model":"responses-model"}`))
+
+		err := router.proxyToPDDisaggregated(c, c.Request, ctx, mockConnector, ModelRequest{"model": "responses-model"}, 8000, 2*time.Second)
+
+		assert.NoError(t, err)
+		assert.Equal(t, int32(2), mockConnector.calls.Load(), "a pod-state 429 must be retried on the next pair")
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, `{"id":"resp_429_retry"}`, w.Body.String())
+	})
+
+	t.Run("short-circuits a request-content 4xx such as 400", func(t *testing.T) {
+		store := datastore.New()
+		router := NewRouter(store, "../scheduler/testdata/configmap.yaml", common.NewTransportRegistry())
+		ctx := &framework.Context{
+			Model:       "responses-model",
+			PrefillPods: []*datastore.PodInfo{info1, info2},
+			DecodePods:  []*datastore.PodInfo{info1, info2},
+		}
+
+		mockConnector := &mockKVConnector{}
+		mockConnector.proxyHandler = func(c *gin.Context, reqBody map[string]interface{}, prefillAddr, decodeAddr string, hooks *connectors.OnFlightHooks) (int, error) {
+			return 0, &connectors.DecodeUpstreamError{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{},
+				Body:       []byte(`{"error":"maximum context length exceeded"}`),
+			}
+		}
+
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest("POST", "/v1/responses", bytes.NewBufferString(`{"model":"responses-model"}`))
+
+		err := router.proxyToPDDisaggregated(c, c.Request, ctx, mockConnector, ModelRequest{"model": "responses-model"}, 8000, 2*time.Second)
+
+		var respErr *connectors.DecodeUpstreamError
+		assert.ErrorAs(t, err, &respErr)
+		assert.Equal(t, int32(1), mockConnector.calls.Load(), "a request-content 400 must not be retried")
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Equal(t, `{"error":"maximum context length exceeded"}`, w.Body.String())
 	})
 }
 

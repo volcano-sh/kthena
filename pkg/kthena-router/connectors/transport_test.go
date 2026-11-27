@@ -1053,8 +1053,11 @@ func TestDecoderProxy(t *testing.T) {
 				if tt.errorContains != "" {
 					assert.Contains(t, err.Error(), tt.errorContains)
 				}
-				// Unchanged pre-existing behavior for non-Responses paths: nothing
-				// is forwarded to the client on a non-2xx decode response.
+				// decoderProxy must not write; it returns *DecodeUpstreamError so
+				// the caller can forward the real upstream status/body.
+				var respErr *DecodeUpstreamError
+				require.ErrorAs(t, err, &respErr)
+				assert.Equal(t, tt.statusCode, respErr.StatusCode)
 				assert.Equal(t, http.StatusOK, w.Code)
 				assert.Empty(t, w.Body.String())
 			} else {
@@ -1406,4 +1409,26 @@ func TestBuildDecodeRequestContextPreservation(t *testing.T) {
 
 	assert.Equal(t, "sentinel", result.Context().Value(contextKey{}),
 		"request context must be preserved by BuildDecodeRequest")
+}
+
+func TestIsDeterministicClientError(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+		want bool
+	}{
+		{"400 bad request", http.StatusBadRequest, true},
+		{"413 payload too large", http.StatusRequestEntityTooLarge, true},
+		{"422 unprocessable entity", http.StatusUnprocessableEntity, true},
+		{"404 lora not loaded", http.StatusNotFound, false},
+		{"408 request timeout", http.StatusRequestTimeout, false},
+		{"429 too many requests", http.StatusTooManyRequests, false},
+		{"500 internal", http.StatusInternalServerError, false},
+		{"200 ok", http.StatusOK, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsDeterministicClientError(tt.code))
+		})
+	}
 }
