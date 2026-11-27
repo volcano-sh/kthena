@@ -63,9 +63,13 @@ type Config struct {
 	FileExpiration time.Duration
 	// Gateway reads the Gateway API listener a request came in on, so this package never imports the router.
 	Gateway func(c *gin.Context) (gateway, listener string, port int)
+	// Dispatcher sends batch lines through the router; without one this replica runs no batches.
+	Dispatcher Dispatcher
+	// Holder names this replica on the batches it runs; empty picks a random name.
+	Holder string
 }
 
-// Service serves the OpenAI-compatible files and batches API.
+// Service serves the OpenAI-compatible files and batches API, and runs batches when it has a dispatcher.
 type Service struct {
 	store        Store
 	files        FileStore
@@ -73,6 +77,7 @@ type Service struct {
 	now          func() time.Time
 	newID        func(prefix string) string
 	gate         *readiness
+	worker       *worker
 	readyWait    time.Duration
 	retryEvery   time.Duration
 	recheckEvery time.Duration
@@ -87,6 +92,13 @@ func NewService(store Store, files FileStore, config Config) *Service {
 	config.MaxFileBytes = min(config.MaxFileBytes, largestFileLimit)
 	s := &Service{store: store, files: files, config: config, now: time.Now, newID: newID, readyWait: defaultReadyWait, retryEvery: defaultRetryEvery, recheckEvery: defaultRecheckEvery, uploadIdle: defaultUploadIdle}
 	s.gate = &readiness{check: s.checkStorage}
+	if config.Dispatcher != nil {
+		holder := config.Holder
+		if holder == "" {
+			holder = newID("router-")
+		}
+		s.worker = &worker{store: store, exec: newExecutor(store, files, config.Dispatcher), gate: s.gate, holder: holder, runners: defaultRunners, poll: defaultPoll}
+	}
 	return s
 }
 
