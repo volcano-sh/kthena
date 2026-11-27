@@ -38,6 +38,17 @@ func (c *ModelServingController) coordinatedPodGroupLayoutInRound(ctx context.Co
 		return projected, nil
 	}
 	history := map[string]map[string]workloadv1alpha1.Role{}
+	appliedRoles := func(revision string) (map[string]workloadv1alpha1.Role, error) {
+		if roles, ok := history[revision]; ok {
+			return roles, nil
+		}
+		roles, err := c.roleSpecsFromRevisionInRound(ctx, ms, revision)
+		if err != nil {
+			return nil, err
+		}
+		history[revision] = roles
+		return roles, nil
+	}
 	for i, desired := range ms.Spec.Template.Roles {
 		instances, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group, desired.Name)
 		if err != nil {
@@ -53,13 +64,9 @@ func (c *ModelServingController) coordinatedPodGroupLayoutInRound(ctx context.Co
 				return nil, err
 			}
 			instance = observed
-			roles, ok := history[instance.Revision]
-			if !ok {
-				roles, err = c.roleSpecsFromRevisionInRound(ctx, ms, instance.Revision)
-				if err != nil {
-					return nil, err
-				}
-				history[instance.Revision] = roles
+			roles, err := appliedRoles(instance.Revision)
+			if err != nil {
+				return nil, err
 			}
 			applied, ok := roles[desired.Name]
 			if !ok {
@@ -70,6 +77,29 @@ func (c *ModelServingController) coordinatedPodGroupLayoutInRound(ctx context.Co
 				projected.Spec.Template.Roles[i].Replicas = desired.Replicas
 			}
 			found = true
+		}
+		if len(instances) > 0 || roleReplicas(desired) == 0 || ms.Status.CurrentRevision == "" {
+			continue
+		}
+		// scaleUpRoles recreates ordinals below partition from CurrentRevision, so size the subgroup for them.
+		partition, _, err := c.getPartition(rolePartition(ms, desired), roleReplicas(desired))
+		if err != nil {
+			return nil, err
+		}
+		if partition <= 0 {
+			continue
+		}
+		roles, err := appliedRoles(ms.Status.CurrentRevision)
+		if err != nil {
+			return nil, err
+		}
+		protected, ok := roles[desired.Name]
+		if !ok {
+			return nil, fmt.Errorf("Role %s absent from current revision %s", desired.Name, ms.Status.CurrentRevision)
+		}
+		if partition >= roleReplicas(desired) || protected.WorkerReplicas < desired.WorkerReplicas {
+			projected.Spec.Template.Roles[i] = *protected.DeepCopy()
+			projected.Spec.Template.Roles[i].Replicas = desired.Replicas
 		}
 	}
 	return projected, nil
