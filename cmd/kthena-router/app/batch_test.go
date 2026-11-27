@@ -253,6 +253,37 @@ func TestBatchFilesAPIThroughTheListener(t *testing.T) {
 	}
 }
 
+func TestBatchCreateRecordsTheListenerItCameThrough(t *testing.T) {
+	tests := []struct {
+		name     string
+		listener func(*testing.T, *routerpkg.Router) http.Handler
+		origin   string
+	}{
+		{name: "default listener", listener: defaultListener, origin: `{"host":"example.com"}`},
+		{name: "gateway listener", listener: gatewayListener, origin: `{"host":"example.com","gateway":"default/gateway","listener":"http","port":80}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			redisServer, _ := enableBatch(t)
+			handler := tt.listener(t, newBatchRouter(t, testRouterConfig))
+			uploaded := serve(handler, uploadRequest(t, "{\"custom_id\":\"1\"}\n", ""))
+			require.Equal(t, http.StatusOK, uploaded.Code, uploaded.Body.String())
+			input, _ := decodeBody(t, uploaded)["id"].(string)
+
+			create := httptest.NewRequest(http.MethodPost, "/v1/batches", bytes.NewBufferString(`{"input_file_id":"`+input+`","endpoint":"/v1/chat/completions","completion_window":"24h"}`))
+			create.Header.Set("Content-Type", "application/json")
+			created := serve(handler, create)
+			require.Equal(t, http.StatusOK, created.Code, created.Body.String())
+			id, _ := decodeBody(t, created)["id"].(string)
+
+			got := serve(handler, request(http.MethodGet, "/v1/batches/"+id, ""))
+			require.Equal(t, http.StatusOK, got.Code, got.Body.String())
+			assert.Equal(t, "validating", decodeBody(t, got)["status"])
+			assert.JSONEq(t, tt.origin, redisServer.HGet("kthena:batch:{b}:job:"+id, "origin"), "every line of the batch will be sent the way the batch came in")
+		})
+	}
+}
+
 func TestBatchUploadLimitComesFromTheEnvironment(t *testing.T) {
 	enableBatch(t)
 	t.Setenv("BATCH_MAX_FILE_BYTES", "8")

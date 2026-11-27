@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/batch"
@@ -73,10 +74,15 @@ func startBatch(ctx context.Context, r *router.Router) <-chan struct{} {
 		return nil
 	}
 	store := batch.NewRedisStore(utils.NewRedisClient(), "")
-	service := batch.NewService(store, batch.NewFSStore(options.storagePath), batch.Config{MaxFileBytes: options.maxFileBytes, FileExpiration: batchFileExpiration})
+	service := batch.NewService(store, batch.NewFSStore(options.storagePath), batch.Config{MaxFileBytes: options.maxFileBytes, FileExpiration: batchFileExpiration, Gateway: gatewayOf})
 	// The storage check runs in the background: requests answer 503 until it passes, and the listeners never wait for it.
 	done := service.Start(ctx)
 	r.SetAPIExtension(service)
 	klog.Infof("Batch API enabled, files under %s", options.storagePath)
 	return done
+}
+
+// gatewayOf reads the Gateway API listener that the listener chain matched for this request; empty outside Gateway API mode.
+func gatewayOf(c *gin.Context) (string, string, int) {
+	return c.GetString(router.GatewayKey), c.GetString(router.GatewayListenerNameKey), c.GetInt(router.GatewayListenerPortKey)
 }

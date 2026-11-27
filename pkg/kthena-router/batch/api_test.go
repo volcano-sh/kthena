@@ -278,6 +278,9 @@ func TestHandlesOnlyTheBatchRoutes(t *testing.T) {
 	assert.False(t, api.service.Handles(http.MethodPost, "/v1/chat/completions"))
 	assert.False(t, api.service.Handles(http.MethodGet, "/v1/models"))
 	assert.False(t, api.service.Handles(http.MethodGet, "/v1/filesystem"))
+	assert.True(t, api.service.Handles(http.MethodPost, batchesPath))
+	assert.True(t, api.service.Handles(http.MethodGet, batchesPath+"/batch_1"))
+	assert.False(t, api.service.Handles(http.MethodGet, "/v1/batchesx"))
 
 	rec := api.call(t, "alice", httptest.NewRequest(http.MethodPut, filesPath+"/file-1", nil))
 	assert.Equal(t, http.StatusNotFound, rec.Code, "an unknown method on a known path is refused")

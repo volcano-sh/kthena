@@ -61,9 +61,11 @@ type Config struct {
 	MaxFileBytes int64
 	// FileExpiration is how long an upload lives when the client sets no expiry; 0 is forever.
 	FileExpiration time.Duration
+	// Gateway reads the Gateway API listener a request came in on, so this package never imports the router.
+	Gateway func(c *gin.Context) (gateway, listener string, port int)
 }
 
-// Service serves the OpenAI-compatible files API.
+// Service serves the OpenAI-compatible files and batches API.
 type Service struct {
 	store        Store
 	files        FileStore
@@ -98,7 +100,12 @@ func newID(prefix string) string {
 
 // Handles reports whether the path belongs to this API.
 func (s *Service) Handles(_, path string) bool {
-	return path == filesPath || strings.HasPrefix(path, filesPath+"/")
+	return under(path, filesPath) || under(path, batchesPath)
+}
+
+// under reports whether path is root or below it.
+func under(path, root string) bool {
+	return path == root || strings.HasPrefix(path, root+"/")
 }
 
 // Serve answers one request that Handles accepted.
@@ -106,11 +113,15 @@ func (s *Service) Serve(c *gin.Context) {
 	method := c.Request.Method
 	// Every verified token without a subject would share one tenant, so such a caller is refused.
 	if !namesOwner(c) {
-		fail(c, http.StatusForbidden, errInvalidRequest, "", "the token has no subject, so it cannot own files")
+		fail(c, http.StatusForbidden, errInvalidRequest, "", "the token has no subject, so it cannot own files or batches")
 		return
 	}
 	if !s.gate.await(c.Request.Context(), s.readyWait) {
 		fail(c, http.StatusServiceUnavailable, errAPI, "", "batch storage is not ready")
+		return
+	}
+	if under(c.Request.URL.Path, batchesPath) {
+		s.serveBatches(c)
 		return
 	}
 	rest := strings.Trim(strings.TrimPrefix(c.Request.URL.Path, filesPath), "/")
