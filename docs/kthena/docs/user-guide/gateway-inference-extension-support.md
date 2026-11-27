@@ -71,6 +71,12 @@ spec:
   selector:
     matchLabels:
       workload.serving.volcano.sh/model-name: demo
+  # Kthena Router does not use the Endpoint Picker Extension.
+  # It's just a placeholder for API validation.
+  endpointPickerRef:
+    name: kthena-demo
+    port:
+      number: 8080
 EOF
 ```
 
@@ -177,7 +183,6 @@ Kthena Router natively supports Gateway API and Gateway Inference Extension. You
      - group: gateway.networking.k8s.io
        kind: Gateway
        name: inference-gateway
-       namespace: kthena-system
      rules:
      - backendRefs:
        - group: inference.networking.k8s.io
