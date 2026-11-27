@@ -62,6 +62,9 @@ type AutoscaleController struct {
 	optimizerMap                map[string]*autoscaler.Optimizer
 	disaggregatedScalerMap      map[string]*autoscaler.DisaggregatedAutoscaler
 	syncPeriodSeconds           int
+	// collectTimeout bounds metric collection for a single AutoscalingPolicy in
+	// one reconcile pass. Zero means util.AutoscaleCtxTimeoutSeconds.
+	collectTimeout time.Duration
 }
 
 func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.Interface, syncPeriodSeconds int) *AutoscaleController {
@@ -126,8 +129,6 @@ func (ac *AutoscaleController) Run(ctx context.Context) {
 // move the current state of the cluster closer to the desired state.
 func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 	klog.V(4).Info("start to reconcile")
-	ctx, cancel := context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
-	defer cancel()
 	policies, err := ac.autoscalingPoliciesLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list autoscaling policies, err: %v", err)
@@ -177,6 +178,25 @@ func (ac *AutoscaleController) Reconcile(ctx context.Context) {
 	}
 }
 
+// collectContext returns the context for collecting one policy's metrics in
+// this pass. Each policy gets its own deadline, so a policy with slow or
+// unreachable pods cannot use up the time of the policies processed after it.
+// Writes made with the result must not use this context: see writeContext.
+func (ac *AutoscaleController) collectContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := ac.collectTimeout
+	if timeout <= 0 {
+		timeout = util.AutoscaleCtxTimeoutSeconds * time.Second
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+// writeContext returns the context for one API write. It is derived from the
+// reconcile context rather than the collect context, so a scrape that used up
+// its whole budget does not leave the write with an expired deadline.
+func writeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, util.AutoscaleCtxTimeoutSeconds*time.Second)
+}
+
 func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target *workload.Target, defaultNamespace string, replicas int32) error {
 	targetRef := target.TargetRef
 	namespaceScope := targetRef.Namespace
@@ -197,6 +217,8 @@ func (ac *AutoscaleController) updateTargetReplicas(ctx context.Context, target 
 		return nil
 	}
 	patchBytes := []byte(fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas))
+	ctx, cancel := writeContext(ctx)
+	defer cancel()
 	_, err = ac.client.WorkloadV1alpha1().ModelServings(namespaceScope).Patch(
 		ctx, targetRef.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
 	return err
@@ -268,7 +290,9 @@ func (ac *AutoscaleController) doOptimize(ctx context.Context, autoscalePolicy *
 	}
 
 	// Get recommended replicas
-	recommendedInstances, err := optimizer.Optimize(ctx, ac.podsLister, autoscalePolicy, replicasMap)
+	collectCtx, cancel := ac.collectContext(ctx)
+	recommendedInstances, err := optimizer.Optimize(collectCtx, ac.podsLister, autoscalePolicy, replicasMap)
+	cancel()
 	if err != nil {
 		klog.Errorf("failed to do optimize, err: %v", err)
 		return err
@@ -307,7 +331,9 @@ func (ac *AutoscaleController) doScale(ctx context.Context, autoscalePolicy *wor
 	}
 	// Get recommended replicas
 	klog.InfoS("do homogeneous scaling for target", "targetRef", target.TargetRef, "currentInstancesCount", currentInstancesCount)
-	recommendedInstances, err := scaler.Scale(ctx, ac.podsLister, autoscalePolicy, currentInstancesCount)
+	collectCtx, cancel := ac.collectContext(ctx)
+	recommendedInstances, err := scaler.Scale(collectCtx, ac.podsLister, autoscalePolicy, currentInstancesCount)
+	cancel()
 	if err != nil {
 		klog.Errorf("failed to do homogeneous scaling for target %s, err: %v", target.TargetRef.Name, err)
 		return err
@@ -355,7 +381,9 @@ func (ac *AutoscaleController) doDisaggregatedScale(ctx context.Context, autosca
 		return err
 	}
 
-	result, err := disaggregatedScaler.Scale(ctx, ac.podsLister, autoscalePolicy, currentReplicas)
+	collectCtx, cancel := ac.collectContext(ctx)
+	result, err := disaggregatedScaler.Scale(collectCtx, ac.podsLister, autoscalePolicy, currentReplicas)
+	cancel()
 	if err != nil {
 		if err := ac.updateDisaggregatedPolicyStatus(ctx, autoscalePolicy, nil, err, true); err != nil {
 			klog.Warningf("failed to update disaggregated autoscaling policy status %s/%s: %v", autoscalePolicy.Namespace, autoscalePolicy.Name, err)
@@ -490,6 +518,8 @@ func (ac *AutoscaleController) updateTargetRoleReplicas(ctx context.Context, tar
 	if err != nil {
 		return err
 	}
+	ctx, cancel := writeContext(ctx)
+	defer cancel()
 	_, err = ac.client.WorkloadV1alpha1().ModelServings(modelServing.Namespace).Patch(
 		ctx, modelServing.Name, types.JSONPatchType, patchBytes, metav1.PatchOptions{})
 	return err
@@ -590,6 +620,8 @@ func (ac *AutoscaleController) updateDisaggregatedPolicyStatus(ctx context.Conte
 	if equality.Semantic.DeepEqual(policy.Status, policyCopy.Status) {
 		return nil
 	}
+	ctx, cancel := writeContext(ctx)
+	defer cancel()
 	_, err := ac.client.WorkloadV1alpha1().AutoscalingPolicies(policy.Namespace).UpdateStatus(ctx, policyCopy, metav1.UpdateOptions{})
 	return err
 }
