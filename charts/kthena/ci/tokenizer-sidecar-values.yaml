@@ -1,0 +1,12 @@
+# Tokenizer as an extra container in the router pod.
+networking:
+  kthenaRouter:
+    tokenizerService:
+      enabled: true
+      mode: sidecar
+      models:
+        deepseek-v3: deepseek-ai/DeepSeek-V3
+        qwen3: /models/qwen3
+      extraEnv:
+        - name: HF_ENDPOINT
+          value: https://huggingface.co

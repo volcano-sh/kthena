@@ -1,0 +1,283 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["kthenaRouter"],
+  "properties": {
+    "enabled": {
+      "type": "boolean"
+    },
+    "kthenaRouter": {
+      "type": "object",
+      "required": ["port", "debugPort", "metrics", "service", "image", "tls", "webhook", "fairness", "accessLog", "gatewayAPI"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "replicas": {
+          "$ref": "#/definitions/replicas"
+        },
+        "port": {
+          "$ref": "#/definitions/port"
+        },
+        "debugPort": {
+          "$ref": "#/definitions/port"
+        },
+        "metrics": {
+          "type": "object",
+          "required": ["port", "exposeOnRouterPort"],
+          "properties": {
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "exposeOnRouterPort": {
+              "type": "boolean"
+            }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["ClusterIP", "NodePort", "LoadBalancer"]
+            }
+          }
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "resource": {
+          "type": "object"
+        },
+        "tls": {
+          "type": "object",
+          "required": ["secretName"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "dnsName": {
+              "type": "string"
+            },
+            "secretName": {
+              "type": "string"
+            }
+          }
+        },
+        "webhook": {
+          "type": "object",
+          "required": ["enabled", "port", "servicePort", "tls"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "servicePort": {
+              "$ref": "#/definitions/port"
+            },
+            "tls": {
+              "type": "object",
+              "required": ["certFile", "keyFile", "secretName", "serviceName"],
+              "properties": {
+                "certFile": {
+                  "type": "string"
+                },
+                "keyFile": {
+                  "type": "string"
+                },
+                "secretName": {
+                  "type": "string"
+                },
+                "serviceName": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer"
+        },
+        "drainTimeout": {
+          "type": "string"
+        },
+        "fairness": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "windowSize": {
+              "type": "string"
+            },
+            "inputTokenWeight": {
+              "$ref": "#/definitions/decimal"
+            },
+            "outputTokenWeight": {
+              "$ref": "#/definitions/decimal"
+            },
+            "maxConcurrent": {
+              "type": "integer"
+            }
+          }
+        },
+        "sessionBoost": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "header": {
+              "type": "string"
+            },
+            "maxSessions": {
+              "type": "integer"
+            },
+            "inflightPerPod": {
+              "type": "integer"
+            },
+            "gracePeriod": {
+              "type": "string"
+            },
+            "timeout": {
+              "type": "string"
+            }
+          }
+        },
+        "accessLog": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "format": {
+              "type": "string",
+              "enum": ["text", "json"]
+            },
+            "output": {
+              "type": "string"
+            }
+          }
+        },
+        "gatewayAPI": {
+          "type": "object",
+          "required": ["enabled", "inferenceExtension"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "inferenceExtension": {
+              "type": "boolean"
+            }
+          }
+        },
+        "tokenizerService": {
+          "type": "object",
+          "required": ["mode", "port", "image", "standalone"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "mode": {
+              "type": "string",
+              "enum": ["sidecar", "standalone"]
+            },
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "image": {
+              "$ref": "#/definitions/image"
+            },
+            "models": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "maxTokenizers": {
+              "type": "integer"
+            },
+            "extraEnv": {
+              "type": "array"
+            },
+            "resources": {
+              "type": "object"
+            },
+            "standalone": {
+              "type": "object",
+              "properties": {
+                "replicas": {
+                  "$ref": "#/definitions/replicas"
+                }
+              }
+            }
+          }
+        },
+        "kubeAPIQPS": {
+          "$ref": "#/definitions/decimal"
+        },
+        "kubeAPIBurst": {
+          "type": "integer"
+        },
+        "tolerations": {
+          "type": "array"
+        },
+        "sessionSticky": {
+          "type": "object",
+          "properties": {
+            "backend": {
+              "type": "string",
+              "enum": ["memory", "redis"]
+            },
+            "redis": {
+              "type": "object",
+              "properties": {
+                "address": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "decimal": {
+      "type": ["number", "string"],
+      "pattern": "^[0-9]+(\\.[0-9]+)?$",
+      "description": "A string is allowed because --set passes decimals such as 1.5 as strings."
+    },
+    "tag": {
+      "type": ["string", "integer"],
+      "description": "An integer is allowed because --set passes an all-digit tag as a number."
+    },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "tag": {
+          "$ref": "#/definitions/tag"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    }
+  }
+}
