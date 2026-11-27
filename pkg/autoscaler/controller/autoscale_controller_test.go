@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1065,5 +1066,93 @@ func TestPatchDoesNotMutateResourcesInFakeClient(t *testing.T) {
 				gotPrefillCPU.String(), gotPrefillMem.String(),
 				gotDecodeCPU.String(), gotDecodeMem.String(), gotImage)
 		})
+	}
+}
+
+// orderedPolicyLister returns policies in a fixed order so a test can control
+// which policy Reconcile processes first. The informer-backed lister iterates
+// a map and gives no ordering guarantee.
+type orderedPolicyLister struct {
+	policies []*workload.AutoscalingPolicy
+}
+
+func (l orderedPolicyLister) List(labels.Selector) ([]*workload.AutoscalingPolicy, error) {
+	return l.policies, nil
+}
+
+func (l orderedPolicyLister) AutoscalingPolicies(string) workloadLister.AutoscalingPolicyNamespaceLister {
+	panic("not implemented")
+}
+
+// TestReconcile_SlowPolicyDoesNotStarveLaterPolicies checks that one policy
+// whose pod never answers its metrics scrape does not use up the time budget
+// of the policies reconciled after it.
+func TestReconcile_SlowPolicyDoesNotStarveLaterPolicies(t *testing.T) {
+	// Each policy lives in its own namespace so it only selects its own pod.
+	slowNS, fastNS := "ns-slow", "ns-fast"
+	slowMS := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-slow", Namespace: slowNS}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
+	fastMS := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-fast", Namespace: fastNS}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(1)}}
+	client := clientfake.NewSimpleClientset(slowMS, fastMS)
+	msLister := workloadLister.NewModelServingLister(newModelServingIndexer(slowMS, fastMS))
+
+	// The slow pod holds every scrape open until the client gives up.
+	var slowHits atomic.Int32
+	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slowHits.Add(1)
+		<-r.Context().Done()
+	}))
+	defer slowSrv.Close()
+
+	var fastHits atomic.Int32
+	fastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fastHits.Add(1)
+		_, _ = w.Write([]byte("# TYPE load gauge\nload 10\n"))
+	}))
+	defer fastSrv.Close()
+
+	newPolicy := func(ns, name, msName string, srv *httptest.Server) (*workload.AutoscalingPolicy, *corev1.Pod) {
+		u, _ := url.Parse(srv.URL)
+		host, portStr, _ := net.SplitHostPort(u.Host)
+		target := workload.Target{
+			TargetRef:     corev1.ObjectReference{Kind: workload.ModelServingKind.Kind, Namespace: ns, Name: msName},
+			MetricSources: map[string]workload.MetricSource{"load": {Pod: &workload.PodMetricSource{Uri: u.Path, Port: toInt32(portStr)}}},
+		}
+		policy := &workload.AutoscalingPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: workload.AutoscalingPolicySpec{
+				Metrics:           []workload.AutoscalingPolicyMetric{{Name: "load", TargetValue: resource.MustParse("1")}},
+				HomogeneousTarget: &workload.HomogeneousTarget{Target: target, MinReplicas: 1, MaxReplicas: 10},
+			},
+		}
+		return policy, readyPod(ns, name+"-pod", host, map[string]string{})
+	}
+	slowPolicy, slowPod := newPolicy(slowNS, "ap-slow", "ms-slow", slowSrv)
+	fastPolicy, fastPod := newPolicy(fastNS, "ap-fast", "ms-fast", fastSrv)
+
+	ac := &AutoscaleController{
+		client:                    client,
+		autoscalingPoliciesLister: orderedPolicyLister{policies: []*workload.AutoscalingPolicy{slowPolicy, fastPolicy}},
+		modelServingLister:        msLister,
+		podsLister:                fakePodLister{podsByNs: map[string][]*corev1.Pod{slowNS: {slowPod}, fastNS: {fastPod}}},
+		scalerMap:                 map[string]*autoscalerAutoscaler{},
+		optimizerMap:              map[string]*autoscalerOptimizer{},
+		disaggregatedScalerMap:    map[string]*autoscaler.DisaggregatedAutoscaler{},
+		policyTimeout:             200 * time.Millisecond,
+	}
+
+	ac.Reconcile(context.Background())
+
+	if slowHits.Load() == 0 {
+		t.Fatalf("expected the slow pod to be scraped")
+	}
+	if fastHits.Load() == 0 {
+		t.Fatalf("expected the fast pod to be scraped after the slow policy timed out, but it was never contacted")
+	}
+	updated, err := client.WorkloadV1alpha1().ModelServings(fastNS).Get(context.Background(), "ms-fast", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get ms-fast: %v", err)
+	}
+	if updated.Spec.Replicas == nil || *updated.Spec.Replicas != 10 {
+		t.Fatalf("expected ms-fast scaled to 10 replicas, got %v", updated.Spec.Replicas)
 	}
 }
