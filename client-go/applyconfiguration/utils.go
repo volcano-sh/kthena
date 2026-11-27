@@ -50,6 +50,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &networkingv1alpha1.GlobalRateLimitApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("KVConnectorSpec"):
 		return &networkingv1alpha1.KVConnectorSpecApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("LoadBalancer"):
+		return &networkingv1alpha1.LoadBalancerApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("ModelMatch"):
 		return &networkingv1alpha1.ModelMatchApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("ModelRoute"):
@@ -60,8 +62,16 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &networkingv1alpha1.ModelServerApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("ModelServerSpec"):
 		return &networkingv1alpha1.ModelServerSpecApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("ModelServerStatus"):
+		return &networkingv1alpha1.ModelServerStatusApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("PDGroup"):
 		return &networkingv1alpha1.PDGroupApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("PluginConfig"):
+		return &networkingv1alpha1.PluginConfigApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("Plugins"):
+		return &networkingv1alpha1.PluginsApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("PluginWithWeight"):
+		return &networkingv1alpha1.PluginWithWeightApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("ProviderAuth"):
 		return &networkingv1alpha1.ProviderAuthApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("RateLimit"):
@@ -72,6 +82,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &networkingv1alpha1.RetryApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("Rule"):
 		return &networkingv1alpha1.RuleApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("SchedulerProfile"):
+		return &networkingv1alpha1.SchedulerProfileApplyConfiguration{}
+	case v1alpha1.SchemeGroupVersion.WithKind("SchedulerProfileSpec"):
+		return &networkingv1alpha1.SchedulerProfileSpecApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("SessionKeySource"):
 		return &networkingv1alpha1.SessionKeySourceApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("SessionSticky"):
