@@ -78,47 +78,38 @@ spec:
                   are enabled by this profile.
                 properties:
                   filter:
-                    description: Filter declares the filter plugins enabled by this
-                      profile.
-                    properties:
-                      enabled:
-                        description: Enabled filter plugin names, executed in list
-                          order.
-                        items:
-                          type: string
-                        type: array
-                    type: object
+                    description: |-
+                      Filter lists the filter plugin names enabled by this profile,
+                      executed in list order.
+                    items:
+                      type: string
+                    type: array
                   score:
                     description: |-
-                      Score declares the score plugins enabled by this profile, each with
-                      its weight in the final score sum.
-                    properties:
-                      enabled:
-                        description: Enabled score plugins with weights. Weight must
-                          be greater than 0.
-                        items:
-                          description: PluginWithWeight pairs a score plugin name
-                            with its weight.
-                          properties:
-                            name:
-                              description: Name of the score plugin, e.g. "prefix-cache".
-                              type: string
-                            weight:
-                              description: |-
-                                Weight multiplies this plugin's score before it is summed with the
-                                other plugins' weighted scores. Must be greater than 0.
-                              format: int32
-                              minimum: 1
-                              type: integer
-                          required:
-                          - name
-                          - weight
-                          type: object
-                        type: array
-                        x-kubernetes-list-map-keys:
-                        - name
-                        x-kubernetes-list-type: map
-                    type: object
+                      Score lists the score plugins enabled by this profile, each with its
+                      weight in the final score sum. Weight must be greater than 0.
+                    items:
+                      description: PluginWithWeight pairs a score plugin name with
+                        its weight.
+                      properties:
+                        name:
+                          description: Name of the score plugin, e.g. "prefix-cache".
+                          type: string
+                        weight:
+                          description: |-
+                            Weight multiplies this plugin's score before it is summed with the
+                            other plugins' weighted scores. Must be greater than 0.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                      required:
+                      - name
+                      - weight
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                 type: object
             type: object
         required:

@@ -162,22 +162,6 @@ _Appears in:_
 | `Anthropic` | Anthropic selects the Anthropic-compatible Messages API adapter.<br /> |
 
 
-#### Filter
-
-
-
-Filter lists the filter plugins enabled by a profile.
-
-
-
-_Appears in:_
-- [Plugins](#plugins)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `enabled` _string array_ | Enabled filter plugin names, executed in list order. |  |  |
-
-
 #### GlobalRateLimit
 
 
@@ -469,7 +453,7 @@ PluginWithWeight pairs a score plugin name with its weight.
 
 
 _Appears in:_
-- [Score](#score)
+- [Plugins](#plugins)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -492,8 +476,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `filter` _[Filter](#filter)_ | Filter declares the filter plugins enabled by this profile. |  |  |
-| `score` _[Score](#score)_ | Score declares the score plugins enabled by this profile, each with<br />its weight in the final score sum. |  |  |
+| `filter` _string array_ | Filter lists the filter plugin names enabled by this profile,<br />executed in list order. |  |  |
+| `score` _[PluginWithWeight](#pluginwithweight) array_ | Score lists the score plugins enabled by this profile, each with its<br />weight in the final score sum. Weight must be greater than 0. |  |  |
 
 
 #### ProviderAuth
@@ -660,22 +644,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `pluginConfig` _[PluginConfig](#pluginconfig) array_ | PluginConfig holds per-plugin arguments, keyed by plugin name. |  |  |
 | `plugins` _[Plugins](#plugins)_ | Plugins declares which filter and score plugins are enabled, with<br />their score weights. An empty section means no plugins of that kind<br />are enabled by this profile. |  |  |
-
-
-#### Score
-
-
-
-Score lists the score plugins enabled by a profile with their weights.
-
-
-
-_Appears in:_
-- [Plugins](#plugins)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `enabled` _[PluginWithWeight](#pluginwithweight) array_ | Enabled score plugins with weights. Weight must be greater than 0. |  |  |
 
 
 #### SessionKeySource

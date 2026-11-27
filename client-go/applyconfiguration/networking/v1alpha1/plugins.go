@@ -25,11 +25,12 @@ package v1alpha1
 // JSON names follow the Kubernetes API convention (lowerCamelCase); the
 // router ConfigMap keeps its capitalized keys.
 type PluginsApplyConfiguration struct {
-	// Filter declares the filter plugins enabled by this profile.
-	Filter *FilterApplyConfiguration `json:"filter,omitempty"`
-	// Score declares the score plugins enabled by this profile, each with
-	// its weight in the final score sum.
-	Score *ScoreApplyConfiguration `json:"score,omitempty"`
+	// Filter lists the filter plugin names enabled by this profile,
+	// executed in list order.
+	Filter []string `json:"filter,omitempty"`
+	// Score lists the score plugins enabled by this profile, each with its
+	// weight in the final score sum. Weight must be greater than 0.
+	Score []PluginWithWeightApplyConfiguration `json:"score,omitempty"`
 }
 
 // PluginsApplyConfiguration constructs a declarative configuration of the Plugins type for use with
@@ -38,18 +39,25 @@ func Plugins() *PluginsApplyConfiguration {
 	return &PluginsApplyConfiguration{}
 }
 
-// WithFilter sets the Filter field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the Filter field is set to the value of the last call.
-func (b *PluginsApplyConfiguration) WithFilter(value *FilterApplyConfiguration) *PluginsApplyConfiguration {
-	b.Filter = value
+// WithFilter adds the given value to the Filter field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Filter field.
+func (b *PluginsApplyConfiguration) WithFilter(values ...string) *PluginsApplyConfiguration {
+	for i := range values {
+		b.Filter = append(b.Filter, values[i])
+	}
 	return b
 }
 
-// WithScore sets the Score field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the Score field is set to the value of the last call.
-func (b *PluginsApplyConfiguration) WithScore(value *ScoreApplyConfiguration) *PluginsApplyConfiguration {
-	b.Score = value
+// WithScore adds the given value to the Score field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Score field.
+func (b *PluginsApplyConfiguration) WithScore(values ...*PluginWithWeightApplyConfiguration) *PluginsApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithScore")
+		}
+		b.Score = append(b.Score, *values[i])
+	}
 	return b
 }
