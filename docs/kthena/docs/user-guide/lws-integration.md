@@ -39,6 +39,7 @@ When Kthena's LWS integration is enabled:
 | `spec.leaderWorkerTemplate.workerTemplate` | `spec.template.roles.WorkerTemplate` | Parsed as Worker role definition. |
 | `spec.leaderWorkerTemplate.size` | `spec.template.roles[].workerReplicas` | Worker count is `Size - 1`. Newly generated ModelServings declare `headless-service` at creation, including size 1, and retain that declaration when size changes. |
 | `spec.startupPolicy` | Startup Policy | Maps startup order policy (e.g., `LeaderFirst`). |
+| `spec.leaderWorkerTemplate.restartPolicy` | `spec.recoveryPolicy` | `None` and the deprecated `Default` map to `None`, so a deleted Pod is recreated on its own and container restarts are left to the kubelet. Unlike native LWS, a Pod that ends in `Failed` stays until something deletes it. `RecreateGroupOnPodRestart` keeps the default `RoleRecreate`, which recreates the whole group because the generated ModelServing has one role. |
 
 </div>
 
