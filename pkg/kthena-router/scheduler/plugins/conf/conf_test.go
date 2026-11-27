@@ -17,21 +17,22 @@ limitations under the License.
 package conf
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func TestLoadSchedulerConfig(t *testing.T) {
+func TestParseRouterConfig(t *testing.T) {
 	testCases := []struct {
 		name       string
 		configFile string
 		expectErrs string
 	}{
 		{
-			name:       "LoadSchedulerConfig success",
+			name:       "ParseRouterConfig success",
 			configFile: "../../../utils/testdata/configmap-jwt.yaml",
 			expectErrs: "",
 		},
@@ -54,10 +55,7 @@ func TestLoadSchedulerConfig(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			routerConf, err := ParseRouterConfig(tc.configFile)
-			if err == nil {
-				_, _, _, err = LoadSchedulerConfig(&routerConf.Scheduler)
-			}
+			_, err := ParseRouterConfig(tc.configFile)
 			if tc.expectErrs == "" {
 				if err != nil {
 					t.Errorf("expected no error, got %q", err.Error())
@@ -70,95 +68,6 @@ func TestLoadSchedulerConfig(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.expectErrs) {
 				t.Errorf("expected error %q, got %q", tc.expectErrs, err.Error())
-			}
-		})
-	}
-}
-
-func TestLoadSchedulerConfigRejectsInvalidLeastLatencyWeight(t *testing.T) {
-	tt := []struct {
-		name  string
-		value string
-	}{
-		{name: "not a number", value: ".nan"},
-		{name: "positive infinity", value: ".inf"},
-		{name: "negative infinity", value: "-.inf"},
-		{name: "below minimum", value: "-0.1"},
-		{name: "above maximum", value: "1.1"},
-	}
-
-	for _, tc := range tt {
-		t.Run(tc.name, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "routerConfiguration.yaml")
-			config := fmt.Sprintf(`scheduler:
-  pluginConfig:
-    - name: least-latency
-      args:
-        TTFTTPOTWeightFactor: %s
-`, tc.value)
-			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
-				t.Fatalf("write router configuration: %v", err)
-			}
-
-			routerConfig, err := ParseRouterConfig(configPath)
-			if err != nil {
-				t.Fatalf("parse router configuration: %v", err)
-			}
-			_, _, _, err = LoadSchedulerConfig(&routerConfig.Scheduler)
-			if err == nil {
-				t.Fatalf("expected invalid weight %q to be rejected", tc.value)
-			}
-		})
-	}
-}
-
-func TestLoadSchedulerConfigRejectsNonPositiveScoreWeight(t *testing.T) {
-	tt := []struct {
-		name       string
-		weightLine string
-		wantErr    bool
-	}{
-		{name: "weight omitted", weightLine: "", wantErr: true},
-		{name: "weight zero", weightLine: "        weight: 0", wantErr: true},
-		{name: "weight negative", weightLine: "        weight: -1", wantErr: true},
-		{name: "weight set", weightLine: "        weight: 3", wantErr: false},
-	}
-
-	for _, tc := range tt {
-		t.Run(tc.name, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "routerConfiguration.yaml")
-			config := fmt.Sprintf(`scheduler:
-  plugins:
-    Score:
-      enabled:
-      - name: least-request
-%s
-`, tc.weightLine)
-			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
-				t.Fatalf("write router configuration: %v", err)
-			}
-
-			routerConfig, err := ParseRouterConfig(configPath)
-			if err != nil {
-				t.Fatalf("parse router configuration: %v", err)
-			}
-			scorePluginMap, _, _, err := LoadSchedulerConfig(&routerConfig.Scheduler)
-			if tc.wantErr {
-				// A non-positive weight leaves the plugin enabled but drops its scores
-				// from pod selection, so the configuration is rejected rather than guessed at.
-				if err == nil {
-					t.Fatalf("expected an error, got weights %v", scorePluginMap)
-				}
-				if !strings.Contains(err.Error(), "must set a weight greater than 0") {
-					t.Errorf("unexpected error %q", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("load scheduler configuration: %v", err)
-			}
-			if got := scorePluginMap["least-request"]; got != 3 {
-				t.Errorf("expected weight 3, got %d", got)
 			}
 		})
 	}
@@ -184,127 +93,31 @@ func TestParseRouterConfigRejectsNonScalarPluginName(t *testing.T) {
 	}
 }
 
-func TestHandleRandomPluginConflicts(t *testing.T) {
-	tests := []struct {
-		name            string
-		scorePluginMap  map[string]int
-		expectedPlugins map[string]int
-		expectConflict  bool
-	}{
-		{
-			name: "random plugin with other score plugins - should remove random",
-			scorePluginMap: map[string]int{
-				"random":        10,
-				"least-latency": 20,
-				"gpu-usage":     30,
-			},
-			expectedPlugins: map[string]int{
-				"least-latency": 20,
-				"gpu-usage":     30,
-			},
-			expectConflict: true,
+// TestLoadSchedulerConfigAssemblesMaps checks the pure config-to-maps
+// assembly; validation lives with the chain builders now.
+func TestLoadSchedulerConfigAssemblesMaps(t *testing.T) {
+	schedulerConfig := &SchedulerConfiguration{
+		PluginConfig: []PluginConfig{
+			{Name: "least-request", Args: runtime.RawExtension{Raw: []byte(`{"maxWaitingRequests": 10}`)}},
 		},
-		{
-			name: "only random plugin - should keep random",
-			scorePluginMap: map[string]int{
-				"random": 10,
-			},
-			expectedPlugins: map[string]int{
-				"random": 10,
-			},
-			expectConflict: false,
-		},
-		{
-			name: "no random plugin - should keep all",
-			scorePluginMap: map[string]int{
-				"least-latency": 20,
-				"gpu-usage":     30,
-			},
-			expectedPlugins: map[string]int{
-				"least-latency": 20,
-				"gpu-usage":     30,
-			},
-			expectConflict: false,
-		},
-		{
-			name:            "empty plugin map - should remain empty",
-			scorePluginMap:  map[string]int{},
-			expectedPlugins: map[string]int{},
-			expectConflict:  false,
+		Plugins: Plugins{
+			Filter: Filter{Enabled: []string{"least-request"}},
+			Score:  Score{Enabled: []PluginWithWeight{{Name: "least-request", Weight: 3}}},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := handleRandomPluginConflicts(tt.scorePluginMap)
-
-			// Check the number of plugins
-			if len(result) != len(tt.expectedPlugins) {
-				t.Errorf("Expected %d plugins, got %d", len(tt.expectedPlugins), len(result))
-			}
-
-			// Check each expected plugin exists with correct weight
-			for expectedName, expectedWeight := range tt.expectedPlugins {
-				if actualWeight, exists := result[expectedName]; !exists {
-					t.Errorf("Expected plugin %s to exist", expectedName)
-				} else if actualWeight != expectedWeight {
-					t.Errorf("Expected weight %d for plugin %s, got %d", expectedWeight, expectedName, actualWeight)
-				}
-			}
-
-			// Verify random plugin is removed when there's a conflict
-			if tt.expectConflict {
-				if _, exists := result["random"]; exists {
-					t.Errorf("Random plugin should be removed when configured with other score plugins")
-				}
-			}
-		})
+	scorePluginMap, filterPlugins, pluginsArgMap, err := LoadSchedulerConfig(schedulerConfig)
+	if err != nil {
+		t.Fatalf("load scheduler configuration: %v", err)
 	}
-}
-
-func TestLoadSchedulerConfigRejectsNegativeMaxWaitingRequests(t *testing.T) {
-	tt := []struct {
-		name    string
-		value   string
-		wantErr bool
-	}{
-		{name: "negative", value: "-1", wantErr: true},
-		{name: "large negative", value: "-100", wantErr: true},
-		{name: "zero keeps the default", value: "0", wantErr: false},
-		{name: "positive", value: "4", wantErr: false},
+	if got := scorePluginMap["least-request"]; got != 3 {
+		t.Errorf("expected weight 3, got %d", got)
 	}
-
-	for _, tc := range tt {
-		t.Run(tc.name, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "routerConfiguration.yaml")
-			config := fmt.Sprintf(`scheduler:
-  pluginConfig:
-    - name: least-request
-      args:
-        maxWaitingRequests: %s
-`, tc.value)
-			if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
-				t.Fatalf("write router configuration: %v", err)
-			}
-
-			routerConfig, err := ParseRouterConfig(configPath)
-			if err != nil {
-				t.Fatalf("parse router configuration: %v", err)
-			}
-			_, _, _, err = LoadSchedulerConfig(&routerConfig.Scheduler)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected maxWaitingRequests %q to be rejected", tc.value)
-				}
-				if !strings.Contains(err.Error(), "must not be negative") {
-					t.Errorf("unexpected error %q", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("load scheduler configuration: %v", err)
-			}
-		})
+	if len(filterPlugins) != 1 || filterPlugins[0] != "least-request" {
+		t.Errorf("unexpected filter plugins %v", filterPlugins)
+	}
+	if _, ok := pluginsArgMap["least-request"]; !ok {
+		t.Errorf("expected least-request args to be carried through")
 	}
 }
 

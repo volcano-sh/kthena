@@ -105,7 +105,7 @@ func TestLeastRequestScore(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plugin := NewLeastRequest(runtime.RawExtension{Raw: []byte(`{}`)})
+			plugin := NewLeastRequest(BuildContext{Args: runtime.RawExtension{Raw: []byte(`{}`)}})
 			scores := plugin.Score(nil, tt.pods)
 
 			for _, pod := range tt.pods {
@@ -153,7 +153,7 @@ func TestLeastRequestFilterMaxWaitingRequests(t *testing.T) {
 				makePodWithWaiting("busy", 50),
 			}
 
-			plugin := NewLeastRequest(runtime.RawExtension{Raw: []byte(tt.args)})
+			plugin := NewLeastRequest(BuildContext{Args: runtime.RawExtension{Raw: []byte(tt.args)}})
 			got := plugin.Filter(nil, pods)
 
 			gotNames := make([]string, 0, len(got))
@@ -164,5 +164,15 @@ func TestLeastRequestFilterMaxWaitingRequests(t *testing.T) {
 				t.Errorf("expected %v to survive, got %v", tt.wantNames, gotNames)
 			}
 		})
+	}
+}
+
+func TestValidateLeastRequestArgsRejectsUnknownFields(t *testing.T) {
+	err := ValidateLeastRequestArgs(runtime.RawExtension{Raw: []byte(`{maxWaitingRequest: 4}`)})
+	if err == nil {
+		t.Fatal("expected unknown field maxWaitingRequest to be rejected")
+	}
+	if err := ValidateLeastRequestArgs(runtime.RawExtension{Raw: []byte(`{maxWaitingRequests: 4}`)}); err != nil {
+		t.Fatalf("expected valid args to pass, got %v", err)
 	}
 }

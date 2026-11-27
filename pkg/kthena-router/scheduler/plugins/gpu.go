@@ -17,6 +17,10 @@ limitations under the License.
 package plugins
 
 import (
+	"fmt"
+
+	"k8s.io/apimachinery/pkg/runtime"
+
 	"github.com/volcano-sh/kthena/pkg/kthena-router/datastore"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/scheduler/framework"
 )
@@ -29,7 +33,7 @@ type GPUCacheUsage struct {
 	name string
 }
 
-func NewGPUCacheUsage() *GPUCacheUsage {
+func NewGPUCacheUsage(_ BuildContext) *GPUCacheUsage {
 	return &GPUCacheUsage{
 		name: GPUCacheUsagePluginName,
 	}
@@ -46,4 +50,13 @@ func (g *GPUCacheUsage) Score(ctx *framework.Context, pods []*datastore.PodInfo)
 	}
 
 	return scoreResults
+}
+
+// ValidateGPUCacheUsageArgs validates the gpu-usage plugin arguments: the
+// plugin takes no arguments, so any non-empty args are rejected.
+func ValidateGPUCacheUsageArgs(pluginArg runtime.RawExtension) error {
+	if len(pluginArg.Raw) > 0 {
+		return fmt.Errorf("gpu-usage plugin takes no arguments")
+	}
+	return nil
 }

@@ -24,7 +24,7 @@ import (
 )
 
 func TestLoraAffinityName(t *testing.T) {
-	plugin := NewLoraAffinity()
+	plugin := NewLoraAffinity(BuildContext{})
 	if plugin.Name() != LoraAffinityPluginName {
 		t.Fatalf("expected plugin name %q, got %q", LoraAffinityPluginName, plugin.Name())
 	}
@@ -72,7 +72,7 @@ func TestLoraAffinityFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plugin := NewLoraAffinity()
+			plugin := NewLoraAffinity(BuildContext{})
 			filtered := plugin.Filter(&framework.Context{Model: tt.model}, append([]*datastore.PodInfo(nil), tt.pods...))
 			if len(filtered) != len(tt.expectedNames) {
 				t.Fatalf("expected %d pods, got %d", len(tt.expectedNames), len(filtered))
