@@ -225,8 +225,9 @@ type Store interface {
 	// New methods for routing functionality
 	// MatchModelTarget matches a ModelRoute and selects a destination by rule
 	// weights. The matched rule is returned alongside the route, or nil when no
-	// ModelRoute matched.
-	MatchModelTarget(modelName string, request *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, error)
+	// ModelRoute matched. listener is the Gateway listener the request arrived
+	// on, or the zero value when Gateway API is not used.
+	MatchModelTarget(modelName string, request *http.Request, listener GatewayListener) (ModelTarget, bool, *aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, error)
 
 	// Model routing methods
 	AddOrUpdateModelRoute(mr *aiv1alpha1.ModelRoute) error
@@ -1480,8 +1481,16 @@ func (s *store) DeleteModelRoute(namespacedName string) error {
 	return nil
 }
 
-func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey string) (ModelTarget, bool, *aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, error) {
-	mr, rule, isLora, err := s.matchModelRoute(model, req, gatewayKey)
+// GatewayListener identifies the Gateway listener a request arrived on.
+type GatewayListener struct {
+	// GatewayKey is the Gateway's "namespace/name".
+	GatewayKey   string
+	ListenerName string
+	Port         int
+}
+
+func (s *store) MatchModelTarget(model string, req *http.Request, listener GatewayListener) (ModelTarget, bool, *aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, error) {
+	mr, rule, isLora, err := s.matchModelRoute(model, req, listener)
 	if err != nil {
 		return ModelTarget{}, false, nil, nil, err
 	}
@@ -1496,7 +1505,7 @@ func (s *store) MatchModelTarget(model string, req *http.Request, gatewayKey str
 	return target, isLora, mr, rule, nil
 }
 
-func (s *store) matchModelRoute(model string, req *http.Request, gatewayKey string) (*aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, bool, error) {
+func (s *store) matchModelRoute(model string, req *http.Request, listener GatewayListener) (*aiv1alpha1.ModelRoute, *aiv1alpha1.Rule, bool, error) {
 	s.routeMutex.RLock()
 	defer s.routeMutex.RUnlock()
 
@@ -1522,16 +1531,16 @@ func (s *store) matchModelRoute(model string, req *http.Request, gatewayKey stri
 	for _, mr := range candidateRoutes {
 		// Check parentRefs if specified
 		if len(mr.Spec.ParentRefs) > 0 {
-			// If gatewayKey is provided (not empty), check if ModelRoute matches the specific gateway
-			if gatewayKey != "" {
-				if !s.matchesSpecificGateway(mr, gatewayKey) {
+			// If the request came through a Gateway, check if ModelRoute attaches to its listener
+			if listener.GatewayKey != "" {
+				if !s.matchesGatewayListener(mr, listener) {
 					continue // Try next ModelRoute
 				}
 			} else {
 				// If ModelRoute has parentRefs but gatewayKey is empty, skip it
 				continue // Skip ModelRoute with parentRefs when gatewayKey is not specified
 			}
-		} else if gatewayKey != "" && !strings.HasPrefix(gatewayKey, mr.Namespace+"/") {
+		} else if listener.GatewayKey != "" && !strings.HasPrefix(listener.GatewayKey, mr.Namespace+"/") {
 			// ModelRoutes without parentRefs only attach to Gateways in the same namespace
 			continue
 		}
@@ -1575,12 +1584,15 @@ func modelTargetFromDestination(namespace string, target *aiv1alpha1.TargetModel
 	}, nil
 }
 
-// matchesSpecificGateway checks if the ModelRoute matches a specific gateway
-func (s *store) matchesSpecificGateway(mr *aiv1alpha1.ModelRoute, gatewayKey string) bool {
+// matchesGatewayListener checks if the ModelRoute attaches to the Gateway
+// listener the request arrived on. A parentRef that sets sectionName or port
+// only attaches to the listener with that name or port, the same rule
+// HTTPRoutes follow.
+func (s *store) matchesGatewayListener(mr *aiv1alpha1.ModelRoute, listener GatewayListener) bool {
 	s.gatewayMutex.RLock()
 	defer s.gatewayMutex.RUnlock()
 
-	gatewayObj := s.gateways[gatewayKey]
+	gatewayObj := s.gateways[listener.GatewayKey]
 	if gatewayObj == nil {
 		return false
 	}
@@ -1595,28 +1607,41 @@ func (s *store) matchesSpecificGateway(mr *aiv1alpha1.ModelRoute, gatewayKey str
 		if parentRef.Namespace != nil {
 			namespace = string(*parentRef.Namespace)
 		}
+		if namespace+"/"+string(parentRef.Name) != listener.GatewayKey {
+			continue
+		}
 
-		// Get name from parentRef
-		name := string(parentRef.Name)
-		key := fmt.Sprintf("%s/%s", namespace, name)
-
-		// Check if this parentRef matches the specified gateway
-		if key == gatewayKey {
-			// If sectionName is specified, check if the listener exists in the gateway
-			if parentRef.SectionName != nil {
-				sectionName := string(*parentRef.SectionName)
-				for _, listener := range gatewayObj.Spec.Listeners {
-					if string(listener.Name) == sectionName {
-						return true
-					}
-				}
-			} else {
-				// No sectionName specified, match any listener
+		// Without listener information only a parentRef to the whole Gateway matches.
+		if listener.ListenerName == "" && listener.Port == 0 {
+			if parentRef.SectionName == nil && parentRef.Port == nil {
 				return true
 			}
+			continue
 		}
+		if parentRef.SectionName != nil && string(*parentRef.SectionName) != listener.ListenerName {
+			continue
+		}
+		if parentRef.Port != nil && int(*parentRef.Port) != listener.Port {
+			continue
+		}
+		// Listeners are updated asynchronously, so a request can still carry a
+		// listener that was just removed from the Gateway.
+		if (parentRef.SectionName != nil || parentRef.Port != nil) && !gatewayHasListener(gatewayObj, listener) {
+			continue
+		}
+		return true
 	}
 
+	return false
+}
+
+// gatewayHasListener checks if the Gateway still has the listener the request arrived on.
+func gatewayHasListener(gateway *gatewayv1.Gateway, listener GatewayListener) bool {
+	for _, l := range gateway.Spec.Listeners {
+		if string(l.Name) == listener.ListenerName && int(l.Port) == listener.Port {
+			return true
+		}
+	}
 	return false
 }
 
