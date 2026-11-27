@@ -729,7 +729,13 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	err = r.scheduler.Schedule(ctx, pods)
 	if err != nil {
 		accesslog.SetError(c, "scheduling", fmt.Sprintf("can't schedule to target pod: %v", err))
-		c.AbortWithStatusJSON(http.StatusBadRequest, fmt.Sprintf("can't schedule to target pod: %v", err))
+		// Schedule fails when no pod can take this request right now: every pod
+		// was filtered out (least-request: all saturated; lora-affinity: none has
+		// the model loaded), the PD model server has no decode pods or no valid
+		// prefill-decode pair, or the model server went away mid-request. None of
+		// these is a problem with the request, so answer 503 like the
+		// no-available-pods case above.
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, fmt.Sprintf("can't schedule to target pod: %v", err))
 		return fmt.Errorf("can't schedule to target pod: %v", err)
 	}
 	r.finalizeSessionSticky(c, ctx, stickySpec, sessionKey, stickyStoreKey, stickyBinding, stickyBindingFound, modelServerName.Name)
