@@ -180,7 +180,8 @@ func TestPrefixCacheEviction(t *testing.T) {
 
 func TestPrefixCacheEntriesProvider(t *testing.T) {
 	m := DefaultMetrics
-	m.SetPrefixCacheEntriesProvider(func() float64 { return 42 })
+	unregister := m.RegisterPrefixCacheEntriesProvider(func() float64 { return 42 })
+	defer unregister()
 
 	dm := &dto.Metric{}
 	if err := m.PrefixCacheEntries.Write(dm); err != nil {
@@ -188,6 +189,36 @@ func TestPrefixCacheEntriesProvider(t *testing.T) {
 	}
 	if got := dm.GetGauge().GetValue(); got != 42 {
 		t.Errorf("entries gauge = %v, want 42", got)
+	}
+}
+
+func TestPrefixCacheEntriesProvidersSumAndUnregister(t *testing.T) {
+	m := DefaultMetrics
+	unregisterA := m.RegisterPrefixCacheEntriesProvider(func() float64 { return 10 })
+	unregisterB := m.RegisterPrefixCacheEntriesProvider(func() float64 { return 32 })
+
+	gauge := func() float64 {
+		dm := &dto.Metric{}
+		if err := m.PrefixCacheEntries.Write(dm); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		return dm.GetGauge().GetValue()
+	}
+
+	// Multiple live instances (one per profile chain) are summed.
+	if got := gauge(); got != 42 {
+		t.Errorf("entries gauge = %v, want 42 (10 + 32)", got)
+	}
+
+	// A closed chain's provider stops contributing without disturbing others.
+	unregisterA()
+	if got := gauge(); got != 32 {
+		t.Errorf("entries gauge after unregister = %v, want 32", got)
+	}
+
+	unregisterB()
+	if got := gauge(); got != 0 {
+		t.Errorf("entries gauge with no providers = %v, want 0", got)
 	}
 }
 

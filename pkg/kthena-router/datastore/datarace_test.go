@@ -77,7 +77,7 @@ func TestConcurrentAddOrUpdateModelServerAndDeletePod(t *testing.T) {
 	s := &store{
 		modelServer: sync.Map{},
 		pods:        sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 
 	ms := newTestModelServerWithPDGroup("test-model", "default")
@@ -146,7 +146,7 @@ func TestConcurrentAddOrUpdateModelServerAndGetPrefillPodsForDecodeGroup(t *test
 	s := &store{
 		modelServer: sync.Map{},
 		pods:        sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 
 	ms := newTestModelServerWithPDGroup("test-model", "default")
@@ -232,7 +232,7 @@ func TestConcurrentAddOrUpdateModelServerAndPodsField(t *testing.T) {
 	s := &store{
 		modelServer: sync.Map{},
 		pods:        sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 
 	ms := &aiv1alpha1.ModelServer{
@@ -469,7 +469,7 @@ func TestAddOrUpdateModelServerUpdatesModelServerFieldUnderLock(t *testing.T) {
 	s := &store{
 		modelServer: sync.Map{},
 		pods:        sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 
 	ms := newTestModelServerWithPDGroup("test-model", "default")
@@ -500,7 +500,7 @@ func TestConcurrentFullLifecycle(t *testing.T) {
 	s := &store{
 		modelServer: sync.Map{},
 		pods:        sync.Map{},
-		callbacks:   make(map[string][]CallbackFunc),
+		callbacks:   make(map[string][]callbackEntry),
 	}
 
 	ms := newTestModelServerWithPDGroup("test-model", "default")

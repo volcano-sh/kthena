@@ -54,7 +54,7 @@ func ValidateLeastRequestArgs(pluginArg runtime.RawExtension) error {
 	}
 
 	var leastRequestArgs LeastRequestArgs
-	if err := yaml.Unmarshal(pluginArg.Raw, &leastRequestArgs); err != nil {
+	if err := yaml.UnmarshalStrict(pluginArg.Raw, &leastRequestArgs); err != nil {
 		return fmt.Errorf("unmarshal least-request arguments: %w", err)
 	}
 
@@ -65,9 +65,9 @@ func ValidateLeastRequestArgs(pluginArg runtime.RawExtension) error {
 	return nil
 }
 
-func NewLeastRequest(pluginArg runtime.RawExtension) *LeastRequest {
+func NewLeastRequest(buildCtx BuildContext) *LeastRequest {
 	var leastRequestArgs LeastRequestArgs
-	if pluginArg.Raw == nil || yaml.Unmarshal(pluginArg.Raw, &leastRequestArgs) != nil {
+	if buildCtx.Args.Raw == nil || yaml.Unmarshal(buildCtx.Args.Raw, &leastRequestArgs) != nil {
 		klog.Errorf("Unmarshal LeastRequestArgs error, setting default value")
 		leastRequestArgs = LeastRequestArgs{
 			MaxWaitingRequests: 10,
