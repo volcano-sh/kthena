@@ -40,8 +40,7 @@ spec:
     type: "vLLM"
     modelURI: "hf://Qwen/Qwen3-0.6B"
     cacheURI: "hostpath://tmp/cache"
-    minReplicas: 1
-    maxReplicas: 1
+    replicas: 1
     workers:
       - type: "server"
         image: "vllm/vllm-openai:v0.13.0"
@@ -84,8 +83,7 @@ spec:
     type: "vLLM"
     modelURI: "hf://Qwen/Qwen3-0.6B"
     cacheURI: "hostpath://tmp/cache"
-    minReplicas: 1
-    maxReplicas: 1
+    replicas: 1
     workers:
       - type: "server"
         image: "vllm/vllm-openai:v0.13.0"

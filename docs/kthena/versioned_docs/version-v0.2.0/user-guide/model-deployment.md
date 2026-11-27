@@ -250,7 +250,7 @@ This example demonstrates a disaggregated deployment using NVIDIA GPUs with pref
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: ModelServing
 metadata:
-  name: PD-sample
+  name: pd-sample
   namespace: default
 spec:
   schedulerName: volcano
