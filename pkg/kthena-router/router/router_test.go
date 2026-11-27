@@ -30,6 +30,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2675,6 +2676,161 @@ func TestRouter_HandlerFunc_BackendUnavailable(t *testing.T) {
 	}
 }
 
+func TestRouter_HandlerFunc_UpstreamErrorStatus(t *testing.T) {
+	const upstreamBody = `{"error":{"message":"maximum context length exceeded","type":"BadRequestError"}}`
+	tests := []struct {
+		name             string
+		upstreamStatus   int
+		stream           bool
+		expectedStatus   int
+		expectedResponse string
+		expectedReason   string
+		expectedCalls    int32
+	}{
+		{
+			name:             "400 is forwarded without trying the other pod",
+			upstreamStatus:   http.StatusBadRequest,
+			expectedStatus:   http.StatusBadRequest,
+			expectedResponse: upstreamBody,
+			expectedReason:   "upstream_response",
+			expectedCalls:    1,
+		},
+		{
+			name:             "400 on a streaming request is forwarded as is",
+			upstreamStatus:   http.StatusBadRequest,
+			stream:           true,
+			expectedStatus:   http.StatusBadRequest,
+			expectedResponse: upstreamBody,
+			expectedReason:   "upstream_response",
+			expectedCalls:    1,
+		},
+		{
+			name:             "413 is forwarded without trying the other pod",
+			upstreamStatus:   http.StatusRequestEntityTooLarge,
+			expectedStatus:   http.StatusRequestEntityTooLarge,
+			expectedResponse: upstreamBody,
+			expectedReason:   "upstream_response",
+			expectedCalls:    1,
+		},
+		{
+			name:             "422 is forwarded without trying the other pod",
+			upstreamStatus:   http.StatusUnprocessableEntity,
+			expectedStatus:   http.StatusUnprocessableEntity,
+			expectedResponse: upstreamBody,
+			expectedReason:   "upstream_response",
+			expectedCalls:    1,
+		},
+		{
+			// Another pod may have the model or LoRA adapter loaded.
+			name:             "404 is retried on the other pod",
+			upstreamStatus:   http.StatusNotFound,
+			expectedStatus:   http.StatusServiceUnavailable,
+			expectedResponse: "request to all pods failed",
+			expectedReason:   "proxy",
+			expectedCalls:    2,
+		},
+		{
+			name:             "429 is retried on the other pod",
+			upstreamStatus:   http.StatusTooManyRequests,
+			expectedStatus:   http.StatusServiceUnavailable,
+			expectedResponse: "request to all pods failed",
+			expectedReason:   "proxy",
+			expectedCalls:    2,
+		},
+		{
+			name:             "500 is retried on the other pod",
+			upstreamStatus:   http.StatusInternalServerError,
+			expectedStatus:   http.StatusServiceUnavailable,
+			expectedResponse: "request to all pods failed",
+			expectedReason:   "proxy",
+			expectedCalls:    2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.upstreamStatus)
+				_, _ = w.Write([]byte(upstreamBody))
+			})
+			router, store, backend := setupTestRouter(t, backendHandler)
+			defer backend.Close()
+
+			backendURL, err := url.Parse(backend.URL)
+			require.NoError(t, err)
+			backendPort, err := strconv.Atoi(backendURL.Port())
+			require.NoError(t, err)
+
+			modelServer := &aiv1alpha1.ModelServer{
+				ObjectMeta: v1.ObjectMeta{Name: "ms-upstream-error", Namespace: "default"},
+				Spec: aiv1alpha1.ModelServerSpec{
+					Model:        func(s string) *string { return &s }("base-model"),
+					WorkloadPort: aiv1alpha1.WorkloadPort{Port: int32(backendPort)},
+				},
+			}
+			modelRoute := &aiv1alpha1.ModelRoute{
+				ObjectMeta: v1.ObjectMeta{Name: "mr-upstream-error", Namespace: "default"},
+				Spec: aiv1alpha1.ModelRouteSpec{
+					ModelName: "upstream-error-model",
+					Rules: []*aiv1alpha1.Rule{
+						{TargetModels: []*aiv1alpha1.TargetModel{{ModelServerName: modelServer.Name}}},
+					},
+				},
+			}
+
+			// Two pods behind the same backend, so a retry is visible as a second call.
+			podNames := sets.New[types.NamespacedName]()
+			var pods []*corev1.Pod
+			for _, name := range []string{"pod-upstream-error-a", "pod-upstream-error-b"} {
+				podName := types.NamespacedName{Name: name, Namespace: "default"}
+				podNames.Insert(podName)
+				pods = append(pods, &corev1.Pod{
+					ObjectMeta: v1.ObjectMeta{Name: podName.Name, Namespace: podName.Namespace},
+					Status:     corev1.PodStatus{PodIP: backendURL.Hostname(), Phase: corev1.PodRunning},
+				})
+			}
+			store.AddOrUpdateModelServer(modelServer, podNames)
+			for _, pod := range pods {
+				store.AddOrUpdatePod(pod, []*aiv1alpha1.ModelServer{modelServer})
+			}
+			store.AddOrUpdateModelRoute(modelRoute)
+
+			requestsBefore := requestCounterValue(
+				t, router, "upstream-error-model", "/v1/chat/completions",
+				strconv.Itoa(tt.expectedStatus), tt.expectedReason,
+			)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			requestBody := fmt.Sprintf(`{"model":"upstream-error-model","prompt":"hello","stream":%t}`, tt.stream)
+			c.Request, err = http.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(requestBody))
+			require.NoError(t, err)
+			c.Request.Header.Set("Content-Type", "application/json")
+			accessCtx := accesslog.NewAccessLogContext("upstream-error", http.MethodPost, c.Request.URL.Path, c.Request.Proto, "upstream-error-model")
+			c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+			router.HandlerFunc()(c)
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			assert.Contains(t, w.Body.String(), tt.expectedResponse)
+			assert.Equal(t, tt.expectedCalls, calls.Load(), "upstream calls")
+			// A forwarded rejection must keep its upstream_response label rather
+			// than being relabeled as a router-side proxy failure.
+			require.NotNil(t, accessCtx.Error)
+			assert.Equal(t, tt.expectedReason, accessCtx.Error.Type, "access log error type")
+			if tt.expectedReason == "upstream_response" {
+				assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+			}
+			assert.Equal(t, float64(1), requestCounterValue(
+				t, router, "upstream-error-model", "/v1/chat/completions",
+				strconv.Itoa(tt.expectedStatus), tt.expectedReason,
+			)-requestsBefore)
+		})
+	}
+}
+
 func TestRouter_HandlerFunc_InferencePoolPodDiscovery(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -3571,6 +3727,91 @@ func TestHandleFairnessScheduling(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHandleFairnessScheduling_SessionCompletion checks that only a served request
+// marks its session completed (and so boosts the session's follow-ups): a request
+// the model server rejects did not warm any prefix cache.
+func TestHandleFairnessScheduling_SessionCompletion(t *testing.T) {
+	tests := []struct {
+		name           string
+		upstreamStatus int
+		wantMarked     bool
+	}{
+		{name: "served request marks the session", upstreamStatus: http.StatusOK, wantMarked: true},
+		{name: "forwarded 400 does not mark the session", upstreamStatus: http.StatusBadRequest},
+		{name: "forwarded 413 does not mark the session", upstreamStatus: http.StatusRequestEntityTooLarge},
+		{name: "forwarded 422 does not mark the session", upstreamStatus: http.StatusUnprocessableEntity},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backendHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.upstreamStatus)
+				_, _ = w.Write([]byte(`{"id":"session-test"}`))
+			})
+			router, store, backend := setupFairnessTestRouter(t, backendHandler)
+			defer backend.Close()
+
+			router.queueTimeout = 5 * time.Second
+			recorder := &sessionRecordingStore{Store: store}
+			router.store = recorder
+
+			ctx, cancel := context.WithCancel(context.Background())
+			router.store.Run(ctx)
+			defer cancel()
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request, _ = http.NewRequest(http.MethodPost, "/v1/chat/completions",
+				bytes.NewBufferString(`{"model":"fair-model","prompt":"hello session"}`))
+			c.Request.Header.Set("Content-Type", "application/json")
+			c.Request.Header.Set(sessionRecordingHeader, "session-1")
+
+			modelRequest, err := ParseModelRequest(c)
+			require.NoError(t, err)
+			prompt, err := utils.ParsePrompt(modelRequest)
+			require.NoError(t, err)
+			c.Set(PromptKey, prompt)
+			c.Set(common.UserIdKey, "user-test")
+			c.Set("metricsRecorder", metrics.NewRequestMetricsRecorder(router.metrics, "fair-model", "/v1/chat/completions"))
+
+			require.NoError(t, router.handleFairnessScheduling(c, modelRequest, "req-session", "fair-model"))
+
+			assert.Equal(t, tt.upstreamStatus, w.Code)
+			if tt.wantMarked {
+				assert.Equal(t, []string{"fair-model/session-1"}, recorder.completed())
+			} else {
+				assert.Empty(t, recorder.completed())
+			}
+		})
+	}
+}
+
+const sessionRecordingHeader = "X-Session-ID"
+
+// sessionRecordingStore reports a session header, as a store with session boost
+// enabled does, and records which sessions were marked completed.
+type sessionRecordingStore struct {
+	datastore.Store
+	mu     sync.Mutex
+	marked []string
+}
+
+func (s *sessionRecordingStore) GetSessionIDHeader() string { return sessionRecordingHeader }
+
+func (s *sessionRecordingStore) MarkSessionRequestCompleted(modelName, sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.marked = append(s.marked, modelName+"/"+sessionID)
+	s.Store.MarkSessionRequestCompleted(modelName, sessionID)
+}
+
+func (s *sessionRecordingStore) completed() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.marked...)
 }
 
 // --- Test helper: store wrapper that accepts Enqueue but never notifies ---

@@ -777,6 +777,11 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	req := c.Request
 	upstreamTimeout := upstreamTimeoutFor(modelServer)
 	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port, upstreamTimeout); err != nil {
+		if errors.Is(err, errUpstreamRejectedRequest) {
+			// The model server's response is already forwarded and labeled
+			// upstream_response; don't relabel it as a router failure.
+			return err
+		}
 		klog.Errorf("request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
 		accesslog.SetError(c, "proxy", "request processing failed")
 		if !c.Writer.Written() {
@@ -1064,6 +1069,13 @@ func (r *Router) proxy(
 		// Request is complete (success or failure) — decrement on-flight counter.
 		r.store.DecrPodOnFlightRequests(podName)
 
+		if errors.Is(err, errUpstreamRejectedRequest) {
+			// The pod's error response has been forwarded to the client. Any
+			// other pod would reject the request the same way, so stop here.
+			// Skip the prefix-cache post-hooks and return the error so callers
+			// don't count the request as served (no session boost either).
+			return err
+		}
 		if err != nil {
 			klog.Errorf(" pod request error: %v", err)
 			if c.Writer.Written() {
@@ -1325,6 +1337,24 @@ func (r *Router) AccessLog() gin.HandlerFunc {
 	return accesslog.AccessLogMiddleware(r.accessLogger)
 }
 
+// errUpstreamRejectedRequest is returned by proxyRequest after it has forwarded
+// a pod's response that rejects the request itself (see upstreamRejectedRequest).
+// It travels up to doLoadbalance so the request isn't counted as successful.
+var errUpstreamRejectedRequest = errors.New("model server rejected the request")
+
+// upstreamRejectedRequest reports whether an upstream status means the request
+// itself is invalid, for example a prompt over the context length or invalid
+// sampling parameters, so every pod would answer the same way. Other statuses
+// stay retryable on the next pod: 404 can mean only this pod lacks the model or
+// LoRA adapter, 408 and 429 are about this pod's load, and 5xx are pod failures.
+func upstreamRejectedRequest(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
 // proxyRequest proxies the request to the model server pods, returns response to downstream.
 func proxyRequest(
 	c *gin.Context,
@@ -1340,6 +1370,20 @@ func proxyRequest(
 	if resp != nil {
 		defer resp.Body.Close()
 		accesslog.SetUpstreamInfo(c, resp.StatusCode, 0)
+	}
+	if err != nil && resp != nil && upstreamRejectedRequest(resp.StatusCode) {
+		accesslog.SetError(c, "upstream_response", fmt.Sprintf("model server returned HTTP %d", resp.StatusCode))
+		accesslog.SetErrorOrigin(c, "upstream")
+		c.Set("finishReason", "upstream_response")
+		// Error bodies are plain JSON even for streaming requests, so copy
+		// them as is instead of running them through the usage parsers.
+		copyResponseHeaders(c, resp.Header, false)
+		c.Status(resp.StatusCode)
+		c.Writer.WriteHeaderNow()
+		if _, copyErr := io.Copy(c.Writer, resp.Body); copyErr != nil {
+			klog.V(4).Infof("failed to forward upstream error body: %v", copyErr)
+		}
+		return errUpstreamRejectedRequest
 	}
 	if err != nil {
 		return fmt.Errorf("decode request error: %w", err)
