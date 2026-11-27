@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -720,6 +721,45 @@ func TestFormatAutoscalerMapKey_TargetNamespaceDifferentiation(t *testing.T) {
 	if keyExplicit != keyImplicit {
 		t.Fatalf("expected same key when explicit target namespace matches binding namespace, got %q vs %q", keyExplicit, keyImplicit)
 	}
+}
+
+// TestRunGoroutineStopsOnContextCancel verifies that the reconcile goroutine
+// spawned by Run terminates when the context is cancelled. Previously the goroutine
+// was started with a nil stop channel (wait.Until(..., nil)) which caused a leak.
+func TestRunGoroutineStopsOnContextCancel(t *testing.T) {
+	kubeClient := k8sfake.NewSimpleClientset()
+	client := clientfake.NewSimpleClientset()
+	// Use a 1-second period so reconcile rarely fires during the test.
+	ac := NewAutoscaleController(kubeClient, client, 1)
+
+	// Measure goroutines before Run starts to establish a baseline.
+	baseline := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		ac.Run(ctx)
+	}()
+
+	// Give informers time to start and cache-sync (fake client syncs instantly).
+	time.Sleep(100 * time.Millisecond)
+
+	cancel()
+	<-runDone // Run itself exits on ctx.Done()
+
+	// After Run returns all goroutines it spawned (informers + wait.Until) should stop.
+	// Allow a small slack for test infrastructure goroutines.
+	deadline := time.Now().Add(2 * time.Second)
+	var final int
+	for time.Now().Before(deadline) {
+		final = runtime.NumGoroutine()
+		if final <= baseline+2 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("goroutine leak after context cancel: baseline=%d, final=%d", baseline, final)
 }
 
 func TestFormatAutoscalerMapKey_OptimizerIncludesNamespace(t *testing.T) {
