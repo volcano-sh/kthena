@@ -120,7 +120,7 @@ type ModelServingController struct {
 }
 
 func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
-	selector, err := labels.NewRequirement(workloadv1alpha1.GroupNameLabelKey, selection.Exists, nil)
+	selector, err := labels.NewRequirement(workloadv1alpha1.ModelServingNameLabelKey, selection.Exists, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create label selector, err: %v", err)
 	}
@@ -229,6 +229,9 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 			if metaObj == nil {
 				return false
 			}
+			if _, ok := metaObj.GetLabels()[workloadv1alpha1.GroupNameLabelKey]; !ok {
+				return false
+			}
 			return isOwnedByModelServing(metaObj)
 		},
 		Handler: cache.ResourceEventHandlerFuncs{
@@ -248,6 +251,9 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		FilterFunc: func(obj interface{}) bool {
 			metaObj := getMetaObject(obj)
 			if metaObj == nil {
+				return false
+			}
+			if _, ok := metaObj.GetLabels()[workloadv1alpha1.GroupNameLabelKey]; !ok {
 				return false
 			}
 			return isOwnedByModelServing(metaObj)
