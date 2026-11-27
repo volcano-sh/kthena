@@ -773,10 +773,17 @@ func (lm *ListenerManager) checkAndClosePortIfEmpty(port int32) {
 	}
 }
 
-// AccessLogMiddleware logs every request that reaches it. Management endpoints
-// are answered before it runs, so it must not exempt any other path.
 func AccessLogMiddleware(gwRouter *router.Router) gin.HandlerFunc {
-	return gwRouter.AccessLog()
+	return func(c *gin.Context) {
+		// Access log for "/v1/" only
+		if !strings.HasPrefix(c.Request.URL.Path, "/v1/") {
+			c.Next()
+			return
+		}
+
+		// Calling Middleware
+		gwRouter.AccessLog()(c)
+	}
 }
 
 // AuthMiddleware authenticates every request that reaches it. In Gateway API
