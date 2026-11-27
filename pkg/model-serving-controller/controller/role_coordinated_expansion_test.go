@@ -384,3 +384,51 @@ func TestCoordinatedPodGroupRefreshUsesDesiredPolicyWithHistoricalLayout(t *test
 	require.EqualValues(t, 3, actual.Spec.MinMember)
 	require.Equal(t, original, ms, "scheduling projection must not modify target replicas, worker layout or policy")
 }
+
+func TestCoordinatedPodGroupMatchesRecreatedProtectedSlotOfEmptyRole(t *testing.T) {
+	withWorkers := func(ms *api.ModelServing, workers int32) {
+		for i := range ms.Spec.Template.Roles {
+			ms.Spec.Template.Roles[i].WorkerReplicas = workers
+			ms.Spec.Template.Roles[i].WorkerTemplate = ms.Spec.Template.Roles[i].EntryTemplate.DeepCopy()
+		}
+	}
+	c, ms, pg := coordinatedExpansionFixture(t, []string{"prefill", "decode"}, []api.RoleRolloutDependency{{Role: "prefill", DependsOn: []string{"decode"}}}, 2, 2,
+		func(old *api.ModelServing) { withWorkers(old, 1) })
+	withWorkers(ms, 3)
+	ms.Spec.Template.Roles[1].Partition = ptr.To(intstr.FromInt(1))
+	revision := utils.ModelServingRevision(ms)
+	ms.Status.UpdateRevision = revision
+	require.NoError(t, c.persistCoordinatedRoleRevision(context.Background(), ms, revision))
+	for _, obj := range c.podsInformer.GetIndexer().List() {
+		if pod := obj.(*corev1.Pod); pod.Labels[api.RoleLabelKey] == "decode" {
+			require.NoError(t, c.podsInformer.GetIndexer().Delete(pod))
+		}
+	}
+	for ordinal := 0; ordinal < 2; ordinal++ {
+		c.store.DeleteRole(utils.GetNamespaceName(ms), pg.Name, "decode", utils.GenerateRoleID("decode", ordinal))
+	}
+	crd := &apiextv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "podgroups.scheduling.volcano.sh"}, Spec: apiextv1.CustomResourceDefinitionSpec{Versions: []apiextv1.CustomResourceDefinitionVersion{{Schema: &apiextv1.CustomResourceValidation{OpenAPIV3Schema: &apiextv1.JSONSchemaProps{Properties: map[string]apiextv1.JSONSchemaProps{"spec": {Properties: map[string]apiextv1.JSONSchemaProps{"subGroupPolicy": {}}}}}}}}}}
+	client := volcanofake.NewSimpleClientset(pg.DeepCopy())
+	manager := podgroupmanager.NewManager(c.kubeClientSet, client, apiextfake.NewSimpleClientset(crd), nil)
+	require.NoError(t, manager.GetPodGroupInformer().GetIndexer().Add(pg))
+	c.podGroupManager = manager
+	ctx := c.withRevisionHistory(context.Background(), ms)
+
+	require.NoError(t, c.syncServingGroupReplicas(ctx, ms, revision))
+	policy, err := c.resolveRoleRolloutPolicy(ctx, ms, revision)
+	require.NoError(t, err)
+	require.NoError(t, c.syncRoleReplicas(ctx, ms, revision, policy))
+
+	actual, err := client.SchedulingV1beta1().PodGroups(ms.Namespace).Get(context.Background(), pg.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	var subGroupSize int32
+	for _, sub := range actual.Spec.SubGroupPolicy {
+		if sub.Name == "decode" {
+			subGroupSize = *sub.SubGroupSize
+		}
+	}
+	pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: api.RoleIDKey + "=decode-0"})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 2, "the protected slot is recreated from the current revision with one worker")
+	require.EqualValues(t, len(pods.Items), subGroupSize, "the subgroup size must not exceed the Pods of the recreated protected slot")
+}
