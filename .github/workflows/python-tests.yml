@@ -4,12 +4,14 @@ on:
   pull_request:
     branches:
       - main
+      - release-*
     paths:
       - "python/**"
       - "**.py"
   push:
     branches:
       - main
+      - release-*
     paths:
       - "python/**"
 
