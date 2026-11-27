@@ -31,6 +31,10 @@ type Context struct {
 	Model  string
 	Prompt *common.ChatMessage
 
+	// IsLora indicates that Model matched a ModelRoute's LoRA adapter rather
+	// than its base model name, which may be an alias for the upstream model.
+	IsLora bool
+
 	// SessionID is the session identifier extracted from the HTTP header configured
 	// via the SESSION_BOOST_HEADER environment variable.
 	SessionID string
