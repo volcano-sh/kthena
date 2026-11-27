@@ -20,18 +20,26 @@ package v1alpha1
 
 import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	intstr "k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // BootstrapAccelerateStrategyApplyConfiguration represents a declarative configuration of the BootstrapAccelerateStrategy type for use
 // with apply.
 //
-// BootstrapAccelerateStrategy configures source-aware creation of role replicas.
+// BootstrapAccelerateStrategy configures source-aware creation of ServingGroups.
 type BootstrapAccelerateStrategyApplyConfiguration struct {
 	// Provider is the weight transfer system used by the inference engines.
 	Provider *workloadv1alpha1.BootstrapAccelerateStrategyProvider `json:"provider,omitempty"`
-	// Roles limits acceleration to the listed roles and configures each of them.
-	// At least one role must be specified.
-	Roles []BootstrapRoleApplyConfiguration `json:"roles,omitempty"`
+	// InitialSeedReplicas is the number of seed ServingGroups that may be created
+	// while any in-scope role pool of the group has no ready source. It is a
+	// positive integer or a percentage from 1% to 100% of spec.replicas, rounded
+	// up (10% of 3 is 1). A desired count of zero creates nothing.
+	InitialSeedReplicas *intstr.IntOrString `json:"initialSeedReplicas,omitempty"`
+	// Roles optionally restricts weight-transfer source tracking and provider
+	// environment injection to the named roles in spec.template.roles (for example,
+	// excluding a non-engine router or tokenizer role). When empty, all roles in
+	// spec.template.roles are in scope. Seed admission is always whole-ServingGroup.
+	Roles []string `json:"roles,omitempty"`
 	// ModelExpress configures environment injection for inference engines.
 	// If unset, users configure the engine environment themselves.
 	ModelExpress *ModelExpressConfigApplyConfiguration `json:"modelExpress,omitempty"`
@@ -51,15 +59,20 @@ func (b *BootstrapAccelerateStrategyApplyConfiguration) WithProvider(value workl
 	return b
 }
 
+// WithInitialSeedReplicas sets the InitialSeedReplicas field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the InitialSeedReplicas field is set to the value of the last call.
+func (b *BootstrapAccelerateStrategyApplyConfiguration) WithInitialSeedReplicas(value intstr.IntOrString) *BootstrapAccelerateStrategyApplyConfiguration {
+	b.InitialSeedReplicas = &value
+	return b
+}
+
 // WithRoles adds the given value to the Roles field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the Roles field.
-func (b *BootstrapAccelerateStrategyApplyConfiguration) WithRoles(values ...*BootstrapRoleApplyConfiguration) *BootstrapAccelerateStrategyApplyConfiguration {
+func (b *BootstrapAccelerateStrategyApplyConfiguration) WithRoles(values ...string) *BootstrapAccelerateStrategyApplyConfiguration {
 	for i := range values {
-		if values[i] == nil {
-			panic("nil value passed to WithRoles")
-		}
-		b.Roles = append(b.Roles, *values[i])
+		b.Roles = append(b.Roles, values[i])
 	}
 	return b
 }

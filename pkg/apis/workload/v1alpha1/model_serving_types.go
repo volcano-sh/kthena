@@ -52,7 +52,7 @@ type ModelServingSpec struct {
 	// +optional
 	Plugins []PluginSpec `json:"plugins,omitempty"`
 
-	// BootstrapAccelerateStrategy creates role replicas in source-aware batches
+	// BootstrapAccelerateStrategy creates ServingGroups in source-aware batches
 	// for peer-to-peer model weight loading. If unset, creation is unchanged.
 	// +optional
 	BootstrapAccelerateStrategy *BootstrapAccelerateStrategy `json:"bootstrapAccelerateStrategy,omitempty"`
@@ -89,42 +89,35 @@ const (
 	BootstrapAccelerateStrategyProviderModelExpress BootstrapAccelerateStrategyProvider = "ModelExpress"
 )
 
-// BootstrapAccelerateStrategy configures source-aware creation of role replicas.
+// BootstrapAccelerateStrategy configures source-aware creation of ServingGroups.
 type BootstrapAccelerateStrategy struct {
 	// Provider is the weight transfer system used by the inference engines.
 	// +kubebuilder:default=ModelExpress
 	// +optional
 	Provider BootstrapAccelerateStrategyProvider `json:"provider,omitempty"`
 
-	// Roles limits acceleration to the listed roles and configures each of them.
-	// At least one role must be specified.
-	// +kubebuilder:validation:MinItems=1
-	// +listType=map
-	// +listMapKey=name
-	// +required
-	Roles []BootstrapRole `json:"roles"`
+	// InitialSeedReplicas is the number of seed ServingGroups that may be created
+	// while any in-scope role pool of the group has no ready source. It is a
+	// positive integer or a percentage from 1% to 100% of spec.replicas, rounded
+	// up (10% of 3 is 1). A desired count of zero creates nothing.
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:default=1
+	// +optional
+	InitialSeedReplicas *intstr.IntOrString `json:"initialSeedReplicas,omitempty"`
+
+	// Roles optionally restricts weight-transfer source tracking and provider
+	// environment injection to the named roles in spec.template.roles (for example,
+	// excluding a non-engine router or tokenizer role). When empty, all roles in
+	// spec.template.roles are in scope. Seed admission is always whole-ServingGroup.
+	// +kubebuilder:validation:items:MinLength=1
+	// +listType=set
+	// +optional
+	Roles []string `json:"roles,omitempty"`
 
 	// ModelExpress configures environment injection for inference engines.
 	// If unset, users configure the engine environment themselves.
 	// +optional
 	ModelExpress *ModelExpressConfig `json:"modelExpress,omitempty"`
-}
-
-// BootstrapRole configures bootstrap acceleration for one role.
-type BootstrapRole struct {
-	// Name is the name of a role in spec.template.roles.
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-
-	// InitialSeedReplicas is the number of this role's replicas that may be
-	// created while no ready source exists for it. It is a positive integer or a
-	// percentage from 1% to 100% of spec.replicas * role.replicas, rounded up
-	// (10% of 3 is 1). The effective budget is at least the role's gang minimum
-	// in one ServingGroup. A desired count of zero creates nothing.
-	// +kubebuilder:validation:XIntOrString
-	// +kubebuilder:default=1
-	// +optional
-	InitialSeedReplicas *intstr.IntOrString `json:"initialSeedReplicas,omitempty"`
 }
 
 // ModelExpressConfig configures the ModelExpress inference-engine containers.

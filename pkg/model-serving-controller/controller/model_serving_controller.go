@@ -55,6 +55,7 @@ import (
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/bootstrap"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
@@ -117,9 +118,23 @@ type ModelServingController struct {
 	recorder        record.EventRecorder
 	podDeletions    sync.Map // key: auxiliaryCleanupKey; value: *podDeletionTargets
 	roleCleanups    sync.Map // key: auxiliaryCleanupKey; value: *plugins.RoleCleanup
+	// modelExpressServerAddress is injected as MX_SERVER_ADDRESS into engine
+	// containers of ModelServings that enable bootstrapAccelerateStrategy.
+	modelExpressServerAddress string
 }
 
-func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
+// Option customizes a ModelServingController.
+type Option func(*ModelServingController)
+
+// WithModelExpressServerAddress sets the ModelExpress server host:port that
+// bootstrap-accelerated engine containers receive as MX_SERVER_ADDRESS.
+func WithModelExpressServerAddress(address string) Option {
+	return func(c *ModelServingController) {
+		c.modelExpressServerAddress = address
+	}
+}
+
+func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface, options ...Option) (*ModelServingController, error) {
 	selector, err := labels.NewRequirement(workloadv1alpha1.GroupNameLabelKey, selection.Exists, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create label selector, err: %v", err)
@@ -186,6 +201,9 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		store:           store,
 		pluginsRegistry: plugins.DefaultRegistry,
 		recorder:        recorder,
+	}
+	for _, option := range options {
+		option(c)
 	}
 
 	registerPodGroupHandler := func(pgInformer cache.SharedIndexInformer) {
@@ -720,20 +738,28 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	}
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 	// Run ModelServing-level sync plugins before ServingGroups and Roles are synced.
 	if err := c.runModelServingSyncPlugins(ctx, ms); err != nil {
 		return err
 	}
 	// Optional bootstrap acceleration gates every replica creation below on the
 	// Ready sources observed now; admitted replicas are tracked within this sync.
+=======
+	// Optional bootstrap acceleration gates whole ServingGroup creation on Ready
+	// sources observed now; admitted groups are tracked within this sync.
+>>>>>>> 6e2ddfb9 (implement the new bootstrap accelerate proposal)
 	admitter, err := c.newBootstrapAdmitter(ctx, ms)
 	if err != nil {
 		return fmt.Errorf("failed to build bootstrap admitter: %v", err)
 	}
 	ctx = bootstrap.WithAdmitter(ctx, admitter)
 
+<<<<<<< HEAD
 =======
 >>>>>>> a5a7c380 (Revert "Implement bootstrap accelerate with mx")
+=======
+>>>>>>> 6e2ddfb9 (implement the new bootstrap accelerate proposal)
 	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
 	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)
@@ -750,6 +776,7 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	if roleSyncErr != nil && !onlyRevisionErrors(roleSyncErr) {
 		return fmt.Errorf("failed to sync role replicas: %w", roleSyncErr)
 	}
+	c.emitBootstrapEvents(ms, admitter)
 
 	// 3. Handle the rolling update process, deleting outdated ServingGroups/Roles to trigger updates.
 	if err := c.manageRollingUpdateWithPolicy(ctx, ms, revision, rolloutPolicy); err != nil {
@@ -1039,6 +1066,10 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 			return false
 		}
 		groupName := utils.GenerateServingGroupName(ms.Name, ordinal)
+		if !bootstrap.AdmitterFrom(ctx).AdmitGroup(workload) {
+			klog.V(4).Infof("scaleUpServingGroups: deferring ServingGroup %s until a p2p source is ready", groupName)
+			return true
+		}
 		if err := c.createOrUpdatePodGroupByServingGroup(ctx, workload, groupName); err != nil {
 			scaleUpErr = err
 			return false
@@ -1122,6 +1153,10 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 					workload, historyErr := c.revisionHistory(ctx, ms).workload(ctx, recreatedRevision)
 					if historyErr != nil {
 						errs = append(errs, historyErr)
+						continue
+					}
+					if !bootstrap.AdmitterFrom(ctx).AdmitGroup(workload) {
+						klog.V(4).Infof("syncRoleReplicas: deferring ServingGroup %s until a p2p source is ready", group.Name)
 						continue
 					}
 					// The whole unit may select a different worker layout. Align
@@ -3124,13 +3159,25 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 }
 
 func (c *ModelServingController) buildPluginChain(ms *workloadv1alpha1.ModelServing) (*plugins.Chain, error) {
-	if ms == nil || len(ms.Spec.Plugins) == 0 {
+	if ms == nil {
 		return nil, nil
 	}
-	if c.pluginsRegistry == nil {
-		return nil, fmt.Errorf("plugin registry is not initialized")
+	var chain *plugins.Chain
+	if len(ms.Spec.Plugins) > 0 {
+		if c.pluginsRegistry == nil {
+			return nil, fmt.Errorf("plugin registry is not initialized")
+		}
+		var err error
+		chain, err = plugins.NewChain(c.pluginsRegistry, ms.Spec.Plugins)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return plugins.NewChain(c.pluginsRegistry, ms.Spec.Plugins)
+	// The managed ModelExpress plugin runs last so it observes user plugin output.
+	if mxPlugin := plugins.NewModelExpressPlugin(ms, c.modelExpressServerAddress); mxPlugin != nil {
+		chain = chain.WithManagedPlugin(mxPlugin, plugins.ModelExpressPluginScope(ms))
+	}
+	return chain, nil
 }
 
 func (c *ModelServingController) runModelServingSyncPlugins(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
