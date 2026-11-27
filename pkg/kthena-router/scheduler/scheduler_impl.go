@@ -185,34 +185,46 @@ func (s *SchedulerImpl) Schedule(ctx *framework.Context, pods []*datastore.PodIn
 		scores := s.RunScorePlugins(decodePods, ctx)
 		topNDecodePods := TopNPodInfos(scores, topN)
 
+		// Score each PD group's prefill set once, then give the group's k-th
+		// decode ranked[k%len(ranked)] so retries still spread across prefills.
+		rankedByGroup := make(map[string][]*datastore.PodInfo)
+		pairsByGroup := make(map[string]int)
+
 		for _, decodePod := range topNDecodePods {
 			decodePodName := decodePod.GetPodNamespacedName()
 			if decodePodName.Name == "" {
 				continue
 			}
-			// Get prefill pods for the same PD group as the decode pod (O(1) lookup)
-			selectedPods, err := s.store.GetPrefillPodsForDecodeGroup(ctx.ModelServerName, decodePodName)
+			// Identity and candidates share one snapshot, so a Pod changing
+			// group cannot borrow another group's prefills.
+			groupKey, selectedPods, err := s.store.GetPrefillPodsAndGroupForDecode(ctx.ModelServerName, decodePodName)
 			if err != nil || len(selectedPods) == 0 {
 				klog.V(4).InfoS("prefill pods for decode group not found", "decode instance", decodePodName, "error", err)
 				continue
 			}
 
-			selectedPods, err = s.RunFilterPlugins(selectedPods, ctx)
-			if err != nil {
-				klog.V(4).InfoS("prefill pods were filtered out", "decode instance", decodePodName, "error", err)
-				continue
+			ranked, cached := rankedByGroup[groupKey]
+			if !cached {
+				filtered, err := s.RunFilterPlugins(selectedPods, ctx)
+				if err != nil {
+					klog.V(4).InfoS("prefill pods were filtered out", "decode instance", decodePodName, "error", err)
+					continue
+				}
+				klog.V(4).Info("Running score plugins for prefill pod")
+				scores := s.RunScorePlugins(filtered, ctx)
+				// At most topN decodes can consume this list.
+				ranked = TopNPodInfos(scores, topN)
+				if len(ranked) == 0 {
+					klog.V(4).InfoS("no valid prefill pods after scoring, skipping", "decode instance", decodePodName)
+					continue
+				}
+				rankedByGroup[groupKey] = ranked
 			}
 
-			klog.V(4).Info("Running score plugins for prefill pod")
-			scores = s.RunScorePlugins(selectedPods, ctx)
-			bestPrefillPod := TopNPodInfos(scores, 1)
-			if len(bestPrefillPod) == 0 {
-				klog.V(4).InfoS("no valid prefill pods after scoring, skipping",
-					"decode instance", decodePodName)
-				continue
-			}
+			k := pairsByGroup[groupKey]
+			pairsByGroup[groupKey] = k + 1
 			decodeCandidates = append(decodeCandidates, decodePod)
-			prefillCandidates = append(prefillCandidates, bestPrefillPod[0])
+			prefillCandidates = append(prefillCandidates, ranked[k%len(ranked)])
 		}
 		ctx.DecodePods = decodeCandidates
 		ctx.PrefillPods = prefillCandidates

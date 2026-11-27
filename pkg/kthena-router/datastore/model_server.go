@@ -178,26 +178,27 @@ func (m *modelServer) getAllPrefillPods() []types.NamespacedName {
 
 // getPrefillPodsForDecodeGroup returns prefill pods that match the same PD group as a decode pod
 func (m *modelServer) getPrefillPodsForDecodeGroup(pod *PodInfo) []types.NamespacedName {
+	_, prefillPods := m.getPrefillPodsAndGroupForDecode(pod)
+	return prefillPods
+}
+
+// getPrefillPodsAndGroupForDecode returns the decode's PD group and its prefill
+// pods from one snapshot, so identity and candidates cannot disagree.
+func (m *modelServer) getPrefillPodsAndGroupForDecode(pod *PodInfo) (string, []types.NamespacedName) {
 	m.mutex.RLock()
 	defer m.mutex.RUnlock()
 
-	// Check if this modelServer has PDGroup configuration
 	if m.modelServer.Spec.WorkloadSelector == nil || m.modelServer.Spec.WorkloadSelector.PDGroup == nil {
-		return nil
+		return "", nil
 	}
-
-	// Use the same classification snapshot as pdGroups; PodInfo labels may lag behind it.
 	pdGroupValue, ok := m.decodePodGroups[pod.GetPodNamespacedName()]
 	if !ok {
-		return nil
+		return "", nil
 	}
-
-	// Return prefill pods for the same PD group value
 	if pdGroupPods, exists := m.pdGroups[pdGroupValue]; exists {
-		return pdGroupPods.GetPrefillPods()
+		return pdGroupValue, pdGroupPods.GetPrefillPods()
 	}
-
-	return nil
+	return pdGroupValue, nil
 }
 
 // matchesLabels checks if pod labels match the required labels
