@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"testing"
 	"time"
 
@@ -310,6 +311,10 @@ func (m *MockStore) GetAllHTTPRoutes() []*gatewayv1.HTTPRoute {
 		return nil
 	}
 	return args.Get(0).([]*gatewayv1.HTTPRoute)
+}
+
+func (m *MockStore) CompileHTTPRouteRegex(pattern string) (*regexp.Regexp, error) {
+	return regexp.Compile(pattern)
 }
 
 func (m *MockStore) GetAllInferencePools() []*inferencev1.InferencePool {
