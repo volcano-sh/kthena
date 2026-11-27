@@ -1002,9 +1002,13 @@ func (c *ModelServingController) scaleDownOnRevisionError(ctx context.Context, m
 }
 
 // scaleUpServingGroups fills missing ordinals in [0, expectedCount).
-// Missing ordinals below partition use CurrentRevision; the rest use newRevision.
+// Ordinals below partition, or every ordinal while a guarded Role rollout is unfinished, use CurrentRevision; the rest use newRevision.
 func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int, newRevision string) error {
 	partition, _, err := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
+	if err != nil {
+		return err
+	}
+	joinRoleRollout, err := c.newServingGroupJoinsRoleRollout(ms, newRevision)
 	if err != nil {
 		return err
 	}
@@ -1018,7 +1022,7 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 	var scaleUpErr error
 	forEachMissingOrdinal(expectedCount, existingOrdinals, max(0, expectedCount-len(servingGroupList)), func(ordinal int) bool {
 		revision := newRevision
-		if ordinal < partition && ms.Status.CurrentRevision != "" {
+		if (ordinal < partition || joinRoleRollout) && ms.Status.CurrentRevision != "" {
 			revision = ms.Status.CurrentRevision
 		}
 		// Persistence happens before reconciliation. Both desired and protected
@@ -3014,6 +3018,26 @@ func rolePartition(ms *workloadv1alpha1.ModelServing, role workloadv1alpha1.Role
 		return nil
 	}
 	return role.Partition
+}
+
+// newServingGroupJoinsRoleRollout is true when a new ServingGroup must start from CurrentRevision so the unfinished Role rollout applies its partitions and dependency gates to it.
+func (c *ModelServingController) newServingGroupJoinsRoleRollout(ms *workloadv1alpha1.ModelServing, newRevision string) (bool, error) {
+	if servingGroupRollout(ms) || ms.Status.CurrentRevision == "" || ms.Status.CurrentRevision == newRevision {
+		return false, nil
+	}
+	if roleCoordination(ms) != nil {
+		return true, nil
+	}
+	for _, role := range ms.Spec.Template.Roles {
+		partition, _, err := c.getPartition(rolePartition(ms, role), roleReplicas(role))
+		if err != nil {
+			return false, err
+		}
+		if partition > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func modelServingReplicas(ms *workloadv1alpha1.ModelServing) int {
