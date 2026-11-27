@@ -496,3 +496,98 @@ func sameUnready(count int32, names ...string) map[string]int32 {
 	}
 	return out
 }
+
+func TestGetRecommendedInstancesWithReplicaCount(t *testing.T) {
+	entryPods := func(count int, value float64) []Metrics {
+		return slices.Repeat([]Metrics{{"queue_depth": value}}, count)
+	}
+	replicasOf := func(ready, all float64) map[string]ReplicaCount {
+		return map[string]ReplicaCount{"queue_depth": {Ready: ready, All: all}}
+	}
+
+	testcases := []struct {
+		name     string
+		current  int32
+		pods     []Metrics
+		unready  int32
+		replicas map[string]ReplicaCount
+		expected int32
+	}{
+		{name: "scale up: 1.5 x 2 replicas", current: 2, pods: entryPods(4, 15), replicas: replicasOf(2, 2), expected: 3},
+		{name: "scale down: 0.5 x 4 replicas", current: 4, pods: entryPods(8, 5), replicas: replicasOf(4, 4), expected: 2},
+		{name: "fractional replicas: 1.5 x 1.5 replicas", current: 2, pods: entryPods(3, 15), replicas: replicasOf(1.5, 1.5), expected: 3},
+		{
+			// 1.5 x 2 replicas = 3 is the load measured on the pods that exist, so it can be
+			// below the current count when some replicas have no pods yet.
+			name: "first path can go below the current count", current: 4, pods: entryPods(2, 15), replicas: replicasOf(2, 2), expected: 3,
+		},
+		{
+			// A missing pod counts as zero load on a scale up: 45 / 4 pods / 10 = 1.125.
+			name: "pod missing its metric on scale up: 1.125 x 2 replicas", current: 2, pods: append(entryPods(3, 15), Metrics{}), replicas: replicasOf(2, 2), expected: 3,
+		},
+		{
+			// A missing pod counts as at target on a scale down: (15 + 10) / 4 pods / 10 = 0.625.
+			name: "pod missing its metric on scale down: 0.625 x 2 replicas", current: 4, pods: append(entryPods(3, 5), Metrics{}), replicas: replicasOf(2, 2), expected: 2,
+		},
+		{name: "missing pods bring the ratio within tolerance", current: 2, pods: append(entryPods(3, 14), Metrics{}), replicas: replicasOf(2, 2), expected: 2},
+		{name: "missing pods reverse the direction", current: 2, pods: append(entryPods(2, 12), Metrics{}, Metrics{}), replicas: replicasOf(2, 2), expected: 2},
+		{
+			// 120 / 6 pods / 10 = 2, and scaling up counts the replicas of unready pods too.
+			name: "unready pods on scale up use All: 2 x 3 replicas", current: 3, pods: entryPods(4, 30), unready: 2, replicas: replicasOf(2, 3), expected: 6,
+		},
+		{
+			// Unready pods are left out of a scale down, so their replicas are too.
+			name: "unready pods on scale down use Ready: 0.5 x 3 replicas", current: 4, pods: entryPods(6, 5), unready: 2, replicas: replicasOf(3, 4), expected: 2,
+		},
+		{
+			// 25 / 5 pods / 10 = 0.5 is a scale down, so the unready pods are left out, and the
+			// missing pod counts as at target: (25 + 10) / 6 pods / 10 = 0.583.
+			name: "missing and unready pods on scale down use Ready: 0.583 x 3 replicas", current: 4, pods: append(entryPods(5, 5), Metrics{}), unready: 2, replicas: replicasOf(3, 4), expected: 2,
+		},
+		{
+			// 120 / 4 pods / 10 = 3, and 3 x 0.5 replicas = 2 would be below the current 3.
+			name: "second path never scales down under load", current: 3, pods: append(entryPods(3, 40), Metrics{}), replicas: replicasOf(0.5, 0.5), expected: 3,
+		},
+		{name: "no entry counts each pod as one replica", current: 2, pods: entryPods(4, 15), expected: 6},
+		{name: "another metric's entry doesn't apply", current: 2, pods: entryPods(4, 15), replicas: map[string]ReplicaCount{"other": {Ready: 2, All: 2}}, expected: 6},
+		{name: "a zero entry counts each pod as one replica", current: 2, pods: entryPods(4, 15), replicas: replicasOf(0, 0), expected: 6},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			alg := RecommendedInstancesAlgorithm{
+				MinInstances:                  1,
+				MaxInstances:                  100,
+				CurrentInstancesCount:         tc.current,
+				Tolerance:                     0.1,
+				MetricTargets:                 Metrics{"queue_depth": 10},
+				UnreadyInstancesCountByMetric: sameUnready(tc.unready, "queue_depth"),
+				ReadyInstancesMetrics:         samePods(tc.pods, "queue_depth"),
+				ExternalMetrics:               Metrics{},
+				ReplicasByMetric:              tc.replicas,
+			}
+
+			recommended, skip := alg.GetRecommendedInstances()
+
+			assert.False(t, skip)
+			assert.Equal(t, tc.expected, recommended)
+		})
+	}
+}
+
+func TestExternalMetricIgnoresReplicaCount(t *testing.T) {
+	alg := RecommendedInstancesAlgorithm{
+		MinInstances:          1,
+		MaxInstances:          100,
+		CurrentInstancesCount: 2,
+		Tolerance:             0.1,
+		MetricTargets:         Metrics{"queue_depth": 10},
+		ExternalMetrics:       Metrics{"queue_depth": 30},
+		ReplicasByMetric:      map[string]ReplicaCount{"queue_depth": {Ready: 2, All: 2}},
+	}
+
+	recommended, skip := alg.GetRecommendedInstances()
+
+	assert.False(t, skip)
+	assert.Equal(t, int32(3), recommended)
+}
