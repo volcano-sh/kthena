@@ -143,6 +143,37 @@ func TestApplyDrainNoPorts(t *testing.T) {
 	}
 }
 
+func TestApplyDrainSkipsInitContainers(t *testing.T) {
+	ms := msWithAnnotation("300s")
+	pod := drainTestPod(true)
+	pod.Spec.InitContainers = []corev1.Container{{Name: "init"}}
+	ApplyDrain(pod, workloadv1alpha1.Role{}, ms)
+
+	serving := pod.Spec.Containers[0]
+	if serving.Lifecycle == nil || serving.Lifecycle.PreStop == nil {
+		t.Fatal("serving container must get the drain preStop hook")
+	}
+	foundPort := false
+	for _, env := range serving.Env {
+		if env.Name == "DRAIN_METRICS_PORT" {
+			foundPort = true
+		}
+	}
+	if !foundPort {
+		t.Fatal("serving container must get DRAIN_METRICS_PORT")
+	}
+
+	initContainer := pod.Spec.InitContainers[0]
+	if initContainer.Lifecycle != nil && initContainer.Lifecycle.PreStop != nil {
+		t.Fatal("initContainer must not get the drain preStop hook")
+	}
+	for _, env := range initContainer.Env {
+		if strings.HasPrefix(env.Name, "DRAIN_") {
+			t.Fatalf("initContainer must not get drain env %s", env.Name)
+		}
+	}
+}
+
 func TestApplyDrainInjectsHookAndEnv(t *testing.T) {
 	ms := msWithAnnotation("300s")
 	pod := drainTestPod(true)

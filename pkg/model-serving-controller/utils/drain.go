@@ -164,14 +164,16 @@ func injectDrainHook(pod *corev1.Pod, timeoutSeconds, bufferSeconds int) {
 	if pod.Spec.TerminationGracePeriodSeconds != nil {
 		grace = int(*pod.Spec.TerminationGracePeriodSeconds)
 	}
-	AddPodEnvVars(pod, []corev1.EnvVar{
+	envVars := []corev1.EnvVar{
 		{Name: "DRAIN_TIMEOUT", Value: strconv.Itoa(timeoutSeconds)},
 		{Name: "GRACE_SECONDS", Value: strconv.Itoa(grace)},
 		{Name: "DRAIN_BUFFER_SECONDS", Value: strconv.Itoa(bufferSeconds)},
 		{Name: "DRAIN_METRICS_PORT", Value: strconv.Itoa(port)},
-	}...)
+	}
+	// Only serving containers drain; initContainers do not serve traffic.
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
+		addEnvVars(c, envVars...)
 		if c.Lifecycle == nil {
 			c.Lifecycle = &corev1.Lifecycle{}
 		}
