@@ -323,6 +323,20 @@ func TestReferencesRemoteMediaOtherAPIs(t *testing.T) {
 			want: true,
 		},
 		{
+			// vLLM ignores the extra inline image_url of an Anthropic image
+			// and fetches its source.
+			name: "messages image by URL with an extra inline image_url",
+			api:  common.APIMessages,
+			request: map[string]interface{}{"messages": []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
+				map[string]interface{}{
+					"type":      "image",
+					"source":    map[string]interface{}{"type": "url", "url": "http://127.0.0.1:15000/debug/pprof/"},
+					"image_url": "data:image/png;base64,AAAA",
+				},
+			}}}},
+			want: true,
+		},
+		{
 			name: "messages inline images",
 			api:  common.APIMessages,
 			request: map[string]interface{}{"system": "be brief", "messages": []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{

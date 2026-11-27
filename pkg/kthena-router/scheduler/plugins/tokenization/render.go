@@ -319,28 +319,30 @@ func partReferencesRemoteMedia(part map[string]interface{}) bool {
 		if source, ok := value.(map[string]interface{}); ok {
 			url, _ = source["url"].(string)
 		}
-		if len(url) < len("data:") || !strings.EqualFold(url[:len("data:")], "data:") {
+		if !isDataURL(url) {
 			return true
 		}
-	}
-	if hasURLField {
-		return false
 	}
 	partType, _ := part["type"].(string)
 	switch partType {
 	case "image_url", "audio_url", "video_url", "input_image":
-		return true
+		return !hasURLField
 	case "image":
 		// An Anthropic image is fetched when its source is a URL, and is
-		// otherwise turned into a data URL from its inline data.
+		// otherwise turned into a data URL from its inline data. Its source
+		// is used whatever other fields the part carries.
 		source, _ := part["source"].(map[string]interface{})
 		if source["type"] != "url" {
 			return false
 		}
 		url, _ := source["url"].(string)
-		return len(url) < len("data:") || !strings.EqualFold(url[:len("data:")], "data:")
+		return !isDataURL(url)
 	}
 	return false
+}
+
+func isDataURL(url string) bool {
+	return len(url) >= len("data:") && strings.EqualFold(url[:len("data:")], "data:")
 }
 
 func (m *TokenizerManager) renderWith(endpoint, path string, request interface{}) (*RenderResult, error) {
