@@ -27,9 +27,12 @@ class EventType(Enum):
     VLLM_BLOCK_STORED = "vllm_block_stored"
     VLLM_BLOCK_REMOVED = "vllm_block_removed"
     VLLM_ALL_BLOCKS_CLEARED = "vllm_all_blocks_cleared"
+    # The engine's batch sequence started over or skipped, see the subscribers.
+    VLLM_STREAM_STARTED = "vllm_stream_started"
     SGLANG_BLOCK_STORED = "sglang_block_stored"
     SGLANG_BLOCK_REMOVED = "sglang_block_removed"
     SGLANG_ALL_BLOCKS_CLEARED = "sglang_all_blocks_cleared"
+    SGLANG_STREAM_STARTED = "sglang_stream_started"
 
 
 @dataclass

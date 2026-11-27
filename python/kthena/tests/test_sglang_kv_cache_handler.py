@@ -28,6 +28,7 @@ from kthena.runtime.events import (
 from kthena.runtime.kv_cache_manager import (
     SGLangKVCacheEventHandler,
     SGLangKVCacheRedisManager,
+    VLLMKVCacheRedisManager,
     compute_standardized_hash,
 )
 
@@ -56,6 +57,9 @@ class _FakePipeline:
     def exists(self, key):
         self.calls.append(("exists", key))
 
+    def sadd(self, key, member):
+        self.calls.append(("sadd", key, member))
+
     async def execute(self):
         return [1] * len(self.calls)
 
@@ -64,12 +68,17 @@ class _FakeRedisConn:
     def __init__(self, pipeline: _FakePipeline, get_results=None):
         self._pipeline = pipeline
         self._get_results = get_results or {}
+        self.eval_calls = []
 
     def pipeline(self):
         return self._pipeline
 
     async def get(self, key):
         return self._get_results.get(key)
+
+    async def eval(self, script, numkeys, *keys_and_args):
+        self.eval_calls.append((list(keys_and_args[:numkeys]), list(keys_and_args[numkeys:])))
+        return 0
 
 
 def _make_redis_client(pipeline: _FakePipeline, keys_result=None, get_results=None):
@@ -129,6 +138,13 @@ async def test_block_stored_writes_matrix_and_mapping_keys():
         assert key == f"matrix:kv:block:qwen@{std_hash}"
         assert field == "pod-1"
 
+    # Each engine hash is recorded under its standardized hash for this pod.
+    sadd_calls = [c for c in pipeline.calls if c[0] == "sadd"]
+    assert sadd_calls == [
+        ("sadd", f"sglang:kv:ref:pod-1@{std_hash}", str(sglang_hash))
+        for sglang_hash, std_hash in zip(sglang_block_hashes, expected_std_hashes)
+    ]
+
 
 @pytest.mark.asyncio
 async def test_block_removed_uses_in_memory_mapping():
@@ -154,16 +170,17 @@ async def test_block_removed_uses_in_memory_mapping():
 
     await handler.handle(event_data)
 
-    hdel_calls = [c for c in pipeline.calls if c[0] == "hdel"]
-    delete_calls = [c for c in pipeline.calls if c[0] == "delete"]
-    assert {(c[1], c[2]) for c in hdel_calls} == {
-        ("matrix:kv:block:qwen@999", "pod-1"),
-        ("matrix:kv:block:qwen@888", "pod-1"),
-    }
-    assert {c[1] for c in delete_calls} == {
-        "sglang:kv:block:pod-1@111",
-        "sglang:kv:block:pod-1@222",
-    }
+    # Both blocks go to Redis in one script call: per block the mapping key,
+    # the ref set and the matrix key, then the pod and the engine hashes.
+    conn = await redis_client.get_connection()
+    assert conn.eval_calls == [(
+        [
+            "sglang:kv:block:pod-1@111", "sglang:kv:ref:pod-1@999", "matrix:kv:block:qwen@999",
+            "sglang:kv:block:pod-1@222", "sglang:kv:ref:pod-1@888", "matrix:kv:block:qwen@888",
+        ],
+        ["pod-1", "111", "222"],
+    )]
+    assert manager.hash_mapping == {}
 
 
 @pytest.mark.asyncio
@@ -171,14 +188,15 @@ async def test_all_blocks_cleared_clears_pod_from_matrix():
     pipeline = _FakePipeline()
     matrix_keys = ["matrix:kv:block:qwen@1", "matrix:kv:block:qwen@2"]
     mapping_keys = ["sglang:kv:block:pod-1@111", "sglang:kv:block:pod-1@222"]
+    ref_keys = ["sglang:kv:ref:pod-1@1", "sglang:kv:ref:pod-1@2"]
     redis_client = _make_redis_client(
         pipeline,
-        keys_result=matrix_keys + mapping_keys,
+        keys_result=matrix_keys + mapping_keys + ref_keys,
     )
 
-    # `scan_keys()` is called twice (matrix, then mapping). Stub it to return each
-    # set in order.
-    redis_client.scan_keys = AsyncMock(side_effect=[matrix_keys, mapping_keys])
+    # `scan_keys()` is called three times (matrix, mapping, then ref). Stub it to
+    # return each set in order.
+    redis_client.scan_keys = AsyncMock(side_effect=[matrix_keys, mapping_keys, ref_keys])
 
     manager = SGLangKVCacheRedisManager(redis_client=redis_client)
     handler = SGLangKVCacheEventHandler(kv_manager=manager)
@@ -199,18 +217,19 @@ async def test_all_blocks_cleared_clears_pod_from_matrix():
         ("matrix:kv:block:qwen@1", "pod-1"),
         ("matrix:kv:block:qwen@2", "pod-1"),
     }
-    assert {c[1] for c in delete_calls} == set(mapping_keys)
+    assert {c[1] for c in delete_calls} == set(mapping_keys + ref_keys)
 
 
 def test_sglang_and_vllm_managers_use_distinct_namespaces():
     """Regression: a shared Redis must keep engine namespaces separated."""
-    from kthena.runtime.kv_cache_manager import VLLMKVCacheRedisManager
     assert VLLMKVCacheRedisManager.MAPPING_KEY_PREFIX == "vllm:kv:block"
     assert SGLangKVCacheRedisManager.MAPPING_KEY_PREFIX == "sglang:kv:block"
     assert (
         VLLMKVCacheRedisManager.MAPPING_KEY_PREFIX
         != SGLangKVCacheRedisManager.MAPPING_KEY_PREFIX
     )
+    assert VLLMKVCacheRedisManager.REF_KEY_PREFIX == "vllm:kv:ref"
+    assert SGLangKVCacheRedisManager.REF_KEY_PREFIX == "sglang:kv:ref"
 
 
 class _FakeScanClient:
