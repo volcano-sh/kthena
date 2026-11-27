@@ -786,20 +786,9 @@ func AccessLogMiddleware(gwRouter *router.Router) gin.HandlerFunc {
 	}
 }
 
+// AuthMiddleware authenticates every request that reaches it. In Gateway API
+// mode the router serves any path (HTTPRoute rewrites, /models, ...), so
+// exempting paths here would let requests bypass authentication.
 func AuthMiddleware(gwRouter *router.Router) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Auth for "/v1/" only
-		if !strings.HasPrefix(c.Request.URL.Path, "/v1/") {
-			c.Next()
-			return
-		}
-
-		// Calling Middleware
-		gwRouter.Auth()(c)
-		if c.IsAborted() {
-			return
-		}
-
-		c.Next()
-	}
+	return gwRouter.Auth()
 }
