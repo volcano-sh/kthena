@@ -737,29 +737,19 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 	// Run ModelServing-level sync plugins before ServingGroups and Roles are synced.
 	if err := c.runModelServingSyncPlugins(ctx, ms); err != nil {
 		return err
 	}
-	// Optional bootstrap acceleration gates every replica creation below on the
-	// Ready sources observed now; admitted replicas are tracked within this sync.
-=======
+
 	// Optional bootstrap acceleration gates whole ServingGroup creation on Ready
 	// sources observed now; admitted groups are tracked within this sync.
->>>>>>> 6e2ddfb9 (implement the new bootstrap accelerate proposal)
 	admitter, err := c.newBootstrapAdmitter(ctx, ms)
 	if err != nil {
 		return fmt.Errorf("failed to build bootstrap admitter: %v", err)
 	}
 	ctx = bootstrap.WithAdmitter(ctx, admitter)
 
-<<<<<<< HEAD
-=======
->>>>>>> a5a7c380 (Revert "Implement bootstrap accelerate with mx")
-=======
->>>>>>> 6e2ddfb9 (implement the new bootstrap accelerate proposal)
 	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
 	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)

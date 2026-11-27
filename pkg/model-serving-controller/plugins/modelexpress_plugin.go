@@ -95,6 +95,7 @@ func podField(path string) *corev1.EnvVarSource {
 // bound to the role template hash at creation and cannot be patched in place,
 // so in-place updates fall back to recreating the outdated units.
 type modelExpressPlugin struct {
+	BasePlugin
 	serverAddress string
 }
 
@@ -208,9 +209,3 @@ func setEnvIfAbsent(container *corev1.Container, env corev1.EnvVar) {
 		container.Env = append(container.Env, env)
 	}
 }
-
-func (p *modelExpressPlugin) OnPodReady(_ context.Context, _ *HookRequest) error { return nil }
-
-func (p *modelExpressPlugin) OnRoleSync(_ context.Context, _ *HookRequest) error { return nil }
-
-func (p *modelExpressPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error { return nil }

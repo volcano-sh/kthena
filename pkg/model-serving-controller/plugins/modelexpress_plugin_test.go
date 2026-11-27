@@ -282,6 +282,7 @@ func TestModelExpressPluginRequiresEngineContainer(t *testing.T) {
 func TestModelExpressPluginNoopHooks(t *testing.T) {
 	ms := mxTestModelServing(nil, mxTestRole("prefill"))
 	plugin := NewModelExpressPlugin(ms, "")
+	assert.Equal(t, HookResult{}, plugin.OnModelServingSync(context.Background(), nil))
 	require.NoError(t, plugin.OnPodReady(context.Background(), nil))
 	require.NoError(t, plugin.OnRoleSync(context.Background(), nil))
 	require.NoError(t, plugin.OnRoleDelete(context.Background(), nil))
