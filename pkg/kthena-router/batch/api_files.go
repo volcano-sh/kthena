@@ -123,6 +123,11 @@ func under(path, root string) bool {
 // Serve answers one request that Handles accepted.
 func (s *Service) Serve(c *gin.Context) {
 	method := c.Request.Method
+	// A batch line runs with its owner's identity and no token, so it must never reach the owner's files or batches.
+	if _, ok := IdentityFromContext(c.Request.Context()); ok {
+		fail(c, http.StatusNotFound, errInvalidRequest, "", "a batch request cannot call the batch API")
+		return
+	}
 	// Every verified token without a subject would share one tenant, so such a caller is refused.
 	if !namesOwner(c) {
 		fail(c, http.StatusForbidden, errInvalidRequest, "", "the token has no subject, so it cannot own files or batches")
