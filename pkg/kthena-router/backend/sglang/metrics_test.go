@@ -17,6 +17,7 @@ limitations under the License.
 package sglang
 
 import (
+	"slices"
 	"strconv"
 	"testing"
 
@@ -52,8 +53,9 @@ func multiSeries(families ...*dto.MetricFamily) *dto.MetricFamily {
 	for i, family := range families {
 		for _, metric := range family.Metric {
 			name, value := "dp_rank", strconv.Itoa(i)
-			metric.Label = append(metric.Label, &dto.LabelPair{Name: &name, Value: &value})
-			joined.Metric = append(joined.Metric, metric)
+			labelled := *metric
+			labelled.Label = append(slices.Clone(metric.Label), &dto.LabelPair{Name: &name, Value: &value})
+			joined.Metric = append(joined.Metric, &labelled)
 		}
 	}
 	return joined
@@ -275,6 +277,7 @@ func TestGetHistogramPodMetrics_StoredHistogramContent(t *testing.T) {
 	assert.InDelta(t, 30.0, stored.GetSampleSum(), 1e-9)
 	assert.Equal(t, uint64(15), stored.GetSampleCount())
 }
+
 func TestGetCountMetricsInfo_EveryRank(t *testing.T) {
 	engine := NewSglangEngine()
 
