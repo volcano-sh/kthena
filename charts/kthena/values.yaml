@@ -190,7 +190,7 @@ networking:
     # -- Drain timeout for kthena-router graceful shutdown.
     # -- This should be less than terminationGracePeriodSeconds.
     drainTimeout: 5m
-    # batch configures the OpenAI-compatible batch API; only the files endpoints exist so far.
+    # batch configures the OpenAI-compatible batch API; files and batches work, listing and cancelling batches come next.
     batch:
       # -- Enable the batch API. It needs the Redis from the `redis-config` ConfigMap.
       enabled: false

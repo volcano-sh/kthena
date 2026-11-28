@@ -502,8 +502,8 @@ func (s *Service) listFiles(c *gin.Context) {
 	}
 	var files []*File
 	var more bool
-	// Uploads only take purpose batch, so any other purpose lists nothing without reading the store.
-	if query.Purpose == "" || query.Purpose == PurposeBatch {
+	// Only batch inputs and results are stored, so any other purpose lists nothing without reading the store.
+	if query.Purpose == "" || query.Purpose == PurposeBatch || query.Purpose == PurposeBatchOutput {
 		var err error
 		files, more, err = s.store.ListFiles(c.Request.Context(), query)
 		if errors.Is(err, ErrNotFound) {
