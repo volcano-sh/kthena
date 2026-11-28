@@ -65,7 +65,14 @@ const (
 
 	successfulRequestFinishReason = "successful_request"
 	failedRequestFinishReason     = "request_failed"
+	clientCancelledFinishReason   = "client_cancelled"
+	clientCancelledStatusCode     = 499
+	serverShutdownFinishReason    = "server_shutdown"
 )
+
+// ErrForcedDrain identifies cancellation caused by the router forcibly
+// closing active requests after the graceful-drain timeout.
+var ErrForcedDrain = errors.New("router forced drain timeout")
 
 func requestFinishReason(c *gin.Context) string {
 	if reason, exists := c.Get("finishReason"); exists {
@@ -777,11 +784,49 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) error 
 	req := c.Request
 	upstreamTimeout := upstreamTimeoutFor(modelServer)
 	if err := r.proxyModelEndpoint(c, req, ctx, modelRequest, port, upstreamTimeout); err != nil {
+		requestErr := c.Request.Context().Err()
+
+		if requestErr != nil {
+			if errors.Is(context.Cause(c.Request.Context()), ErrForcedDrain) {
+				klog.V(4).Infof(
+					"request cancelled by forced drain reqID: %s: %v",
+					c.Request.Header.Get("x-request-id"),
+					requestErr,
+				)
+
+				c.Set("finishReason", serverShutdownFinishReason)
+				if !c.Writer.Written() {
+					c.Status(http.StatusServiceUnavailable)
+				}
+
+				accesslog.SetError(c, serverShutdownFinishReason, requestErr.Error())
+				accesslog.SetErrorOrigin(c, "router")
+				return requestErr
+			}
+
+			klog.V(4).Infof(
+				"client request cancelled reqID: %s: %v",
+				c.Request.Header.Get("x-request-id"),
+				requestErr,
+			)
+
+			c.Set("finishReason", clientCancelledFinishReason)
+			if !c.Writer.Written() {
+				c.Status(clientCancelledStatusCode)
+			}
+
+			accesslog.SetError(c, clientCancelledFinishReason, requestErr.Error())
+			accesslog.SetErrorOrigin(c, "client")
+			return requestErr
+		}
+
 		klog.Errorf("request failed reqID: %s: %v", c.Request.Header.Get("x-request-id"), err)
 		accesslog.SetError(c, "proxy", "request processing failed")
+
 		if !c.Writer.Written() {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, "request processing failed")
 		}
+
 		return err
 	}
 	return nil
@@ -1027,6 +1072,12 @@ func (r *Router) proxy(
 	rt http.RoundTripper,
 	onUsage func(u providers.TokenUsage),
 ) error {
+	// Only stop retries when the original client request is cancelled;
+	// connectors may use their own contexts internally.
+	requestCtx := c.Request.Context()
+	if err := requestCtx.Err(); err != nil {
+		return err
+	}
 	// Capture body bytes once so each retry attempt gets a fresh reader.
 	// transport.RoundTrip drains req.Body on every call, so reusing the same
 	// request across loop iterations sends an empty body to subsequent pods.
@@ -1041,6 +1092,9 @@ func (r *Router) proxy(
 	}
 
 	for i := 0; i < len(ctx.BestPods); i++ {
+		if err := requestCtx.Err(); err != nil {
+			return err
+		}
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		accesslog.SetUpstreamInfo(c, 0, i+1)
 		pod := ctx.BestPods[i]
@@ -1065,12 +1119,16 @@ func (r *Router) proxy(
 		r.store.DecrPodOnFlightRequests(podName)
 
 		if err != nil {
+			if requestErr := requestCtx.Err(); requestErr != nil {
+				return requestErr
+			}
 			klog.Errorf(" pod request error: %v", err)
 			if c.Writer.Written() {
 				return err
 			}
 			continue
 		}
+
 		// record in prefix cache
 		r.scheduler.RunPostHooks(ctx, i)
 		return nil
@@ -1589,6 +1647,12 @@ func (r *Router) proxyToPDDisaggregated(
 	port int32,
 	timeout time.Duration,
 ) error {
+	// Only stop retries when the original client request is cancelled;
+	// connectors may use their own contexts internally.
+	requestCtx := c.Request.Context()
+	if err := requestCtx.Err(); err != nil {
+		return err
+	}
 	// Get metrics recorder from context
 	var metricsRecorder *metrics.RequestMetricsRecorder
 	if recorder, exists := c.Get("metricsRecorder"); exists {
@@ -1608,6 +1672,10 @@ func (r *Router) proxyToPDDisaggregated(
 	var lastResponsesErr *connectors.DecodeUpstreamError
 
 	for i := 0; i < maxRetry; i++ {
+		if err := requestCtx.Err(); err != nil {
+			return err
+		}
+
 		if ctx.PrefillPods[i] == nil || ctx.DecodePods[i] == nil {
 			continue
 		}
@@ -1639,19 +1707,26 @@ func (r *Router) proxyToPDDisaggregated(
 		}
 
 		if err != nil {
+			if requestErr := requestCtx.Err(); requestErr != nil {
+				return requestErr
+			}
 			klog.Errorf("proxy failed for prefill pod %s, decode pod %s: %v",
 				prefillPod.Name, decodePod.Name, err)
+
 			if c.Writer.Written() {
 				return err
 			}
+
 			var nonRetryable *connectors.NonRetryableError
 			if errors.As(err, &nonRetryable) {
 				return err
 			}
+
 			var responsesErr *connectors.DecodeUpstreamError
 			if errors.As(err, &responsesErr) {
 				lastResponsesErr = responsesErr
 			}
+
 			continue
 		}
 

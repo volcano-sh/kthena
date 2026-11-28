@@ -2532,6 +2532,12 @@ func TestRequestFinishReason(t *testing.T) {
 			explicitReason: "pod_discovery",
 			expectedReason: "pod_discovery",
 		},
+		{
+			name:           "client cancellation",
+			status:         clientCancelledStatusCode,
+			explicitReason: clientCancelledFinishReason,
+			expectedReason: clientCancelledFinishReason,
+		},
 	}
 
 	for _, tt := range tests {
@@ -3265,6 +3271,411 @@ func TestProxy_RetryBodyNotDrained(t *testing.T) {
 	assert.Equal(t, http.StatusOK, accessCtx.UpstreamStatusCode)
 }
 
+type cancellationRetryRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f cancellationRetryRoundTripper) RoundTrip(
+	req *http.Request,
+) (*http.Response, error) {
+	return f(req)
+}
+
+type countingPodFlightAccountingStore struct {
+	datastore.Store
+	incrCalls atomic.Int32
+	decrCalls atomic.Int32
+}
+
+func (s *countingPodFlightAccountingStore) IncrPodOnFlightRequests(
+	_ types.NamespacedName,
+) {
+	s.incrCalls.Add(1)
+}
+
+func (s *countingPodFlightAccountingStore) DecrPodOnFlightRequests(
+	_ types.NamespacedName,
+) {
+	s.decrCalls.Add(1)
+}
+
+type noOpPodFlightAccountingStore struct {
+	datastore.Store
+}
+
+func newCancellationTestPods() (*datastore.PodInfo, *datastore.PodInfo) {
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+	}
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-2", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.2"},
+	}
+
+	return &datastore.PodInfo{Pod: pod1}, &datastore.PodInfo{Pod: pod2}
+}
+
+func newCancellationTestRequest(
+	t *testing.T,
+	requestCtx context.Context,
+	target string,
+) (*gin.Context, *httptest.ResponseRecorder, *http.Request) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(
+		requestCtx,
+		http.MethodPost,
+		target,
+		bytes.NewBufferString(`{"model":"test-model"}`),
+	)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	return c, w, req
+}
+
+func TestRouter_Proxy_DoesNotRetryAfterClientCancellation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := datastore.New()
+	router := NewRouter(
+		store,
+		"../scheduler/testdata/configmap.yaml",
+		common.NewTransportRegistry(),
+	)
+
+	flightStore := &countingPodFlightAccountingStore{
+		Store: store,
+	}
+	router.store = flightStore
+
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-1", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
+	}
+
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{Name: "pod-2", Namespace: "default"},
+		Status:     corev1.PodStatus{PodIP: "10.0.0.2"},
+	}
+
+	ctx := &framework.Context{
+		BestPods: []*datastore.PodInfo{
+			{Pod: pod1},
+			{Pod: pod2},
+		},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+
+	req, err := http.NewRequestWithContext(
+		requestCtx,
+		http.MethodPost,
+		"http://router/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"test-model"}`),
+	)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	var attempts atomic.Int32
+	var activeContextRequests atomic.Int32
+
+	rt := cancellationRetryRoundTripper(
+		func(req *http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			if err := req.Context().Err(); err != nil {
+				return nil, err
+			}
+
+			activeContextRequests.Add(1)
+			cancelRequest()
+			return nil, req.Context().Err()
+		},
+	)
+
+	err = router.proxy(
+		c,
+		req,
+		ctx,
+		false,
+		8000,
+		2*time.Second,
+		rt,
+		nil,
+	)
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(1), attempts.Load())
+	assert.Equal(t, int32(1), activeContextRequests.Load())
+	assert.Equal(t, int32(1), flightStore.incrCalls.Load())
+	assert.Equal(t, int32(1), flightStore.decrCalls.Load())
+	assert.Empty(t, w.Body.String())
+}
+
+func TestRouter_Proxy_RetriesWhenUpstreamReturnsContextCanceled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := datastore.New()
+	router := NewRouter(
+		store,
+		"../scheduler/testdata/configmap.yaml",
+		common.NewTransportRegistry(),
+	)
+
+	flightStore := &countingPodFlightAccountingStore{
+		Store: store,
+	}
+	router.store = flightStore
+
+	info1, info2 := newCancellationTestPods()
+
+	ctx := &framework.Context{
+		BestPods: []*datastore.PodInfo{info1, info2},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	c, w, req := newCancellationTestRequest(
+		t,
+		requestCtx,
+		"http://router/v1/chat/completions",
+	)
+
+	var attempts atomic.Int32
+	var activeContextRequests atomic.Int32
+
+	rt := cancellationRetryRoundTripper(
+		func(req *http.Request) (*http.Response, error) {
+			attempt := attempts.Add(1)
+
+			if err := req.Context().Err(); err != nil {
+				return nil, err
+			}
+			activeContextRequests.Add(1)
+
+			if attempt == 1 {
+				return nil, context.Canceled
+			}
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewBufferString(`{"id":"retry-ok"}`)),
+				Request:    req,
+			}, nil
+		},
+	)
+
+	err := router.proxy(
+		c,
+		req,
+		ctx,
+		false,
+		8000,
+		2*time.Second,
+		rt,
+		nil,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), attempts.Load())
+	assert.Equal(t, int32(2), activeContextRequests.Load())
+	assert.Equal(t, int32(2), flightStore.incrCalls.Load())
+	assert.Equal(t, int32(2), flightStore.decrCalls.Load())
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "retry-ok")
+	assert.NoError(t, requestCtx.Err())
+}
+
+func TestRouter_Proxy_RetriesAfterUpstreamTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := datastore.New()
+	router := NewRouter(
+		store,
+		"../scheduler/testdata/configmap.yaml",
+		common.NewTransportRegistry(),
+	)
+
+	flightStore := &countingPodFlightAccountingStore{Store: store}
+	router.store = flightStore
+
+	info1, info2 := newCancellationTestPods()
+
+	ctx := &framework.Context{
+		BestPods: []*datastore.PodInfo{info1, info2},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	c, w, req := newCancellationTestRequest(
+		t,
+		requestCtx,
+		"http://router/v1/chat/completions",
+	)
+
+	var attempts atomic.Int32
+	var activeContextRequests atomic.Int32
+
+	rt := cancellationRetryRoundTripper(
+		func(req *http.Request) (*http.Response, error) {
+			attempt := attempts.Add(1)
+
+			if err := req.Context().Err(); err != nil {
+				return nil, err
+			}
+			activeContextRequests.Add(1)
+
+			if attempt == 1 {
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			}
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewBufferString(`{"id":"retry-ok"}`)),
+				Request:    req,
+			}, nil
+		},
+	)
+
+	err := router.proxy(
+		c,
+		req,
+		ctx,
+		false,
+		8000,
+		100*time.Millisecond,
+		rt,
+		nil,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), attempts.Load())
+	assert.Equal(t, int32(2), activeContextRequests.Load())
+	assert.Equal(t, int32(2), flightStore.incrCalls.Load())
+	assert.Equal(t, int32(2), flightStore.decrCalls.Load())
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "retry-ok")
+	assert.NoError(t, requestCtx.Err())
+}
+
+func TestRouter_Proxy_DoesNotAttemptWhenClientAlreadyCancelled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := datastore.New()
+	router := NewRouter(
+		store,
+		"../scheduler/testdata/configmap.yaml",
+		common.NewTransportRegistry(),
+	)
+
+	flightStore := &countingPodFlightAccountingStore{Store: store}
+	router.store = flightStore
+
+	info1, info2 := newCancellationTestPods()
+
+	ctx := &framework.Context{
+		BestPods: []*datastore.PodInfo{info1, info2},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
+
+	c, w, req := newCancellationTestRequest(
+		t,
+		requestCtx,
+		"http://router/v1/chat/completions",
+	)
+
+	var attempts atomic.Int32
+	rt := cancellationRetryRoundTripper(func(req *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return nil, fmt.Errorf("RoundTrip should not be called")
+	})
+
+	err := router.proxy(c, req, ctx, false, 8000, 2*time.Second, rt, nil)
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(0), attempts.Load())
+	assert.Equal(t, int32(0), flightStore.incrCalls.Load())
+	assert.Equal(t, int32(0), flightStore.decrCalls.Load())
+	assert.Empty(t, w.Body.String())
+}
+
+func TestRouter_Proxy_ReturnsCancellationWhenLastPodFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := datastore.New()
+	router := NewRouter(
+		store,
+		"../scheduler/testdata/configmap.yaml",
+		common.NewTransportRegistry(),
+	)
+
+	flightStore := &countingPodFlightAccountingStore{Store: store}
+	router.store = flightStore
+
+	info1, info2 := newCancellationTestPods()
+
+	ctx := &framework.Context{
+		BestPods: []*datastore.PodInfo{info1, info2},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+
+	c, w, req := newCancellationTestRequest(
+		t,
+		requestCtx,
+		"http://router/v1/chat/completions",
+	)
+
+	var attempts atomic.Int32
+	var activeContextRequests atomic.Int32
+
+	rt := cancellationRetryRoundTripper(func(req *http.Request) (*http.Response, error) {
+		attempt := attempts.Add(1)
+
+		if err := req.Context().Err(); err != nil {
+			return nil, err
+		}
+		activeContextRequests.Add(1)
+
+		if attempt == 2 {
+			cancelRequest()
+			return nil, fmt.Errorf("upstream transport failure")
+		}
+
+		return nil, fmt.Errorf("upstream temporary failure")
+	})
+
+	err := router.proxy(
+		c,
+		req,
+		ctx,
+		false,
+		8000,
+		2*time.Second,
+		rt,
+		nil,
+	)
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(2), attempts.Load())
+	assert.Equal(t, int32(2), activeContextRequests.Load())
+	assert.Equal(t, int32(2), flightStore.incrCalls.Load())
+	assert.Equal(t, int32(2), flightStore.decrCalls.Load())
+	assert.Empty(t, w.Body.String())
+}
+
 func TestRouter_HandlerFunc_ListModels(t *testing.T) {
 	router, store, backend := setupTestRouter(t, nil)
 	defer backend.Close()
@@ -3406,6 +3817,241 @@ func setupFairnessTestRouter(t *testing.T, backendHandler http.Handler) (*Router
 	store.AddOrUpdateModelRoute(modelRoute)
 
 	return router, store, backend
+}
+
+func TestRouter_HandlerFunc_ClientCancellation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	backendStarted := make(chan struct{}, 1)
+	releaseBackend := make(chan struct{})
+
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		select {
+		case backendStarted <- struct{}{}:
+		default:
+		}
+
+		<-releaseBackend
+	})
+
+	router, store, backend := setupFairnessTestRouter(t, backendHandler)
+	defer backend.Close()
+	defer close(releaseBackend)
+
+	previousFairness := EnableFairnessScheduling
+	previousSessionBoost := EnableSessionBoost
+
+	EnableFairnessScheduling = false
+	EnableSessionBoost = false
+
+	defer func() {
+		EnableFairnessScheduling = previousFairness
+		EnableSessionBoost = previousSessionBoost
+	}()
+
+	metricModel := metrics.UnknownModel
+	if store.HasModel("fair-model") {
+		metricModel = "fair-model"
+	}
+
+	statusCode := strconv.Itoa(clientCancelledStatusCode)
+	requestsBefore := requestCounterValue(
+		t,
+		router,
+		metricModel,
+		"/v1/chat/completions",
+		statusCode,
+		clientCancelledFinishReason,
+	)
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+
+	req, err := http.NewRequestWithContext(
+		requestCtx,
+		http.MethodPost,
+		"http://router/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"fair-model","prompt":"hello cancellation"}`),
+	)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	accessCtx := accesslog.NewAccessLogContext(
+		"req-client-cancellation",
+		http.MethodPost,
+		"/v1/chat/completions",
+		"HTTP/1.1",
+		"fair-model",
+	)
+	c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+	handlerDone := make(chan struct{})
+
+	go func() {
+		router.HandlerFunc()(c)
+		close(handlerDone)
+	}()
+	select {
+	case <-backendStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the upstream backend request")
+	}
+
+	cancelRequest()
+
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return after client cancellation")
+	}
+
+	require.Equal(t, clientCancelledStatusCode, c.Writer.Status())
+	c.Writer.WriteHeaderNow()
+
+	assert.Equal(t, clientCancelledStatusCode, w.Code)
+	assert.Empty(t, w.Body.String())
+
+	reason, exists := c.Get("finishReason")
+	require.True(t, exists)
+	assert.Equal(t, clientCancelledFinishReason, reason)
+
+	require.NotNil(t, accessCtx.Error)
+	assert.Equal(t, clientCancelledFinishReason, accessCtx.Error.Type)
+	assert.Equal(t, "client", accessCtx.ErrorOrigin)
+
+	requestsAfter := requestCounterValue(
+		t,
+		router,
+		metricModel,
+		"/v1/chat/completions",
+		statusCode,
+		clientCancelledFinishReason,
+	)
+
+	assert.Equal(t, requestsBefore+1, requestsAfter)
+}
+
+func TestRouter_HandlerFunc_ForcedDrain(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	backendStarted := make(chan struct{}, 1)
+	releaseBackend := make(chan struct{})
+
+	backendHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		select {
+		case backendStarted <- struct{}{}:
+		default:
+		}
+
+		<-releaseBackend
+	})
+
+	router, store, backend := setupFairnessTestRouter(t, backendHandler)
+	defer backend.Close()
+	defer close(releaseBackend)
+
+	previousFairness := EnableFairnessScheduling
+	previousSessionBoost := EnableSessionBoost
+
+	EnableFairnessScheduling = false
+	EnableSessionBoost = false
+
+	defer func() {
+		EnableFairnessScheduling = previousFairness
+		EnableSessionBoost = previousSessionBoost
+	}()
+
+	metricModel := metrics.UnknownModel
+	if store.HasModel("fair-model") {
+		metricModel = "fair-model"
+	}
+
+	statusCode := strconv.Itoa(http.StatusServiceUnavailable)
+	requestsBefore := requestCounterValue(
+		t,
+		router,
+		metricModel,
+		"/v1/chat/completions",
+		statusCode,
+		serverShutdownFinishReason,
+	)
+
+	requestCtx, cancelRequest := context.WithCancelCause(context.Background())
+	defer cancelRequest(context.Canceled)
+
+	req, err := http.NewRequestWithContext(
+		requestCtx,
+		http.MethodPost,
+		"http://router/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"fair-model","prompt":"hello cancellation"}`),
+	)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	accessCtx := accesslog.NewAccessLogContext(
+		"req-forced-drain",
+		http.MethodPost,
+		"/v1/chat/completions",
+		"HTTP/1.1",
+		"fair-model",
+	)
+	c.Set(accesslog.AccessLogContextKey, accessCtx)
+
+	handlerDone := make(chan struct{})
+
+	go func() {
+		router.HandlerFunc()(c)
+		close(handlerDone)
+	}()
+
+	select {
+	case <-backendStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the upstream backend request")
+	}
+
+	cancelRequest(ErrForcedDrain)
+
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return after forced drain")
+	}
+
+	require.ErrorIs(t, requestCtx.Err(), context.Canceled)
+	assert.ErrorIs(t, context.Cause(requestCtx), ErrForcedDrain)
+
+	require.Equal(t, http.StatusServiceUnavailable, c.Writer.Status())
+	c.Writer.WriteHeaderNow()
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Empty(t, w.Body.String())
+
+	reason, exists := c.Get("finishReason")
+	require.True(t, exists)
+	assert.Equal(t, serverShutdownFinishReason, reason)
+
+	require.NotNil(t, accessCtx.Error)
+	assert.Equal(t, serverShutdownFinishReason, accessCtx.Error.Type)
+	assert.Equal(t, "router", accessCtx.ErrorOrigin)
+
+	requestsAfter := requestCounterValue(
+		t,
+		router,
+		metricModel,
+		"/v1/chat/completions",
+		statusCode,
+		serverShutdownFinishReason,
+	)
+
+	assert.Equal(t, requestsBefore+1, requestsAfter)
 }
 
 func TestHandleFairnessScheduling(t *testing.T) {
@@ -4128,4 +4774,349 @@ func TestRouter_ProxyToPDDisaggregated_NonRetryableError(t *testing.T) {
 		assert.Error(t, err)
 		assert.Equal(t, int32(2), mockConnector.calls.Load(), "transient errors must still be retried across all pod pairs")
 	})
+}
+
+func TestRouter_ProxyToPDDisaggregated_DoesNotRetryAfterClientCancellation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	pod1 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{
+			Name: "pod-1", Namespace: "default",
+		},
+		Status: corev1.PodStatus{PodIP: "10.0.0.1"},
+	}
+
+	pod2 := &corev1.Pod{
+		ObjectMeta: v1.ObjectMeta{
+			Name: "pod-2", Namespace: "default",
+		},
+		Status: corev1.PodStatus{PodIP: "10.0.0.2"},
+	}
+
+	info1 := &datastore.PodInfo{Pod: pod1}
+	info2 := &datastore.PodInfo{Pod: pod2}
+
+	store := datastore.New()
+	router := NewRouter(
+		store,
+		"../scheduler/testdata/configmap.yaml",
+		common.NewTransportRegistry(),
+	)
+
+	router.store = &noOpPodFlightAccountingStore{
+		Store: store,
+	}
+
+	routeCtx := &framework.Context{
+		Model:       "test-model",
+		PrefillPods: []*datastore.PodInfo{info1, info2},
+		DecodePods:  []*datastore.PodInfo{info1, info2},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+
+	req, err := http.NewRequestWithContext(
+		requestCtx,
+		http.MethodPost,
+		"/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"test-model"}`),
+	)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	mockConnector := &mockKVConnector{}
+	var activeContextCalls atomic.Int32
+
+	mockConnector.proxyHandler = func(
+		c *gin.Context,
+		reqBody map[string]interface{},
+		prefillAddr, decodeAddr string,
+		hooks *connectors.OnFlightHooks,
+	) (int, error) {
+		if err := c.Request.Context().Err(); err != nil {
+			return 0, err
+		}
+
+		activeContextCalls.Add(1)
+		cancelRequest()
+		return 0, c.Request.Context().Err()
+	}
+
+	err = router.proxyToPDDisaggregated(
+		c,
+		c.Request,
+		routeCtx,
+		mockConnector,
+		ModelRequest{"model": "test-model"},
+		8000,
+		2*time.Second,
+	)
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(1), mockConnector.calls.Load())
+	assert.Equal(t, int32(1), activeContextCalls.Load())
+	assert.Empty(t, w.Body.String())
+}
+
+func TestRouter_ProxyToPDDisaggregated_RetriesWhenUpstreamReturnsContextCanceled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	info1, info2 := newCancellationTestPods()
+
+	store := datastore.New()
+	router := NewRouter(
+		store,
+		"../scheduler/testdata/configmap.yaml",
+		common.NewTransportRegistry(),
+	)
+
+	routeCtx := &framework.Context{
+		Model:       "test-model",
+		PrefillPods: []*datastore.PodInfo{info1, info2},
+		DecodePods:  []*datastore.PodInfo{info1, info2},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+
+	c, w, req := newCancellationTestRequest(
+		t,
+		requestCtx,
+		"/v1/chat/completions",
+	)
+
+	mockConnector := &mockKVConnector{}
+	var activeContextCalls atomic.Int32
+
+	mockConnector.proxyHandler = func(
+		c *gin.Context,
+		reqBody map[string]interface{},
+		prefillAddr, decodeAddr string,
+		hooks *connectors.OnFlightHooks,
+	) (int, error) {
+		if err := c.Request.Context().Err(); err != nil {
+			return 0, err
+		}
+
+		activeContextCalls.Add(1)
+
+		if mockConnector.calls.Load() == 1 {
+			return 0, context.Canceled
+		}
+
+		c.Writer.WriteHeader(http.StatusOK)
+		_, _ = c.Writer.Write([]byte(`{"id":"retry-ok"}`))
+		return 7, nil
+	}
+
+	err := router.proxyToPDDisaggregated(
+		c,
+		req,
+		routeCtx,
+		mockConnector,
+		ModelRequest{"model": "test-model"},
+		8000,
+		2*time.Second,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), mockConnector.calls.Load())
+	assert.Equal(t, int32(2), activeContextCalls.Load())
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, `{"id":"retry-ok"}`, w.Body.String())
+	assert.NoError(t, requestCtx.Err())
+}
+
+func TestRouter_ProxyToPDDisaggregated_RetriesAfterUpstreamTimeout(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	info1, info2 := newCancellationTestPods()
+
+	store := datastore.New()
+	router := NewRouter(
+		store,
+		"../scheduler/testdata/configmap.yaml",
+		common.NewTransportRegistry(),
+	)
+
+	routeCtx := &framework.Context{
+		Model:       "test-model",
+		PrefillPods: []*datastore.PodInfo{info1, info2},
+		DecodePods:  []*datastore.PodInfo{info1, info2},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	c, w, req := newCancellationTestRequest(
+		t,
+		requestCtx,
+		"/v1/chat/completions",
+	)
+
+	const upstreamTimeout = 100 * time.Millisecond
+
+	mockConnector := &mockKVConnector{}
+	var activeContextCalls atomic.Int32
+
+	mockConnector.proxyHandler = func(
+		c *gin.Context,
+		reqBody map[string]interface{},
+		prefillAddr, decodeAddr string,
+		hooks *connectors.OnFlightHooks,
+	) (int, error) {
+		if err := c.Request.Context().Err(); err != nil {
+			return 0, err
+		}
+		activeContextCalls.Add(1)
+
+		if mockConnector.calls.Load() == 1 {
+			attemptCtx, cancelAttempt := context.WithCancel(c.Request.Context())
+			timer := time.AfterFunc(mockConnector.timeout, cancelAttempt)
+			defer func() {
+				timer.Stop()
+				cancelAttempt()
+			}()
+
+			<-attemptCtx.Done()
+			return 0, attemptCtx.Err()
+		}
+
+		c.Writer.WriteHeader(http.StatusOK)
+		_, _ = c.Writer.Write([]byte(`{"id":"retry-ok"}`))
+		return 7, nil
+	}
+
+	err := router.proxyToPDDisaggregated(
+		c,
+		req,
+		routeCtx,
+		mockConnector,
+		ModelRequest{"model": "test-model"},
+		8000,
+		upstreamTimeout,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), mockConnector.calls.Load())
+	assert.Equal(t, int32(2), activeContextCalls.Load())
+	assert.Equal(t, upstreamTimeout, mockConnector.timeout)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, `{"id":"retry-ok"}`, w.Body.String())
+	assert.NoError(t, requestCtx.Err())
+}
+
+func TestRouter_ProxyToPDDisaggregated_DoesNotAttemptWhenClientAlreadyCancelled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	info1, info2 := newCancellationTestPods()
+
+	store := datastore.New()
+	router := NewRouter(
+		store,
+		"../scheduler/testdata/configmap.yaml",
+		common.NewTransportRegistry(),
+	)
+
+	routeCtx := &framework.Context{
+		Model:       "test-model",
+		PrefillPods: []*datastore.PodInfo{info1, info2},
+		DecodePods:  []*datastore.PodInfo{info1, info2},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
+
+	c, w, req := newCancellationTestRequest(
+		t,
+		requestCtx,
+		"/v1/chat/completions",
+	)
+
+	mockConnector := &mockKVConnector{}
+
+	err := router.proxyToPDDisaggregated(
+		c,
+		req,
+		routeCtx,
+		mockConnector,
+		ModelRequest{"model": "test-model"},
+		8000,
+		2*time.Second,
+	)
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(0), mockConnector.calls.Load())
+	assert.Empty(t, w.Body.String())
+}
+
+func TestRouter_ProxyToPDDisaggregated_ReturnsCancellationWhenLastPairFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	info1, info2 := newCancellationTestPods()
+
+	store := datastore.New()
+	router := NewRouter(
+		store,
+		"../scheduler/testdata/configmap.yaml",
+		common.NewTransportRegistry(),
+	)
+
+	router.store = &noOpPodFlightAccountingStore{Store: store}
+
+	routeCtx := &framework.Context{
+		Model:       "test-model",
+		PrefillPods: []*datastore.PodInfo{info1, info2},
+		DecodePods:  []*datastore.PodInfo{info1, info2},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+
+	c, w, req := newCancellationTestRequest(
+		t,
+		requestCtx,
+		"/v1/chat/completions",
+	)
+
+	mockConnector := &mockKVConnector{}
+	var activeContextCalls atomic.Int32
+
+	mockConnector.proxyHandler = func(
+		c *gin.Context,
+		reqBody map[string]interface{},
+		prefillAddr, decodeAddr string,
+		hooks *connectors.OnFlightHooks,
+	) (int, error) {
+		if err := c.Request.Context().Err(); err != nil {
+			return 0, err
+		}
+
+		activeContextCalls.Add(1)
+
+		if mockConnector.calls.Load() == 2 {
+			cancelRequest()
+			return 0, fmt.Errorf("upstream transport failure")
+		}
+
+		return 0, fmt.Errorf("upstream temporary failure")
+	}
+
+	err := router.proxyToPDDisaggregated(
+		c,
+		req,
+		routeCtx,
+		mockConnector,
+		ModelRequest{"model": "test-model"},
+		8000,
+		2*time.Second,
+	)
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(2), mockConnector.calls.Load())
+	assert.Equal(t, int32(2), activeContextCalls.Load())
+	assert.Empty(t, w.Body.String())
 }

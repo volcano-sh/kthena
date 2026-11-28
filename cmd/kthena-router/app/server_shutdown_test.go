@@ -335,6 +335,94 @@ func TestServerRunForceClosesRequestsAfterDrainTimeout(t *testing.T) {
 	require.NotContains(t, string(body), "data: [DONE]", "the stream should be cut at the drain timeout")
 }
 
+func TestStartListenerPropagatesForcedDrainCause(t *testing.T) {
+	port := freeTCPPorts(t, 1)[0]
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	listeners := &drainGroup{}
+	requests := &drainGroup{}
+
+	handlerStarted := make(chan struct{})
+	handlerResult := make(chan struct {
+		err   error
+		cause error
+	}, 1)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(handlerStarted)
+		<-r.Context().Done()
+
+		handlerResult <- struct {
+			err   error
+			cause error
+		}{
+			err:   r.Context().Err(),
+			cause: context.Cause(r.Context()),
+		}
+	})
+
+	cfg := listenerConfig{
+		addr:           addr,
+		drainTimeout:   50 * time.Millisecond,
+		listeners:      listeners,
+		requests:       requests,
+		logShutdownErr: func(error) {},
+		logListenErr:   func(error) {},
+	}
+
+	startListenerWithHandler(ctx, cfg, handler)
+
+	t.Cleanup(func() {
+		cancel()
+		listeners.closeAndWait()
+		requests.closeAndWait()
+	})
+
+	require.Eventually(t, func() bool {
+		conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "listener did not start")
+
+	clientDone := make(chan error, 1)
+	go func() {
+		resp, err := http.Get("http://" + addr)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		clientDone <- err
+	}()
+
+	select {
+	case <-handlerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request handler did not start")
+	}
+
+	cancel()
+
+	select {
+	case result := <-handlerResult:
+		require.ErrorIs(t, result.err, context.Canceled)
+		require.ErrorIs(t, result.cause, routerpkg.ErrForcedDrain)
+	case <-time.After(5 * time.Second):
+		t.Fatal("request handler did not receive the forced-drain cancellation")
+	}
+
+	listeners.closeAndWait()
+	requests.closeAndWait()
+
+	select {
+	case <-clientDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client request did not finish after forced shutdown")
+	}
+}
+
 // TestServerRunForceClosesPipelinedRequest checks that the forced close at the
 // drain timeout also ends a request whose client has pipelined more bytes.
 // net/http stops watching such a connection, so closing it does not cancel the
