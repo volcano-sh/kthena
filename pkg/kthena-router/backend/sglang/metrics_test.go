@@ -53,9 +53,11 @@ func multiSeries(families ...*dto.MetricFamily) *dto.MetricFamily {
 	for i, family := range families {
 		for _, metric := range family.Metric {
 			name, value := "dp_rank", strconv.Itoa(i)
-			labelled := *metric
-			labelled.Label = append(slices.Clone(metric.Label), &dto.LabelPair{Name: &name, Value: &value})
-			joined.Metric = append(joined.Metric, &labelled)
+			joined.Metric = append(joined.Metric, &dto.Metric{
+				Gauge:     metric.Gauge,
+				Histogram: metric.Histogram,
+				Label:     append(slices.Clone(metric.Label), &dto.LabelPair{Name: &name, Value: &value}),
+			})
 		}
 	}
 	return joined
