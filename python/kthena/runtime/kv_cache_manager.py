@@ -44,11 +44,16 @@ def get_sglang_mapping_key_prefix() -> str:
 MAPPING_KEY_TTL_SECONDS = 86400
 
 
-def compute_standardized_hash(token_ids: List[int]) -> int:
+# Keep the byte encoding in sync with computeStandardizedHashWithParent in
+# pkg/kthena-router/scheduler/plugins/kvcache_aware.go.
+def compute_standardized_hash(token_ids: List[int], parent_std_hash: Optional[int] = None) -> int:
     if not token_ids:
         return 0
     token_bytes = b''.join(token_id.to_bytes(4, byteorder='big') for token_id in token_ids)
-    hash_obj = hashlib.sha256(token_bytes)
+    hash_obj = hashlib.sha256()
+    if parent_std_hash is not None:
+        hash_obj.update(parent_std_hash.to_bytes(8, byteorder='big'))
+    hash_obj.update(token_bytes)
     full_hash = int.from_bytes(hash_obj.digest()[:8], byteorder='big')
     result = full_hash & 0x7FFFFFFFFFFFFFFF
     # Token ids are detokenizable prompt content, so they must never reach the logs.
@@ -57,9 +62,10 @@ def compute_standardized_hash(token_ids: List[int]) -> int:
 
 
 def standardize_block_hashes(engine_hashes: List[int],
-                             token_ids: List[int]) -> Optional[List[Tuple[int, int]]]:
+                             token_ids: List[int],
+                             parent_std_hash: Optional[int] = None) -> Optional[List[Tuple[int, int]]]:
     """Split token_ids evenly across engine_hashes and pair each engine hash
-    with the standardized hash of its token block.
+    with its standardized prefix hash, continuing from parent_std_hash.
 
     Returns None when the token count does not divide evenly across the hashes.
     """
@@ -76,9 +82,8 @@ def standardize_block_hashes(engine_hashes: List[int],
     pairs: List[Tuple[int, int]] = []
     for i, engine_hash in enumerate(engine_hashes):
         block_tokens = token_ids[i * block_size:(i + 1) * block_size]
-        if not block_tokens:
-            continue
-        pairs.append((engine_hash, compute_standardized_hash(block_tokens)))
+        parent_std_hash = compute_standardized_hash(block_tokens, parent_std_hash)
+        pairs.append((engine_hash, parent_std_hash))
     return pairs
 
 
@@ -99,7 +104,8 @@ class VLLMKVCacheRedisManager:
         return f"{cls.MAPPING_KEY_PREFIX}:{pod_identifier}@{engine_hash}"
 
     async def add_blocks(self, model_name: str, block_hashes: List[int],
-                         pod_identifier: str, token_ids: Optional[List[int]] = None) -> bool:
+                         pod_identifier: str, token_ids: Optional[List[int]] = None,
+                         parent_block_hash: Optional[int] = None) -> bool:
         if not block_hashes or not model_name or not pod_identifier:
             return not block_hashes
 
@@ -108,11 +114,18 @@ class VLLMKVCacheRedisManager:
 
         try:
             client = await self.redis_client.get_connection()
+            parent_std_hash = None
+            if parent_block_hash is not None:
+                parent_std_hash = await self._get_std_hash(client, parent_block_hash, pod_identifier)
+                if parent_std_hash is None:
+                    logger.warning("Skipping BlockStored for %s on %s: unknown parent %s",
+                                   model_name, pod_identifier, parent_block_hash)
+                    return False
             pipe = client.pipeline()
             timestamp = str(int(time.time()))
 
             success = await self._process_token_blocks_with_mapping(
-                model_name, block_hashes, token_ids, pod_identifier, timestamp, pipe)
+                model_name, block_hashes, token_ids, pod_identifier, timestamp, pipe, parent_std_hash)
 
             if not success:
                 return False
@@ -130,8 +143,8 @@ class VLLMKVCacheRedisManager:
 
     async def _process_token_blocks_with_mapping(self, model_name: str, engine_hashes: List[int],
                                                  token_ids: List[int], pod_identifier: str,
-                                                 timestamp: str, pipe) -> bool:
-        pairs = standardize_block_hashes(engine_hashes, token_ids)
+                                                 timestamp: str, pipe, parent_std_hash: Optional[int]) -> bool:
+        pairs = standardize_block_hashes(engine_hashes, token_ids, parent_std_hash)
         if pairs is None:
             return False
 
@@ -203,10 +216,11 @@ class VLLMKVCacheRedisManager:
     @staticmethod
     async def get_standardized_hashes(token_blocks: List[List[int]]) -> List[int]:
         std_hashes = []
+        parent_std_hash = None
         for token_block in token_blocks:
             if len(token_block) > 0:
-                std_hash = compute_standardized_hash(token_block)
-                std_hashes.append(std_hash)
+                parent_std_hash = compute_standardized_hash(token_block, parent_std_hash)
+                std_hashes.append(parent_std_hash)
 
         return std_hashes
 
@@ -314,7 +328,8 @@ class VLLMKVCacheEventHandler(EventHandler):
             model_name=event_data.model_name,
             block_hashes=block_event.block_hashes,
             pod_identifier=event_data.pod_identifier,
-            token_ids=block_event.token_ids
+            token_ids=block_event.token_ids,
+            parent_block_hash=block_event.parent_block_hash,
         )
 
     async def _handle_block_removed(self, event_data: VLLMEventData) -> None:
@@ -387,6 +402,7 @@ class SGLangKVCacheEventHandler(EventHandler):
             block_hashes=block_event.block_hashes,
             pod_identifier=event_data.pod_identifier,
             token_ids=block_event.token_ids,
+            parent_block_hash=block_event.parent_block_hash,
         )
 
     async def _handle_block_removed(self, event_data: SGLangEventData) -> None:

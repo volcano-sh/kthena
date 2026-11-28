@@ -16,9 +16,11 @@ import logging
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import msgspec
 import pytest
 
 from kthena.runtime.events import (
+    EventPublisher,
     EventType,
     SGLangEventData,
     SGLangBlockStoredEvent,
@@ -30,6 +32,7 @@ from kthena.runtime.kv_cache_manager import (
     SGLangKVCacheRedisManager,
     compute_standardized_hash,
 )
+from kthena.runtime.sglang_zmq_subscriber import SGLangZMQSubscriber
 
 
 class _FakePipeline:
@@ -90,10 +93,7 @@ async def test_block_stored_writes_matrix_and_mapping_keys():
 
     token_ids = list(range(32))  # 2 blocks of 16
     sglang_block_hashes = [111, 222]
-    expected_std_hashes = [
-        compute_standardized_hash(token_ids[0:16]),
-        compute_standardized_hash(token_ids[16:32]),
-    ]
+    expected_std_hashes = [6473494984593326032, 8529154092578337085]
 
     event_data = SGLangEventData(
         event_type=EventType.SGLANG_BLOCK_STORED,
@@ -128,6 +128,41 @@ async def test_block_stored_writes_matrix_and_mapping_keys():
     for (_, key, field, _), std_hash in zip(hset_calls, expected_std_hashes):
         assert key == f"matrix:kv:block:qwen@{std_hash}"
         assert field == "pod-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_source", ["local", "redis", "unknown"])
+async def test_redis_block_stored_parent(parent_source, caplog):
+    pipeline = _FakePipeline()
+    manager = SGLangKVCacheRedisManager(_make_redis_client(pipeline))
+
+    async def store(block_hashes, token_ids, parent=None):
+        subscriber = SGLangZMQSubscriber("pod-1", "qwen")
+        subscriber.event_publisher = EventPublisher()
+        subscriber.event_publisher.subscribe(EventType.SGLANG_BLOCK_STORED, SGLangKVCacheEventHandler(manager))
+        event = ["BlockStored", block_hashes, parent, token_ids, 16, None, "GPU"]
+        await subscriber._process_message(msgspec.msgpack.encode([1.0, [event], 0]), "pod-1", "qwen")
+
+    await store([111, 0], list(range(32)))
+
+    if parent_source == "redis":
+        # A restarted sidecar can recover only the mappings written by the first event.
+        persisted = {call[1]: call[2] for call in pipeline.calls if call[0] == "set"}
+        manager = SGLangKVCacheRedisManager(_make_redis_client(pipeline, get_results=persisted))
+    pipeline.calls.clear()
+    parent = 999 if parent_source == "unknown" else 0
+    await store([333], list(range(32, 48)), parent)
+
+    if parent_source == "unknown":
+        assert 333 not in manager.hash_mapping
+        assert pipeline.calls == []
+        assert "unknown parent" in caplog.text
+    else:
+        third = 7004526854457690277  # third block of the Go/Python golden vector
+        assert manager.hash_mapping[333] == third
+        assert ("set", "sglang:kv:block:pod-1@333", str(third)) in pipeline.calls
+        assert [c[:3] for c in pipeline.calls if c[0] == "hset"] == [
+            ("hset", f"matrix:kv:block:qwen@{third}", "pod-1")]
 
 
 @pytest.mark.asyncio

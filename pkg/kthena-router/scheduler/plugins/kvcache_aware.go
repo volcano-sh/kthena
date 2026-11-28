@@ -686,14 +686,23 @@ func (tbp *TokenBlockProcessor) TokensToBlockHashes(tokens []uint32, maxBlocks i
 	return hashes
 }
 
-// computeStandardizedHash generates a consistent hash for token sequences using SHA-256
-// Returns a 63-bit positive integer for Redis/database compatibility
+// computeStandardizedHash hashes the first block of a sequence.
 func computeStandardizedHash(tokenIds []uint32) uint64 {
+	return computeStandardizedHashWithParent(tokenIds, nil)
+}
+
+// Keep the byte encoding in sync with compute_standardized_hash in python/kthena/runtime/kv_cache_manager.py.
+func computeStandardizedHashWithParent(tokenIds []uint32, parentHash *uint64) uint64 {
 	if len(tokenIds) == 0 {
 		return 0
 	}
 
 	h := sha256.New()
+	if parentHash != nil {
+		var parentBytes [8]byte
+		binary.BigEndian.PutUint64(parentBytes[:], *parentHash)
+		h.Write(parentBytes[:])
+	}
 	var tokenBytes [4]byte
 	for _, tokenId := range tokenIds {
 		binary.BigEndian.PutUint32(tokenBytes[:], tokenId)
@@ -728,7 +737,13 @@ func (tbp *TokenBlockProcessor) chunkTokens(tokens []uint32, maxBlocks int) [][]
 func (tbp *TokenBlockProcessor) computeBlockHashes(chunks [][]uint32) []uint64 {
 	hashes := make([]uint64, len(chunks))
 	for i, chunk := range chunks {
-		hashes[i] = computeStandardizedHash(chunk)
+		// Engines cache only full blocks. A short last chunk is hashed without
+		// its parent, so its input is never as long as a cached block's.
+		if i == 0 || len(chunk) < tbp.blockSize {
+			hashes[i] = computeStandardizedHash(chunk)
+		} else {
+			hashes[i] = computeStandardizedHashWithParent(chunk, &hashes[i-1])
+		}
 	}
 	return hashes
 }
