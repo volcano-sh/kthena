@@ -59,6 +59,17 @@ type FileStore interface {
 	Probe(ctx context.Context) error
 	// VolumeID returns the ID of the volume, writing a new one the first time.
 	VolumeID(ctx context.Context) (string, error)
+	// NewWriter starts a file that is written bit by bit and appears under id only once committed.
+	NewWriter(ctx context.Context, tenant, id string) (FileWriter, error)
+}
+
+// FileWriter is a file being written; nobody can read it under its ID until Commit returns.
+type FileWriter interface {
+	io.Writer
+	// Commit makes the file durable under its ID and returns its size.
+	Commit() (int64, error)
+	// Abort throws away what was written.
+	Abort()
 }
 
 // FSStore keeps files on a mounted volume, one directory per tenant.
@@ -98,46 +109,28 @@ func ensureDir(dir string) error {
 	return syncDir(filepath.Dir(dir))
 }
 
-// Create writes a synced temporary file, renames it into place and syncs the directory; a failure leaves nothing.
+// Create writes the file through NewWriter, so it appears only once it is durable; a failure leaves nothing.
 func (s *FSStore) Create(ctx context.Context, tenant, id string, r io.Reader, limit int64) (int64, error) {
-	final, err := s.path(tenant, id)
+	writer, err := s.NewWriter(ctx, tenant, id)
 	if err != nil {
 		return 0, err
 	}
-	dir := filepath.Dir(final)
-	if err := ensureDir(dir); err != nil {
-		return 0, err
-	}
-	temp, err := os.CreateTemp(dir, "."+id+".*")
+	written, err := fill(ctx, writer, r, limit)
 	if err != nil {
+		writer.Abort()
 		return 0, err
 	}
-	var written int64
-	if err = temp.Chmod(fileMode); err == nil {
-		written, err = fill(ctx, temp, r, limit)
-	}
-	if closeErr := temp.Close(); err == nil {
-		err = closeErr
-	}
-	if err == nil {
-		err = os.Rename(temp.Name(), final)
-	}
-	if err != nil {
-		_ = os.Remove(temp.Name())
-		return 0, err
-	}
-	if err := syncDir(dir); err != nil {
-		_ = os.Remove(final)
+	if _, err := writer.Commit(); err != nil {
 		return 0, err
 	}
 	return written, nil
 }
 
-func fill(ctx context.Context, f *os.File, r io.Reader, limit int64) (int64, error) {
+func fill(ctx context.Context, w io.Writer, r io.Reader, limit int64) (int64, error) {
 	if limit > 0 {
 		r = io.LimitReader(r, limit+1)
 	}
-	written, err := io.Copy(f, r)
+	written, err := io.Copy(w, r)
 	if err != nil {
 		return 0, err
 	}
@@ -147,7 +140,69 @@ func fill(ctx context.Context, f *os.File, r io.Reader, limit int64) (int64, err
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	return written, f.Sync()
+	return written, nil
+}
+
+// NewWriter starts a temporary file in the tenant's directory, which Commit syncs and renames into place.
+func (s *FSStore) NewWriter(_ context.Context, tenant, id string) (FileWriter, error) {
+	final, err := s.path(tenant, id)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(final)
+	if err := ensureDir(dir); err != nil {
+		return nil, err
+	}
+	temp, err := os.CreateTemp(dir, "."+id+".*")
+	if err != nil {
+		return nil, err
+	}
+	if err := temp.Chmod(fileMode); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(temp.Name())
+		return nil, err
+	}
+	return &fsWriter{temp: temp, final: final, dir: dir}, nil
+}
+
+// fsWriter is a file on the volume that is still under its temporary name.
+type fsWriter struct {
+	temp    *os.File
+	final   string
+	dir     string
+	written int64
+}
+
+func (w *fsWriter) Write(p []byte) (int, error) {
+	n, err := w.temp.Write(p)
+	w.written += int64(n)
+	return n, err
+}
+
+// Commit syncs the file, renames it into place and syncs the directory; on a failure nothing is left.
+func (w *fsWriter) Commit() (int64, error) {
+	err := w.temp.Sync()
+	if closeErr := w.temp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(w.temp.Name(), w.final)
+	}
+	if err != nil {
+		_ = os.Remove(w.temp.Name())
+		return 0, err
+	}
+	if err := syncDir(w.dir); err != nil {
+		_ = os.Remove(w.final)
+		return 0, err
+	}
+	return w.written, nil
+}
+
+// Abort removes the temporary file.
+func (w *fsWriter) Abort() {
+	_ = w.temp.Close()
+	_ = os.Remove(w.temp.Name())
 }
 
 // Open returns the file for reading.

@@ -30,6 +30,18 @@ type Store interface {
 	ListFiles(ctx context.Context, query FileQuery) ([]*File, bool, error)
 	// ClaimVolume records volumeID as the volume of these records unless one is recorded, and returns the recorded one.
 	ClaimVolume(ctx context.Context, volumeID string) (string, error)
+	// CreateJob holds the input file for the batch and queues it in one step; a retry of the same ID changes nothing.
+	CreateJob(ctx context.Context, job *Job) error
+	// GetJob returns one batch record, or ErrNotFound.
+	GetJob(ctx context.Context, id string) (*Job, error)
+	// Claim takes the oldest queued batch for holder under fence, or returns nil when none is waiting; a call with the same fence returns the same batch.
+	Claim(ctx context.Context, holder, fence string) (*Lease, error)
+	// Progress records the counts of a run, or returns ErrNotOwner.
+	Progress(ctx context.Context, lease *Lease, total, completed, failed int64) error
+	// Transition moves the batch from one status to the next and sets fields; a final status lets go of the input file.
+	Transition(ctx context.Context, lease *Lease, from, to Status, fields map[string]string) error
+	// Release hands a running batch back to the queue at its original place.
+	Release(ctx context.Context, lease *Lease) error
 }
 
 // FileQuery selects one page of a tenant's files.

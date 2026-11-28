@@ -149,7 +149,7 @@ func (s *Server) Run(ctx context.Context) {
 	defer stopStore()
 	store.Run(storeCtx)
 	// start the batch API before the listeners, so the first request already finds it
-	startBatch(ctx, r)
+	batchDone := startBatch(ctx, r)
 	// start router
 	s.startRouter(ctx, r, store)
 
@@ -158,6 +158,8 @@ func (s *Server) Run(ctx context.Context) {
 	<-ctx.Done()
 	klog.Info("Router server shutting down...")
 	s.shutdown()
+	// The batch worker stopped with ctx; its hand-back to the queue still needs Redis and the store's loops, which run until Run returns.
+	waitForBatch(batchDone, batchShutdownWait)
 }
 
 // shutdown returns once the inference listeners have drained, or have been

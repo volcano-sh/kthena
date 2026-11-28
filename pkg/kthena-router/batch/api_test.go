@@ -278,6 +278,9 @@ func TestHandlesOnlyTheBatchRoutes(t *testing.T) {
 	assert.False(t, api.service.Handles(http.MethodPost, "/v1/chat/completions"))
 	assert.False(t, api.service.Handles(http.MethodGet, "/v1/models"))
 	assert.False(t, api.service.Handles(http.MethodGet, "/v1/filesystem"))
+	assert.True(t, api.service.Handles(http.MethodPost, batchesPath))
+	assert.True(t, api.service.Handles(http.MethodGet, batchesPath+"/batch_1"))
+	assert.False(t, api.service.Handles(http.MethodGet, "/v1/batchesx"))
 
 	rec := api.call(t, "alice", httptest.NewRequest(http.MethodPut, filesPath+"/file-1", nil))
 	assert.Equal(t, http.StatusNotFound, rec.Code, "an unknown method on a known path is refused")
@@ -1362,7 +1365,7 @@ func TestAListLimitTooLargeForAnIntIsTheLargestPage(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, negative.Code, "a negative limit stays refused, however large")
 }
 
-// Uploads only take purpose batch, so a listing for any other purpose must not walk a tenant's whole index.
+// Only batch inputs and results are stored, so a listing for any other purpose must not walk a tenant's whole index.
 func TestListingAPurposeThatIsNeverStoredReadsNothing(t *testing.T) {
 	api := newTestAPI(t)
 	for i := 0; i < 3; i++ {
@@ -1371,12 +1374,30 @@ func TestListingAPurposeThatIsNeverStoredReadsNothing(t *testing.T) {
 	trips := &roundTrips{}
 	api.store.client.AddHook(trips)
 
-	for _, purpose := range []string{"assistants", PurposeBatchOutput} {
+	for _, purpose := range []string{"assistants", "fine-tune"} {
 		rec := api.call(t, "alice", httptest.NewRequest(http.MethodGet, filesPath+"?purpose="+purpose, nil))
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.Empty(t, decode(t, rec)["data"], purpose)
-		assert.Equal(t, int64(0), trips.n.Load(), "nothing to read for %s, which no file has yet", purpose)
+		assert.Equal(t, int64(0), trips.n.Load(), "nothing to read for %s, which no file has", purpose)
 	}
+}
+
+func TestResultFilesAreListedByTheirPurpose(t *testing.T) {
+	api := newTestAPI(t)
+	upload := mustUpload(t, api, "alice", "line\n")
+	require.NoError(t, api.store.CreateFile(context.Background(), &File{ID: "file-result", Tenant: tenantID("", "alice"), Purpose: PurposeBatchOutput, Status: FileProcessed, CreatedAt: api.service.now().Unix() + 1}))
+	list := func(query string) []string {
+		rec := api.call(t, "alice", httptest.NewRequest(http.MethodGet, filesPath+query, nil))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var ids []string
+		for _, item := range decode(t, rec)["data"].([]any) {
+			ids = append(ids, item.(map[string]any)["id"].(string))
+		}
+		return ids
+	}
+	assert.Equal(t, []string{"file-result"}, list("?purpose="+PurposeBatchOutput))
+	assert.Equal(t, []string{upload}, list("?purpose="+PurposeBatch))
+	assert.ElementsMatch(t, []string{"file-result", upload}, list(""))
 }
 
 func TestListFilesPageSizes(t *testing.T) {

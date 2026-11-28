@@ -18,18 +18,23 @@ package app
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"strconv"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"k8s.io/klog/v2"
 
 	"github.com/volcano-sh/kthena/pkg/kthena-router/batch"
+	"github.com/volcano-sh/kthena/pkg/kthena-router/common"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/router"
 	"github.com/volcano-sh/kthena/pkg/kthena-router/utils"
 )
 
 const (
+	// batchShutdownWait bounds how long the router waits for the batch worker; the chart's grace period leaves room for it.
+	batchShutdownWait       = 15 * time.Second
 	defaultBatchStoragePath = "/var/lib/kthena/batch"
 	// batchFileExpiration is the proposal's default lifetime of a file uploaded without expires_after.
 	batchFileExpiration = 30 * 24 * time.Hour
@@ -66,17 +71,70 @@ func batchOptionsFromEnv() batchOptions {
 	return options
 }
 
-// startBatch makes the router serve the batch API when BATCH_ENABLED is set; the channel closes once its checks stop.
+// startBatch makes the router serve the batch API and run batches when BATCH_ENABLED is set; the channel closes once both stop.
 func startBatch(ctx context.Context, r *router.Router) <-chan struct{} {
 	options := batchOptionsFromEnv()
 	if !options.enabled {
 		return nil
 	}
 	store := batch.NewRedisStore(utils.NewRedisClient(), "")
-	service := batch.NewService(store, batch.NewFSStore(options.storagePath), batch.Config{MaxFileBytes: options.maxFileBytes, FileExpiration: batchFileExpiration})
-	// The storage check runs in the background: requests answer 503 until it passes, and the listeners never wait for it.
+	service := batch.NewService(store, batch.NewFSStore(options.storagePath), batch.Config{
+		MaxFileBytes:   options.maxFileBytes,
+		FileExpiration: batchFileExpiration,
+		Gateway:        gatewayOf,
+		Dispatcher:     batch.NewHandlerDispatcher(newBatchPipeline(r)),
+		Holder:         os.Getenv("POD_NAME"),
+	})
+	// The storage check runs in the background: requests answer 503 and no batch runs until it passes, and the listeners never wait for it.
 	done := service.Start(ctx)
 	r.SetAPIExtension(service)
 	klog.Infof("Batch API enabled, files under %s", options.storagePath)
 	return done
+}
+
+// gatewayOf reads the Gateway API listener that the listener chain matched for this request; empty outside Gateway API mode.
+func gatewayOf(c *gin.Context) (string, string, int) {
+	return c.GetString(router.GatewayKey), c.GetString(router.GatewayListenerNameKey), c.GetInt(router.GatewayListenerPortKey)
+}
+
+// newBatchPipeline is the chain a batch line takes, as a listener's but with the batch identity in place of authentication; no port serves it.
+func newBatchPipeline(r *router.Router) http.Handler {
+	engine := gin.New()
+	engine.Use(gin.Recovery())
+	engine.Use(batchIdentity())
+	engine.Use(AccessLogMiddleware(r))
+	engine.Any("/*path", r.HandlerFunc())
+	return engine.Handler()
+}
+
+// batchIdentity sets what authentication and the Gateway listener would set, from the identity only the worker can put in the Go context.
+func batchIdentity() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		identity, ok := batch.IdentityFromContext(c.Request.Context())
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "only batch lines may use this pipeline"})
+			return
+		}
+		if identity.Subject != "" {
+			c.Set(common.UserIdKey, identity.Subject)
+		}
+		if origin := identity.Origin; origin.Gateway != "" {
+			c.Set(router.GatewayKey, origin.Gateway)
+			c.Set(router.GatewayListenerNameKey, origin.Listener)
+			c.Set(router.GatewayListenerPortKey, origin.Port)
+		}
+		c.Next()
+	}
+}
+
+// waitForBatch gives the batch worker a bounded time to hand its batches back after the listeners have drained.
+func waitForBatch(done <-chan struct{}, limit time.Duration) {
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(limit):
+		klog.Warningf("The batch worker did not stop within %v; a batch it was still running stays in_progress", limit)
+	}
 }

@@ -61,9 +61,15 @@ type Config struct {
 	MaxFileBytes int64
 	// FileExpiration is how long an upload lives when the client sets no expiry; 0 is forever.
 	FileExpiration time.Duration
+	// Gateway reads the Gateway API listener a request came in on, so this package never imports the router.
+	Gateway func(c *gin.Context) (gateway, listener string, port int)
+	// Dispatcher sends batch lines through the router; without one this replica runs no batches.
+	Dispatcher Dispatcher
+	// Holder names this replica on the batches it runs; empty picks a random name.
+	Holder string
 }
 
-// Service serves the OpenAI-compatible files API.
+// Service serves the OpenAI-compatible files and batches API, and runs batches when it has a dispatcher.
 type Service struct {
 	store        Store
 	files        FileStore
@@ -71,6 +77,7 @@ type Service struct {
 	now          func() time.Time
 	newID        func(prefix string) string
 	gate         *readiness
+	worker       *worker
 	readyWait    time.Duration
 	retryEvery   time.Duration
 	recheckEvery time.Duration
@@ -85,6 +92,13 @@ func NewService(store Store, files FileStore, config Config) *Service {
 	config.MaxFileBytes = min(config.MaxFileBytes, largestFileLimit)
 	s := &Service{store: store, files: files, config: config, now: time.Now, newID: newID, readyWait: defaultReadyWait, retryEvery: defaultRetryEvery, recheckEvery: defaultRecheckEvery, uploadIdle: defaultUploadIdle}
 	s.gate = &readiness{check: s.checkStorage}
+	if config.Dispatcher != nil {
+		holder := config.Holder
+		if holder == "" {
+			holder = newID("router-")
+		}
+		s.worker = &worker{store: store, exec: newExecutor(store, files, config.Dispatcher), gate: s.gate, holder: holder, runners: defaultRunners, poll: defaultPoll}
+	}
 	return s
 }
 
@@ -98,19 +112,33 @@ func newID(prefix string) string {
 
 // Handles reports whether the path belongs to this API.
 func (s *Service) Handles(_, path string) bool {
-	return path == filesPath || strings.HasPrefix(path, filesPath+"/")
+	return under(path, filesPath) || under(path, batchesPath)
+}
+
+// under reports whether path is root or below it.
+func under(path, root string) bool {
+	return path == root || strings.HasPrefix(path, root+"/")
 }
 
 // Serve answers one request that Handles accepted.
 func (s *Service) Serve(c *gin.Context) {
 	method := c.Request.Method
+	// A batch line runs with its owner's identity and no token, so it must never reach the owner's files or batches.
+	if _, ok := IdentityFromContext(c.Request.Context()); ok {
+		fail(c, http.StatusNotFound, errInvalidRequest, "", "a batch request cannot call the batch API")
+		return
+	}
 	// Every verified token without a subject would share one tenant, so such a caller is refused.
 	if !namesOwner(c) {
-		fail(c, http.StatusForbidden, errInvalidRequest, "", "the token has no subject, so it cannot own files")
+		fail(c, http.StatusForbidden, errInvalidRequest, "", "the token has no subject, so it cannot own files or batches")
 		return
 	}
 	if !s.gate.await(c.Request.Context(), s.readyWait) {
 		fail(c, http.StatusServiceUnavailable, errAPI, "", "batch storage is not ready")
+		return
+	}
+	if under(c.Request.URL.Path, batchesPath) {
+		s.serveBatches(c)
 		return
 	}
 	rest := strings.Trim(strings.TrimPrefix(c.Request.URL.Path, filesPath), "/")
@@ -474,8 +502,8 @@ func (s *Service) listFiles(c *gin.Context) {
 	}
 	var files []*File
 	var more bool
-	// Uploads only take purpose batch, so any other purpose lists nothing without reading the store.
-	if query.Purpose == "" || query.Purpose == PurposeBatch {
+	// Only batch inputs and results are stored, so any other purpose lists nothing without reading the store.
+	if query.Purpose == "" || query.Purpose == PurposeBatch || query.Purpose == PurposeBatchOutput {
 		var err error
 		files, more, err = s.store.ListFiles(c.Request.Context(), query)
 		if errors.Is(err, ErrNotFound) {

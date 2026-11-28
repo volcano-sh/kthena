@@ -117,12 +117,25 @@ func (r *readiness) keepChecking(ctx context.Context, retry, recheck time.Durati
 	}
 }
 
-// Start checks the storage in the background for as long as ctx lives; the channel closes once the checks have stopped.
+// Start checks the storage and runs batches in the background for as long as ctx lives; the channel closes once both stopped.
 func (s *Service) Start(ctx context.Context) <-chan struct{} {
+	var parts sync.WaitGroup
+	parts.Add(1)
+	go func() {
+		defer parts.Done()
+		s.gate.keepChecking(ctx, s.retryEvery, s.recheckEvery)
+	}()
+	if s.worker != nil {
+		parts.Add(1)
+		go func() {
+			defer parts.Done()
+			s.worker.run(ctx)
+		}()
+	}
 	done := make(chan struct{})
 	go func() {
-		defer close(done)
-		s.gate.keepChecking(ctx, s.retryEvery, s.recheckEvery)
+		parts.Wait()
+		close(done)
 	}()
 	return done
 }

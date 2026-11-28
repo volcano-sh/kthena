@@ -324,3 +324,47 @@ func TestFileStoreLeavesNothingBehindWhenTheDirectoryCannotBeSynced(t *testing.T
 	require.Len(t, entries, 1, "a failed create leaves no bytes for the caller to clean up")
 	assert.Equal(t, "file-1", entries[0].Name())
 }
+
+func TestWriterShowsTheFileOnlyOnceCommitted(t *testing.T) {
+	store, root := newTestFileStore(t)
+	ctx := context.Background()
+	writer, err := store.NewWriter(ctx, "alice", "file-out")
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "line 1\n")
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "line 2\n")
+	require.NoError(t, err)
+	_, err = store.Open(ctx, "alice", "file-out")
+	assert.ErrorIs(t, err, ErrNotFound, "a file being written is not there yet")
+
+	size, err := writer.Commit()
+	require.NoError(t, err)
+	assert.Equal(t, int64(14), size)
+	assert.Equal(t, "line 1\nline 2\n", readAll(t, store, "alice", "file-out"))
+	entries, err := os.ReadDir(filepath.Join(root, "alice"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "no temporary file is left behind")
+	info, err := entries[0].Info()
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(fileMode), info.Mode().Perm())
+}
+
+func TestWriterAbortLeavesNothing(t *testing.T) {
+	store, root := newTestFileStore(t)
+	writer, err := store.NewWriter(context.Background(), "alice", "file-out")
+	require.NoError(t, err)
+	_, err = io.WriteString(writer, "half")
+	require.NoError(t, err)
+	writer.Abort()
+	entries, err := os.ReadDir(filepath.Join(root, "alice"))
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestWriterRejectsUnsafeNames(t *testing.T) {
+	store, _ := newTestFileStore(t)
+	for _, name := range [][2]string{{"../alice", "file-1"}, {"alice", "../file-1"}, {"", "file-1"}} {
+		_, err := store.NewWriter(context.Background(), name[0], name[1])
+		assert.Error(t, err, "%v", name)
+	}
+}
