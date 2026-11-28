@@ -81,13 +81,17 @@ func (engine *sglangEngine) GetCountMetricsInfo(allMetrics map[string]*dto.Metri
 	wantMetrics := make(map[string]float64)
 	for _, metricName := range CounterAndGaugeMetrics {
 		metricInfo, exist := allMetrics[metricName]
-		if !exist {
+		if !exist || len(metricInfo.Metric) == 0 {
 			continue
 		}
+		var total float64
 		for _, metric := range metricInfo.Metric {
-			metricValue := metric.GetGauge().GetValue()
-			wantMetrics[mapOfMetricsName[metricName]] = metricValue
+			total += metric.GetGauge().GetValue()
 		}
+		if metricName == KVCacheUsage {
+			total /= float64(len(metricInfo.Metric))
+		}
+		wantMetrics[mapOfMetricsName[metricName]] = total
 	}
 
 	return wantMetrics
@@ -98,19 +102,19 @@ func (engine *sglangEngine) GetHistogramPodMetrics(allMetrics map[string]*dto.Me
 	histogramMetrics := make(map[string]*dto.Histogram)
 	for _, metricName := range HistogramMetrics {
 		metricInfo, exist := allMetrics[metricName]
-		if !exist {
+		if !exist || len(metricInfo.Metric) == 0 {
 			continue
 		}
+		name := mapOfMetricsName[metricName]
+		histogramMetrics[name] = metrics.MergeHistograms(metricInfo.Metric)
 		for _, metric := range metricInfo.Metric {
-			metricValue := metric.GetHistogram()
-			histogramMetrics[mapOfMetricsName[metricName]] = metricValue
-			previousMetric := previousHistogram[mapOfMetricsName[metricName]]
-			if previousMetric == nil {
-				// Ignore the effects of history and give each pod a fair chance at the initial.
-				wantMetrics[mapOfMetricsName[metricName]] = float64(0.0)
-			} else {
-				wantMetrics[mapOfMetricsName[metricName]] = metrics.LastPeriodAvg(previousMetric, metricValue)
-			}
+			histogramMetrics[metrics.SeriesKey(name, metric)] = metric.GetHistogram()
+		}
+		if previousHistogram[name] == nil {
+			// Ignore the effects of history and give each pod a fair chance at the initial.
+			wantMetrics[name] = float64(0.0)
+		} else {
+			wantMetrics[name] = metrics.SeriesPeriodAvg(name, metricInfo.Metric, previousHistogram)
 		}
 	}
 

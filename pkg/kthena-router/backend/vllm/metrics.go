@@ -17,10 +17,6 @@ limitations under the License.
 package vllm
 
 import (
-	"slices"
-	"strconv"
-	"strings"
-
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 
@@ -109,59 +105,17 @@ func (engine *vllmEngine) GetHistogramPodMetrics(allMetrics map[string]*dto.Metr
 			continue
 		}
 		name := mapOfMetricsName[metricName]
-		histogramMetrics[name] = mergeHistograms(metricInfo.Metric)
+		histogramMetrics[name] = metrics.MergeHistograms(metricInfo.Metric)
 		for _, metric := range metricInfo.Metric {
-			histogramMetrics[seriesKey(name, metric)] = metric.GetHistogram()
+			histogramMetrics[metrics.SeriesKey(name, metric)] = metric.GetHistogram()
 		}
 		if previousHistogram[name] == nil {
 			// Ignore the effects of history and give each pod a fair chance at the initial.
 			wantMetrics[name] = float64(0.0)
 		} else {
-			wantMetrics[name] = seriesPeriodAvg(name, metricInfo.Metric, previousHistogram)
+			wantMetrics[name] = metrics.SeriesPeriodAvg(name, metricInfo.Metric, previousHistogram)
 		}
 	}
 
 	return wantMetrics, histogramMetrics
-}
-
-// mergeHistograms adds up the sample counts and sums across every series.
-func mergeHistograms(series []*dto.Metric) *dto.Histogram {
-	var count uint64
-	var sum float64
-	for _, metric := range series {
-		count += metric.GetHistogram().GetSampleCount()
-		sum += metric.GetHistogram().GetSampleSum()
-	}
-	return &dto.Histogram{SampleCount: &count, SampleSum: &sum}
-}
-
-// seriesKey names one series of a histogram by its labels.
-func seriesKey(name string, metric *dto.Metric) string {
-	pairs := make([]string, 0, len(metric.GetLabel()))
-	for _, label := range metric.GetLabel() {
-		pairs = append(pairs, label.GetName()+"="+strconv.Quote(label.GetValue()))
-	}
-	slices.Sort(pairs)
-	return name + "{" + strings.Join(pairs, ",") + "}"
-}
-
-// seriesPeriodAvg averages the samples each series gained since the previous scrape.
-func seriesPeriodAvg(name string, series []*dto.Metric, previous map[string]*dto.Histogram) float64 {
-	var sum float64
-	var count uint64
-	for _, metric := range series {
-		current := metric.GetHistogram()
-		seriesSum, seriesCount := current.GetSampleSum(), current.GetSampleCount()
-		// A series without a previous value, or with smaller totals, started or restarted since the last scrape.
-		if prev := previous[seriesKey(name, metric)]; prev != nil && seriesCount >= prev.GetSampleCount() && seriesSum >= prev.GetSampleSum() {
-			seriesSum -= prev.GetSampleSum()
-			seriesCount -= prev.GetSampleCount()
-		}
-		sum += seriesSum
-		count += seriesCount
-	}
-	if count == 0 {
-		return 0
-	}
-	return sum / float64(count)
 }
