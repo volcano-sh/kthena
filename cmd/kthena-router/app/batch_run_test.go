@@ -232,3 +232,45 @@ func TestWaitForBatchIsBounded(t *testing.T) {
 	waitForBatch(make(chan struct{}), 20*time.Millisecond)
 	assert.Less(t, time.Since(start), 5*time.Second, "a worker that never stops does not hold the router")
 }
+
+func TestASignedBatchBelongsToItsOwner(t *testing.T) {
+	redisServer, _ := enableBatch(t)
+	t.Setenv("ACCESS_LOG_ENABLED", "false")
+	issuer := newTokenIssuer(t)
+	model := newFakeModelServer(t)
+	r := NewRouter(routedStore(t, model.server, ""), issuer.routerConfig(t), common.NewTransportRegistry())
+	done := startBatch(t.Context(), r)
+	require.NotNil(t, done)
+	t.Cleanup(func() { waitForBatch(done, 15*time.Second) })
+	handler := defaultListener(t, r)
+	alice := issuer.token(t, "https://issuer.example", "alice")
+	bob := issuer.token(t, "https://issuer.example", "bob")
+	createAs := func(token, input string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/batches", bytes.NewBufferString(`{"input_file_id":"`+input+`","endpoint":"/v1/chat/completions","completion_window":"24h"}`))
+		req.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		return serve(handler, req)
+	}
+
+	uploaded := serve(handler, uploadRequest(t, batchLine("q1"), alice))
+	require.Equal(t, http.StatusOK, uploaded.Code, uploaded.Body.String())
+	input, _ := decodeBody(t, uploaded)["id"].(string)
+	assert.Equal(t, http.StatusUnauthorized, createAs("", input).Code, "authentication runs before the batch API")
+	assert.Equal(t, http.StatusBadRequest, createAs(bob, input).Code, "another tenant's file cannot start a batch")
+	created := createAs(alice, input)
+	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
+	id, _ := decodeBody(t, created)["id"].(string)
+
+	assert.Equal(t, http.StatusNotFound, serve(handler, request(http.MethodGet, "/v1/batches/"+id, bob)).Code, "another tenant sees no batch")
+	var job map[string]any
+	require.Eventually(t, func() bool {
+		job = decodeBody(t, serve(handler, request(http.MethodGet, "/v1/batches/"+id, alice)))
+		return job["status"] == "completed"
+	}, 30*time.Second, 20*time.Millisecond)
+	assert.Equal(t, "alice", redisServer.HGet("kthena:batch:{b}:job:"+id, "subject"), "the lines run as the token's subject")
+	output := job["output_file_id"].(string)
+	assert.Equal(t, http.StatusOK, serve(handler, request(http.MethodGet, "/v1/files/"+output+"/content", alice)).Code)
+	assert.Equal(t, http.StatusNotFound, serve(handler, request(http.MethodGet, "/v1/files/"+output+"/content", bob)).Code, "the results belong to the owner")
+}
