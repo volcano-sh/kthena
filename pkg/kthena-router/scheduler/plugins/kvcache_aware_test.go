@@ -277,6 +277,84 @@ func TestTokenBlockProcessor_TokensToBlockHashes_Core(t *testing.T) {
 	}
 }
 
+func TestTokenBlockProcessor_ChainedHashGolden(t *testing.T) {
+	processor := &TokenBlockProcessor{blockSize: 16}
+	tokens := make([]uint32, 64)
+	for i := range tokens {
+		tokens[i] = uint32(i)
+	}
+	// Shared with the Python runtime tests. The first value is the legacy block-0 hash.
+	want := []uint64{6473494984593326032, 8529154092578337085, 7004526854457690277, 6210590132355917408}
+	if got := processor.TokensToBlockHashes(tokens, 4); !reflect.DeepEqual(got, want) {
+		t.Fatalf("block hashes = %v, want %v", got, want)
+	}
+}
+
+func TestTokenBlockProcessor_HashesIncludePrefix(t *testing.T) {
+	processor := &TokenBlockProcessor{blockSize: 1}
+	prefix := processor.TokensToBlockHashes([]uint32{1, 2, 3}, 3)
+	extended := processor.TokensToBlockHashes([]uint32{1, 2, 3, 4}, 4)
+	if !reflect.DeepEqual(prefix, extended[:3]) {
+		t.Fatalf("same prefix has different hashes: %v, %v", prefix, extended)
+	}
+	other := processor.TokensToBlockHashes([]uint32{9, 2, 3}, 3)
+	if prefix[1] == other[1] || prefix[2] == other[2] {
+		t.Fatalf("shared suffix after different prefixes has a matching hash: %v, %v", prefix, other)
+	}
+}
+
+func TestTokenBlockProcessor_ShortTailNeverMatchesFullBlock(t *testing.T) {
+	processor := &TokenBlockProcessor{blockSize: 4}
+	// The first block's hash is 64614<<32 | 88387, so chaining the two-token
+	// tail would hash the same bytes as the full block {64614, 88387, 2944, 2945}.
+	query := processor.TokensToBlockHashes([]uint32{0, 0, 1685, 7937, 2944, 2945}, 2)
+	full := processor.TokensToBlockHashes([]uint32{64614, 88387, 2944, 2945}, 1)
+	if query[1] == full[0] {
+		t.Fatalf("short tail hash %d matches a full block", query[1])
+	}
+}
+
+func TestKVCacheAware_ScorePrefersReusablePrefix(t *testing.T) {
+	// One token per block. The tokenizer returns A+Y for the scoring request.
+	tokenizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"count":4,"tokens":[1,2,7,8]}`)
+	}))
+	defer tokenizer.Close()
+	plugin := &KVCacheAware{
+		indexMode:        kvCacheIndexModeMemory,
+		memoryIndex:      NewKVBlockMemoryIndex(0),
+		processor:        &TokenBlockProcessor{blockSize: 1},
+		maxBlocksToMatch: 4,
+		tokenizerManager: tokenization.NewTokenizerManager(tokenization.TokenizerManagerConfig{
+			Service: tokenization.TokenizerServiceConfig{Enabled: true, Endpoint: tokenizer.URL},
+		}),
+	}
+	const model = "test-model"
+	pods := createTestPods("pod-0", "pod-1")
+	for _, cached := range []struct {
+		pod    *datastore.PodInfo
+		tokens []uint32
+	}{
+		{pods[0], []uint32{1, 2, 3, 4}}, // A+X
+		{pods[0], []uint32{5, 6, 7, 8}}, // B+Y
+		{pods[1], []uint32{1, 2, 7}},    // A and the first block of Y
+	} {
+		hashes := plugin.processor.TokensToBlockHashes(cached.tokens, plugin.maxBlocksToMatch)
+		err := plugin.memoryIndex.Apply(podCacheOwnerIdentifier(cached.pod), &KVEventPayload{
+			ModelName: model,
+			Events:    []KVEvent{{Type: kvEventStored, BlockHashes: hashes}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	scores := plugin.Score(&framework.Context{UpstreamModel: model, Prompt: &common.ChatMessage{Text: "A+Y"}}, pods)
+	if scores[pods[0]] != 50 || scores[pods[1]] != 75 {
+		t.Fatalf("scores for pod-0, pod-1 = %d, %d; want 50, 75", scores[pods[0]], scores[pods[1]])
+	}
+}
+
 func TestKVCacheAware_CalculatePodScores_Core(t *testing.T) {
 	plugin := &KVCacheAware{}
 

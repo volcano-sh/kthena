@@ -119,11 +119,10 @@ class MemoryKVCacheManager:
     """
 
     def __init__(self):
-        # engine hash -> standardized hash, needed because removal events only
-        # carry engine hashes.
+        # engine hash -> standardized hash for continuations and removals.
         self.hash_mapping: Dict[int, int] = {}
         # model name -> {std_hash: number of engine hashes currently mapped to
-        # it}. Blocks with identical token content but different prefixes have
+        # it}. Identical prefixes under different LoRA adapters can have
         # distinct engine hashes yet the same standardized hash, so a
         # standardized hash may only be dropped once its last engine-hash
         # reference is removed.
@@ -234,13 +233,21 @@ class MemoryKVCacheManager:
             self._close_stream(stream)
 
     async def add_blocks(self, model_name: str, block_hashes: List[int],
-                         pod_identifier: str, token_ids: Optional[List[int]] = None) -> bool:
+                         pod_identifier: str, token_ids: Optional[List[int]] = None,
+                         parent_block_hash: Optional[int] = None) -> bool:
         if not block_hashes or not model_name or not pod_identifier:
             return not block_hashes
         if not token_ids:
             return True
 
-        pairs = standardize_block_hashes(block_hashes, token_ids)
+        parent_std_hash = None
+        if parent_block_hash is not None:
+            parent_std_hash = self.hash_mapping.get(parent_block_hash)
+            if parent_std_hash is None:
+                logger.warning("Skipping BlockStored for %s on %s: unknown parent %s",
+                               model_name, pod_identifier, parent_block_hash)
+                return False
+        pairs = standardize_block_hashes(block_hashes, token_ids, parent_std_hash)
         if pairs is None:
             return False
 

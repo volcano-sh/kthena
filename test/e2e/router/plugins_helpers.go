@@ -155,13 +155,19 @@ func kvCachePromptHashes(t *testing.T, pod corev1.Pod, model, prompt string) []s
 	require.GreaterOrEqual(t, len(result.Tokens), kvCacheBlockSize, "KV-cache prompt must contain a complete block")
 
 	hashes := make([]string, 0, len(result.Tokens)/kvCacheBlockSize)
+	var parentHash uint64
+	tokenBytes := make([]byte, 0, 8+kvCacheBlockSize*4)
 	for start := 0; start+kvCacheBlockSize <= len(result.Tokens); start += kvCacheBlockSize {
-		tokenBytes := make([]byte, kvCacheBlockSize*4)
-		for i, tokenID := range result.Tokens[start : start+kvCacheBlockSize] {
-			binary.BigEndian.PutUint32(tokenBytes[i*4:], uint32(tokenID))
+		tokenBytes = tokenBytes[:0]
+		if start > 0 {
+			tokenBytes = binary.BigEndian.AppendUint64(tokenBytes, parentHash)
+		}
+		for _, tokenID := range result.Tokens[start : start+kvCacheBlockSize] {
+			tokenBytes = binary.BigEndian.AppendUint32(tokenBytes, uint32(tokenID))
 		}
 		sum := sha256.Sum256(tokenBytes)
-		hashes = append(hashes, fmt.Sprintf("%d", binary.BigEndian.Uint64(sum[:8])&0x7FFFFFFFFFFFFFFF))
+		parentHash = binary.BigEndian.Uint64(sum[:8]) & 0x7FFFFFFFFFFFFFFF
+		hashes = append(hashes, fmt.Sprintf("%d", parentHash))
 	}
 	return hashes
 }

@@ -16,10 +16,17 @@ import asyncio
 import json
 import sys
 
+import msgspec
 import pytest
 
 from kthena.runtime import memory_kv_manager as mkm
-from kthena.runtime.kv_cache_manager import compute_standardized_hash
+from kthena.runtime.events import EventPublisher, EventType
+from kthena.runtime.kv_cache_manager import (
+    VLLMKVCacheEventHandler,
+    VLLMKVCacheRedisManager,
+    compute_standardized_hash,
+    standardize_block_hashes,
+)
 from kthena.runtime.memory_kv_manager import (
     KV_EVENT_CLEARED,
     KV_EVENT_REMOVED,
@@ -27,6 +34,11 @@ from kthena.runtime.memory_kv_manager import (
     MemoryKVCacheManager,
     RouterStreamUnavailable,
 )
+from kthena.runtime.zmq_subscriber import VLLMZMQSubscriber
+
+
+# Tokens 0..63 in blocks of 16. Shared with TestTokenBlockProcessor_ChainedHashGolden in Go.
+GOLDEN_HASHES = [6473494984593326032, 8529154092578337085, 7004526854457690277, 6210590132355917408]
 
 
 async def _read(stream_iter, count):
@@ -49,15 +61,52 @@ def _queued(stream):
 
 
 @pytest.mark.asyncio
+async def test_standardized_hashes_golden():
+    token_ids = list(range(64))
+    blocks = [token_ids[i:i + 16] for i in range(0, 64, 16)]
+    engine_hashes = [11, 22, 33, 44]
+    assert standardize_block_hashes(engine_hashes, token_ids) == list(zip(engine_hashes, GOLDEN_HASHES))
+    assert await VLLMKVCacheRedisManager.get_standardized_hashes(blocks) == GOLDEN_HASHES
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("known_parent", [True, False], ids=["known-parent", "unknown-parent"])
+async def test_memory_block_stored_parent(known_parent, caplog):
+    manager = MemoryKVCacheManager()
+    stream = manager.open_stream("router-a")
+    subscriber = VLLMZMQSubscriber("pod-1", "qwen")
+    subscriber.event_publisher = EventPublisher()
+    subscriber.event_publisher.subscribe(EventType.VLLM_BLOCK_STORED, VLLMKVCacheEventHandler(manager))
+
+    async def store(hashes, token_ids, parent=None):
+        event = {"type": "BlockStored", "block_hashes": hashes, "parent_block_hash": parent,
+                 "token_ids": token_ids, "block_size": 16}
+        await subscriber._process_message(msgspec.msgpack.encode([1.0, [event], None]), "pod-1", "qwen")
+
+    # Newer vLLM sends full byte digests. Zero is also a valid engine hash.
+    b0, b1, b2 = (n.to_bytes(32, "big") for n in (111, 0, 333))
+    await store([b0, b1], list(range(32)))
+    _queued(stream)
+    await store([b2], list(range(32, 48)), b1 if known_parent else b"missing")
+
+    if known_parent:
+        assert manager.hash_mapping[333] == GOLDEN_HASHES[2]
+        (message,) = _queued(stream)
+        assert message["events"][0]["block_hashes"] == [GOLDEN_HASHES[2]]
+    else:
+        assert 333 not in manager.hash_mapping
+        assert _queued(stream) == []
+        assert set(manager._blocks["qwen"]) == set(GOLDEN_HASHES[:2])
+        assert "unknown parent" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_add_blocks_streams_standardized_hashes_to_all_routers():
     manager = MemoryKVCacheManager()
     streams = [manager.open_stream("router-a"), manager.open_stream("router-b")]
 
     token_ids = list(range(32))  # 2 blocks of 16
-    expected_std = [
-        compute_standardized_hash(token_ids[0:16]),
-        compute_standardized_hash(token_ids[16:32]),
-    ]
+    expected_std = GOLDEN_HASHES[:2]
 
     ok = await manager.add_blocks("qwen", [111, 222], "pod-1.default", token_ids)
     assert ok
@@ -97,15 +146,15 @@ async def test_remove_blocks_uses_engine_hash_mapping():
 
 @pytest.mark.asyncio
 async def test_shared_std_hash_survives_until_last_engine_hash_removed():
-    """Blocks with identical token content but different prefixes have
-    distinct engine hashes mapping to one standardized hash; the standardized
-    hash must only be removed with its last engine-hash reference."""
+    """Two engine hashes for the same prefix (e.g. different LoRA adapters)
+    must retain ownership until the last engine-hash reference is removed."""
     manager = MemoryKVCacheManager()
     stream = manager.open_stream("router-a")
-    token_ids = list(range(16)) * 2  # both blocks share the same content
-    std_hash = compute_standardized_hash(list(range(16)))
+    token_ids = list(range(16))
+    std_hash = compute_standardized_hash(token_ids)
 
-    await manager.add_blocks("qwen", [111, 222], "pod-1.default", token_ids)
+    await manager.add_blocks("qwen", [111], "pod-1.default", token_ids)
+    await manager.add_blocks("qwen", [222], "pod-1.default", token_ids)
     _queued(stream)
 
     # Removing one reference keeps the block indexed and streams nothing.
@@ -169,7 +218,7 @@ async def test_stream_starts_with_full_block_set(monkeypatch):
         assert event["timestamps"] == [stored[h] for h in event["block_hashes"]]
         blocks.setdefault(message["model_name"], []).extend(event["block_hashes"])
     assert blocks == {
-        "qwen": [compute_standardized_hash(token_ids[i:i + 16]) for i in (0, 16, 32)],
+        "qwen": GOLDEN_HASHES[:3],
         "llama": [compute_standardized_hash(list(range(16)))],
     }
     assert messages[3]["model_name"] == "qwen"
