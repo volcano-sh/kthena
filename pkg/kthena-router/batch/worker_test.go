@@ -101,9 +101,9 @@ type countedClaims struct {
 	claims atomic.Int32
 }
 
-func (s *countedClaims) Claim(ctx context.Context, holder string) (*Lease, error) {
+func (s *countedClaims) Claim(ctx context.Context, holder, fence string) (*Lease, error) {
 	s.claims.Add(1)
-	return s.Store.Claim(ctx, holder)
+	return s.Store.Claim(ctx, holder, fence)
 }
 
 func TestWorkerWaitsUntilTheStorageIsReady(t *testing.T) {
@@ -271,4 +271,38 @@ func TestAServiceWithoutADispatcherRunsNoBatches(t *testing.T) {
 	require.Eventually(t, func() bool { return checks.Load() >= 3 }, eventually, time.Millisecond)
 	assert.Zero(t, counted.claims.Load())
 	assert.Equal(t, StatusValidating, statusOf(t, store, id))
+}
+
+// lostClaimReply runs the first claim and then loses its answer, and remembers every fence it is given.
+type lostClaimReply struct {
+	Store
+	mu     sync.Mutex
+	fences []string
+}
+
+func (s *lostClaimReply) Claim(ctx context.Context, holder, fence string) (*Lease, error) {
+	s.mu.Lock()
+	s.fences = append(s.fences, fence)
+	first := len(s.fences) == 1
+	s.mu.Unlock()
+	lease, err := s.Store.Claim(ctx, holder, fence)
+	if first {
+		return nil, errors.New("i/o timeout")
+	}
+	return lease, err
+}
+
+func TestARunnerKeepsItsFenceAfterAClaimWithoutAnAnswer(t *testing.T) {
+	_, store := newTestStore(t)
+	files, _ := newTestFileStore(t)
+	id := queueBatch(t, store, files, "1", chat("a"))
+	lost := &lostClaimReply{Store: store}
+	service := newWorkerService(lost, files, &fakeModel{}, "pod-a")
+	service.worker.runners = 1
+	startService(t, service)
+
+	require.Eventually(t, func() bool { return statusOf(t, store, id) == StatusCompleted }, eventually, 5*time.Millisecond, "the batch the lost answer took still runs")
+	lost.mu.Lock()
+	defer lost.mu.Unlock()
+	assert.Equal(t, lost.fences[0], lost.fences[1], "the retry asks with the same fence")
 }

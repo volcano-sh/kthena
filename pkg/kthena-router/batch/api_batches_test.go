@@ -269,3 +269,24 @@ func TestCreateBatchOverHTTP2(t *testing.T) {
 	assert.Equal(t, 2, resp.ProtoMajor)
 	assert.Equal(t, http.StatusOK, resp.StatusCode, string(body))
 }
+
+// lostCreateReply stores the batch and then loses the answer.
+type lostCreateReply struct{ Store }
+
+func (s lostCreateReply) CreateJob(ctx context.Context, job *Job) error {
+	if err := s.Store.CreateJob(ctx, job); err != nil {
+		return err
+	}
+	return errors.New("i/o timeout")
+}
+
+func TestACreateWhoseAnswerWasLostStillAnswersTheBatch(t *testing.T) {
+	api := newTestAPI(t)
+	input := mustUpload(t, api, "alice", chatLine)
+	api.service.store = lostCreateReply{api.store}
+	rec := api.call(t, "alice", createRequest(createBody(input)))
+	require.Equal(t, http.StatusOK, rec.Code, "the batch is there, so the client must not create it again: %s", rec.Body.String())
+	members, err := api.mini.ZMembers(api.store.queueKey())
+	require.NoError(t, err)
+	assert.Equal(t, []string{decode(t, rec)["id"].(string)}, members)
+}

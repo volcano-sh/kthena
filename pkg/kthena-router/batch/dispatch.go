@@ -88,11 +88,12 @@ func (d *HandlerDispatcher) Dispatch(ctx context.Context, request *Request) (res
 	req.Host = request.Origin.Host
 	writer := &lineWriter{header: http.Header{}, limit: d.maxResponse, done: lineCtx.Done()}
 	d.handler.ServeHTTP(writer, req)
-	switch {
-	case writer.overflow:
+	// gin writes a 200 header on its own, so an answer cut off by the line's end can look like a success.
+	if err := lineCtx.Err(); err != nil {
+		return &Response{Err: err}
+	}
+	if writer.overflow {
 		return &Response{StatusCode: writer.code(), Err: ErrResponseTooLarge}
-	case writer.status == 0 && lineCtx.Err() != nil:
-		return &Response{Err: lineCtx.Err()}
 	}
 	return &Response{StatusCode: writer.code(), Body: writer.body.Bytes()}
 }

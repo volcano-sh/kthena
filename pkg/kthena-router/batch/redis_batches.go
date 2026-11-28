@@ -42,13 +42,17 @@ func (s *RedisStore) jobKey(id string) string        { return s.prefix + "job:" 
 func (s *RedisStore) queueKey() string               { return s.prefix + "queue" }
 func (s *RedisStore) claimedKey(fence string) string { return s.prefix + "claimed:" + fence }
 
-// Claim takes the oldest queued batch; the fence travels with the script, so a retried claim returns the same batch.
-func (s *RedisStore) Claim(ctx context.Context, holder string) (*Lease, error) {
+// newFence makes the random token of one claim, so a fence is never handed out twice.
+func newFence() string {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
-		return nil, err
+		panic("batch: cannot read randomness: " + err.Error())
 	}
-	fence := hex.EncodeToString(buf)
+	return hex.EncodeToString(buf)
+}
+
+// Claim takes the oldest queued batch; a call with the same fence, also a retry, returns the batch that fence already took.
+func (s *RedisStore) Claim(ctx context.Context, holder, fence string) (*Lease, error) {
 	id, err := claimJobScript.Run(ctx, s.client, []string{s.queueKey(), s.claimedKey(fence)}, s.prefix, holder, fence, claimScan).Text()
 	if errors.Is(err, redis.Nil) {
 		return nil, nil
@@ -75,7 +79,12 @@ func (s *RedisStore) Transition(ctx context.Context, lease *Lease, from, to Stat
 	if to.terminal() {
 		release = "1"
 	}
-	args := []any{lease.Fence, string(from), string(to), to.stampField(), release, lease.JobID}
+	stamps := to.stampField()
+	// A run that publishes straight from in_progress finalizes in the same step.
+	if from == StatusInProgress && to.terminal() {
+		stamps = StatusFinalizing.stampField() + "," + stamps
+	}
+	args := []any{lease.Fence, string(from), string(to), stamps, release, lease.JobID}
 	for name, value := range fields {
 		args = append(args, name, value)
 	}

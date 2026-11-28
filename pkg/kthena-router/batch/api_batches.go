@@ -17,6 +17,7 @@ limitations under the License.
 package batch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -87,7 +88,7 @@ func (s *Service) createBatch(c *gin.Context) {
 		CreatedAt:        now.Unix(),
 		ExpiresAt:        now.Add(batchWindow).Unix(),
 	}
-	err := s.store.CreateJob(c.Request.Context(), job)
+	err := s.createJob(c.Request.Context(), job)
 	switch {
 	case errors.Is(err, ErrNoInputFile):
 		fail(c, http.StatusBadRequest, errInvalidRequest, "input_file_id", "no such file: "+request.InputFileID)
@@ -98,6 +99,20 @@ func (s *Service) createBatch(c *gin.Context) {
 	default:
 		c.JSON(http.StatusOK, batchObject(job))
 	}
+}
+
+// createJob records the batch; a write whose answer was lost is looked up, so a retry by the client does not run it twice.
+func (s *Service) createJob(ctx context.Context, job *Job) error {
+	err := s.store.CreateJob(ctx, job)
+	if err == nil || errors.Is(err, ErrNoInputFile) || errors.Is(err, ErrNotBatchFile) {
+		return err
+	}
+	settle, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	defer cancel()
+	if stored, lookupErr := s.store.GetJob(settle, job.ID); lookupErr == nil && stored.Tenant == job.Tenant {
+		return nil
+	}
+	return err
 }
 
 // readCreateRequest decodes exactly one JSON object with known parameters, and says what is wrong otherwise.

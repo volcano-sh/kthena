@@ -192,7 +192,7 @@ func TestClaimTakesTheOldestQueuedBatch(t *testing.T) {
 	queueJob(t, store, "batch_old", 1000)
 	mini.SetTime(time.Unix(3000, 0))
 
-	lease, err := store.Claim(ctx, "pod-a")
+	lease, err := store.Claim(ctx, "pod-a", newFence())
 	require.NoError(t, err)
 	require.NotNil(t, lease)
 	assert.Equal(t, "batch_old", lease.JobID)
@@ -212,7 +212,7 @@ func TestClaimTakesTheOldestQueuedBatch(t *testing.T) {
 
 func TestClaimWithNothingQueued(t *testing.T) {
 	_, store := newTestStore(t)
-	lease, err := store.Claim(context.Background(), "pod-a")
+	lease, err := store.Claim(context.Background(), "pod-a", newFence())
 	require.NoError(t, err)
 	assert.Nil(t, lease)
 }
@@ -221,10 +221,10 @@ func TestTwoClaimsNeverTakeTheSameBatch(t *testing.T) {
 	_, store := newTestStore(t)
 	ctx := context.Background()
 	queueJob(t, store, "batch_1", 1000)
-	first, err := store.Claim(ctx, "pod-a")
+	first, err := store.Claim(ctx, "pod-a", newFence())
 	require.NoError(t, err)
 	require.NotNil(t, first)
-	second, err := store.Claim(ctx, "pod-b")
+	second, err := store.Claim(ctx, "pod-b", newFence())
 	require.NoError(t, err)
 	assert.Nil(t, second, "one batch has one owner")
 }
@@ -238,7 +238,7 @@ func TestClaimSkipsBatchesThatCannotRun(t *testing.T) {
 	require.NoError(t, err)
 	queueJob(t, store, "batch_next", 2000)
 
-	lease, err := store.Claim(ctx, "pod-a")
+	lease, err := store.Claim(ctx, "pod-a", newFence())
 	require.NoError(t, err)
 	require.NotNil(t, lease)
 	assert.Equal(t, "batch_next", lease.JobID)
@@ -267,7 +267,7 @@ func TestProgressIsWrittenOnlyByTheOwner(t *testing.T) {
 	_, store := newTestStore(t)
 	ctx := context.Background()
 	queueJob(t, store, "batch_1", 1000)
-	lease, err := store.Claim(ctx, "pod-a")
+	lease, err := store.Claim(ctx, "pod-a", newFence())
 	require.NoError(t, err)
 
 	require.NoError(t, store.Progress(ctx, lease, 10, 4, 1))
@@ -284,7 +284,7 @@ func TestTransitionMovesOnlyTheOwnersBatchOnward(t *testing.T) {
 	mini, store := newTestStore(t)
 	ctx := context.Background()
 	queueJob(t, store, "batch_1", 1000)
-	lease, err := store.Claim(ctx, "pod-a")
+	lease, err := store.Claim(ctx, "pod-a", newFence())
 	require.NoError(t, err)
 	job, err := store.GetJob(ctx, "batch_1")
 	require.NoError(t, err)
@@ -315,7 +315,7 @@ func TestReleaseHandsTheBatchBackAtItsPlace(t *testing.T) {
 	mini, store := newTestStore(t)
 	ctx := context.Background()
 	queueJob(t, store, "batch_1", 1000)
-	lease, err := store.Claim(ctx, "pod-a")
+	lease, err := store.Claim(ctx, "pod-a", newFence())
 	require.NoError(t, err)
 
 	require.NoError(t, store.Release(ctx, lease))
@@ -329,7 +329,7 @@ func TestReleaseHandsTheBatchBackAtItsPlace(t *testing.T) {
 	assert.Empty(t, job.Fence)
 	assert.ErrorIs(t, store.Progress(ctx, lease, 1, 1, 0), ErrNotOwner, "the old run can no longer write")
 
-	next, err := store.Claim(ctx, "pod-b")
+	next, err := store.Claim(ctx, "pod-b", newFence())
 	require.NoError(t, err)
 	require.NotNil(t, next)
 	assert.Equal(t, "batch_1", next.JobID)
@@ -340,7 +340,7 @@ func TestReleaseLeavesAFinishingBatchAlone(t *testing.T) {
 	mini, store := newTestStore(t)
 	ctx := context.Background()
 	queueJob(t, store, "batch_1", 1000)
-	lease, err := store.Claim(ctx, "pod-a")
+	lease, err := store.Claim(ctx, "pod-a", newFence())
 	require.NoError(t, err)
 	require.NoError(t, store.Transition(ctx, lease, StatusInProgress, StatusFinalizing, nil))
 

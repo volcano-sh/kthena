@@ -28,7 +28,20 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"k8s.io/klog/v2"
 )
+
+// byteOrderMark may start a UTF-8 file; it is not part of the first line.
+const byteOrderMark = "\xEF\xBB\xBF"
+
+// boms is the room a byte order mark takes on the first line.
+func boms(first bool) int {
+	if first {
+		return len(byteOrderMark)
+	}
+	return 0
+}
 
 const (
 	defaultConcurrency  = 8
@@ -155,9 +168,13 @@ func (e *executor) answer(ctx context.Context, lease *Lease, job *Job, total int
 		}
 		since++
 		if since >= e.progressEvery || e.now().Sub(last) >= progressAfter {
-			if failure = e.store.Progress(ctx, lease, total, out.completed, out.failed); failure != nil {
+			if err := e.store.Progress(ctx, lease, total, out.completed, out.failed); errors.Is(err, ErrNotOwner) {
+				failure = err
 				stop()
 				continue
+			} else if err != nil {
+				// The counts are only for the client to watch; publishing writes the final ones.
+				klog.Errorf("batch: cannot update the counts of %s: %v", job.ID, err)
 			}
 			since, last = 0, e.now()
 		}
@@ -250,6 +267,8 @@ func (e *executor) line(ctx context.Context, job *Job, raw []byte, tooLong bool)
 		result.Error = &lineError{Code: "response_too_large", Message: "the response is larger than a batch line may keep"}
 	case response.Err != nil:
 		result.Error = &lineError{Code: "request_failed", Message: response.Err.Error()}
+	case response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices && !json.Valid(response.Body):
+		result.Error = &lineError{Code: "invalid_response", Message: "the answer is cut off or is not JSON"}
 	default:
 		result.Response = &lineResponse{StatusCode: response.StatusCode, RequestID: result.ID, Body: jsonOrString(response.Body)}
 		return encodeResult(result, response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices)
@@ -328,7 +347,8 @@ func (l *lineReader) next() ([]byte, bool, error) {
 			var chunk []byte
 			chunk, err = l.r.ReadSlice('\n')
 			if !tooLong {
-				if int64(len(line)+len(chunk)) > l.max+2 {
+				// Room for the line break, and on the first line for a byte order mark, which are trimmed below.
+				if int64(len(line)+len(chunk)) > l.max+2+int64(boms(l.first)) {
 					tooLong, line = true, nil
 				} else {
 					line = append(line, chunk...)
@@ -343,7 +363,7 @@ func (l *lineReader) next() ([]byte, bool, error) {
 		}
 		if l.first {
 			l.first = false
-			line = bytes.TrimPrefix(line, []byte("\xEF\xBB\xBF"))
+			line = bytes.TrimPrefix(line, []byte(byteOrderMark))
 		}
 		line = bytes.TrimRight(line, "\r\n")
 		if !tooLong && int64(len(line)) > l.max {
@@ -403,40 +423,89 @@ func (r *results) abort() {
 	}
 }
 
-// publish makes the result files durable and records them, then moves the batch to completed in fenced steps.
+// resultPart is one result file of a run on its way to being published.
+type resultPart struct {
+	lines  int64
+	writer FileWriter
+	id     string
+	field  string
+	suffix string
+	size   int64
+}
+
+// publish makes the result files durable, records them, and moves the batch to completed in one fenced step.
 func (e *executor) publish(ctx context.Context, lease *Lease, job *Job, total int64, out *results) error {
 	// The answers are paid for, so a shutdown that starts now does not throw them away.
 	finish, cancel := context.WithTimeout(context.WithoutCancel(ctx), publishTimeout)
 	defer cancel()
 	fields := map[string]string{"total": strconv.FormatInt(total, 10), "completed": strconv.FormatInt(out.completed, 10), "failed": strconv.FormatInt(out.failed, 10)}
-	for _, part := range []struct {
-		lines  int64
-		writer FileWriter
-		id     string
-		field  string
-		suffix string
-	}{
-		{out.completed, out.output, out.outputID, "output_file_id", "output"},
-		{out.failed, out.errors, out.errorID, "error_file_id", "error"},
+	var parts []resultPart
+	for _, part := range []resultPart{
+		{lines: out.completed, writer: out.output, id: out.outputID, field: "output_file_id", suffix: "output"},
+		{lines: out.failed, writer: out.errors, id: out.errorID, field: "error_file_id", suffix: "error"},
 	} {
 		if part.lines == 0 {
 			part.writer.Abort()
 			continue
 		}
-		size, err := part.writer.Commit()
+		parts = append(parts, part)
+	}
+	// Every file is durable before any is recorded, so a failure here leaves nothing a client can list.
+	for i := range parts {
+		size, err := parts[i].writer.Commit()
 		if err != nil {
+			e.forget(finish, job, parts[:i], nil)
 			return err
 		}
+		parts[i].size = size
+	}
+	out.published = true
+	for i, part := range parts {
 		now := e.now()
-		record := &File{ID: part.id, Tenant: job.Tenant, Filename: job.ID + "_" + part.suffix + ".jsonl", Purpose: PurposeBatchOutput, Status: FileProcessed, Bytes: size, CreatedAt: now.Unix(), ExpiresAt: now.Add(resultExpiration).Unix()}
+		record := &File{ID: part.id, Tenant: job.Tenant, Filename: job.ID + "_" + part.suffix + ".jsonl", Purpose: PurposeBatchOutput, Status: FileProcessed, Bytes: part.size, CreatedAt: now.Unix(), ExpiresAt: now.Add(resultExpiration).Unix()}
 		if err := e.store.CreateFile(finish, record); err != nil {
+			e.forget(finish, job, parts[i+1:], parts[:i])
+			e.settle(finish, job, part, err)
 			return fmt.Errorf("batch: cannot record the %s file of %s: %w", part.suffix, job.ID, err)
 		}
 		fields[part.field] = part.id
 	}
-	out.published = true
-	if err := e.store.Transition(finish, lease, StatusInProgress, StatusFinalizing, nil); err != nil {
-		return err
+	err := e.store.Transition(finish, lease, StatusInProgress, StatusCompleted, fields)
+	if err == nil {
+		return nil
 	}
-	return e.store.Transition(finish, lease, StatusFinalizing, StatusCompleted, fields)
+	// The step may have landed with only its answer lost; a batch finished under this fence is published.
+	if current, getErr := e.store.GetJob(finish, job.ID); getErr == nil && current.Status == StatusCompleted && current.Fence == lease.Fence {
+		return nil
+	}
+	return err
+}
+
+// forget removes the result files of a run that is not published: no batch points at them yet.
+func (e *executor) forget(ctx context.Context, job *Job, unrecorded, recorded []resultPart) {
+	for _, part := range recorded {
+		if _, err := e.store.DeleteFile(ctx, part.id); err != nil {
+			klog.Errorf("batch: cannot take back the result file %s of %s: %v", part.id, job.ID, err)
+			continue
+		}
+		unrecorded = append(unrecorded, part)
+	}
+	for _, part := range unrecorded {
+		if err := e.files.Remove(ctx, job.Tenant, part.id); err != nil && !errors.Is(err, ErrNotFound) {
+			klog.Errorf("batch: removing the result bytes of %s: %v", part.id, err)
+		}
+	}
+}
+
+// settle handles a result record that failed to write: a sure refusal frees the bytes, and a record that may still land keeps them.
+func (e *executor) settle(ctx context.Context, job *Job, part resultPart, err error) {
+	if errors.Is(err, ErrRefused) {
+		e.forget(ctx, job, []resultPart{part}, nil)
+		return
+	}
+	if _, lookupErr := e.store.GetFile(ctx, part.id); lookupErr == nil {
+		e.forget(ctx, job, nil, []resultPart{part})
+		return
+	}
+	klog.Errorf("batch: the record of %s may still be written, so its bytes are kept: %v", part.id, err)
 }

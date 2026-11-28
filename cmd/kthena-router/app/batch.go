@@ -135,6 +135,6 @@ func waitForBatch(done <-chan struct{}, limit time.Duration) {
 	select {
 	case <-done:
 	case <-time.After(limit):
-		klog.Warningf("The batch worker did not stop within %v; its batches go back to the queue once the takeover runs", limit)
+		klog.Warningf("The batch worker did not stop within %v; a batch it was still running stays in_progress", limit)
 	}
 }

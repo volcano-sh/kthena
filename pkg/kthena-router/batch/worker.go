@@ -59,16 +59,26 @@ func (w *worker) run(ctx context.Context) {
 }
 
 func (w *worker) loop(ctx context.Context) {
+	fence := ""
 	for ctx.Err() == nil {
 		if !w.gate.ready.Load() {
 			w.wait(ctx)
 			continue
 		}
-		lease, err := w.store.Claim(ctx, w.holder)
-		if err != nil && ctx.Err() == nil {
-			klog.Errorf("batch: cannot claim a batch: %v", err)
+		// A claim without an answer may have taken a batch, so the next try keeps its fence and gets that batch back.
+		if fence == "" {
+			fence = newFence()
 		}
-		if err != nil || lease == nil {
+		lease, err := w.store.Claim(ctx, w.holder, fence)
+		if err != nil {
+			if ctx.Err() == nil {
+				klog.Errorf("batch: cannot claim a batch: %v", err)
+			}
+			w.wait(ctx)
+			continue
+		}
+		fence = ""
+		if lease == nil {
 			w.wait(ctx)
 			continue
 		}

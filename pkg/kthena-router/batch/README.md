@@ -30,7 +30,8 @@ later closes it again until a check passes.
    queued batch and stamps it with a new random fence; every later write of that run checks the fence.
 3. The run counts the lines, then sends them in order, eight at a time, through an in-process copy of
    the router's request handling. The batch's owner and listener travel in the Go context, never in a
-   header, so a line is routed, rate limited and logged like a request from its owner.
+   header, so a line is routed, rate limited and logged like a request from its owner. A line carries no session key,
+   so session stickiness does not apply to it, and it counts in the router's request metrics like any request.
 4. Answers go to a new output file and a new error file. When every line is answered, both files are
    made durable, recorded with purpose `batch_output`, and the batch moves to `completed`.
 5. On shutdown a run stops, throws its files away and hands the batch back to the queue at its old

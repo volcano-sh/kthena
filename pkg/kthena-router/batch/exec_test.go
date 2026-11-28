@@ -89,7 +89,7 @@ func (f *runFixture) claimBatch(t *testing.T, input string) (*Job, *Lease) {
 	job := newJob("batch_1", tenant, "file-input")
 	job.Origin = Origin{Host: "api.example.com", Gateway: "default/gw", Listener: "http", Port: 80}
 	require.NoError(t, f.store.CreateJob(ctx, job))
-	lease, err := f.store.Claim(ctx, "pod-a")
+	lease, err := f.store.Claim(ctx, "pod-a", newFence())
 	require.NoError(t, err)
 	require.NotNil(t, lease)
 	return job, lease
@@ -433,4 +433,195 @@ func TestAShutdownWhilePublishingStillFinishesTheBatch(t *testing.T) {
 	done := f.job(t)
 	assert.Equal(t, StatusCompleted, done.Status, "answers that are already paid for are published, not thrown away")
 	assert.Len(t, f.resultLines(t, done.OutputFileID), 1)
+}
+
+// stepStore counts transitions and can fail the final one, after or instead of running it.
+type stepStore struct {
+	Store
+	steps        atomic.Int32
+	failFinal    bool
+	landThenFail bool
+}
+
+func (s *stepStore) Transition(ctx context.Context, lease *Lease, from, to Status, fields map[string]string) error {
+	s.steps.Add(1)
+	if to == StatusCompleted && s.landThenFail {
+		_ = s.Store.Transition(ctx, lease, from, to, fields)
+		return errors.New("i/o timeout")
+	}
+	if to == StatusCompleted && s.failFinal {
+		return errors.New("i/o timeout")
+	}
+	return s.Store.Transition(ctx, lease, from, to, fields)
+}
+
+func TestPublishFinishesTheBatchInOneStep(t *testing.T) {
+	f := newRunFixture(t)
+	steps := &stepStore{Store: f.store}
+	f.exec.store = steps
+	_, lease := f.claimBatch(t, chat("a"))
+	require.NoError(t, f.exec.run(context.Background(), lease))
+	done := f.job(t)
+	assert.Equal(t, StatusCompleted, done.Status)
+	assert.Equal(t, int32(1), steps.steps.Load(), "no status in between that nothing could finish")
+	assert.Equal(t, done.CompletedAt, done.FinalizingAt)
+}
+
+func TestAPublishWhoseLastStepFailsCanBeHandedBack(t *testing.T) {
+	f := newRunFixture(t)
+	f.exec.store = &stepStore{Store: f.store, failFinal: true}
+	_, lease := f.claimBatch(t, chat("a"))
+	require.Error(t, f.exec.run(context.Background(), lease))
+	assert.Equal(t, StatusInProgress, f.job(t).Status)
+	assert.NoError(t, f.store.Release(context.Background(), lease), "the worker can hand it back")
+}
+
+func TestAFinalStepWhoseAnswerWasLostStillCounts(t *testing.T) {
+	f := newRunFixture(t)
+	f.exec.store = &stepStore{Store: f.store, landThenFail: true}
+	_, lease := f.claimBatch(t, chat("a"))
+	require.NoError(t, f.exec.run(context.Background(), lease), "a batch finished under this fence is published")
+	assert.Equal(t, StatusCompleted, f.job(t).Status)
+}
+
+func TestRunFailsALineWhoseAnswerIsNotJSON(t *testing.T) {
+	f := newRunFixture(t)
+	f.model.answer = func(context.Context, *Request) *Response {
+		return &Response{StatusCode: http.StatusOK, Body: []byte(`{"id":"chatcmpl-1","choi`)}
+	}
+	_, lease := f.claimBatch(t, chat("a"))
+	require.NoError(t, f.exec.run(context.Background(), lease))
+	done := f.job(t)
+	assert.Equal(t, []int64{1, 0, 1}, []int64{done.Total, done.Completed, done.Failed}, "a cut-off answer is not a success")
+	failed := f.resultLines(t, done.ErrorFileID)
+	require.Len(t, failed, 1)
+	assert.Equal(t, "invalid_response", failed[0]["error"].(map[string]any)["code"])
+}
+
+// flakyCounts fails every counts update after the first, which records the total.
+type flakyCounts struct {
+	Store
+	calls atomic.Int32
+}
+
+func (s *flakyCounts) Progress(ctx context.Context, lease *Lease, total, completed, failed int64) error {
+	if s.calls.Add(1) > 1 {
+		return errors.New("i/o timeout")
+	}
+	return s.Store.Progress(ctx, lease, total, completed, failed)
+}
+
+func TestRunKeepsGoingWhenTheCountsCannotBeWritten(t *testing.T) {
+	f := newRunFixture(t)
+	counts := &flakyCounts{Store: f.store}
+	f.exec.store = counts
+	f.exec.progressEvery = 1
+	_, lease := f.claimBatch(t, chat("a")+chat("b")+chat("c"))
+	require.NoError(t, f.exec.run(context.Background(), lease))
+	assert.Greater(t, counts.calls.Load(), int32(1), "the counts were tried while running")
+	done := f.job(t)
+	assert.Equal(t, StatusCompleted, done.Status, "the answers are kept and published")
+	assert.Equal(t, int64(3), done.Completed, "publishing writes the final counts")
+}
+
+// refusedRecords lets the first result record through and answers the second with err, writing nothing.
+type refusedRecords struct {
+	Store
+	calls atomic.Int32
+	err   error
+}
+
+func (s *refusedRecords) CreateFile(ctx context.Context, file *File) error {
+	if file.Purpose == PurposeBatchOutput && s.calls.Add(1) == 2 {
+		return s.err
+	}
+	return s.Store.CreateFile(ctx, file)
+}
+
+func (f *runFixture) listedResults(t *testing.T) []string {
+	t.Helper()
+	files, _, err := f.store.ListFiles(context.Background(), FileQuery{Tenant: tenantID("", "alice"), Purpose: PurposeBatchOutput, Limit: 10})
+	require.NoError(t, err)
+	return idsOf(files)
+}
+
+func (f *runFixture) storedBytes(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(f.root, tenantID("", "alice")))
+	require.NoError(t, err)
+	return len(entries)
+}
+
+func TestAFailedPublishLeavesNothingListed(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		bytesLeft  int
+		becauseMsg string
+	}{
+		{"a refused record", fmt.Errorf("%w: OOM command not allowed", ErrRefused), 1, "only the input is left"},
+		{"a record that may still land", errors.New("i/o timeout"), 2, "the bytes a late record could point at are kept"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRunFixture(t)
+			f.exec.store = &refusedRecords{Store: f.store, err: tc.err}
+			f.model.answer = func(_ context.Context, request *Request) *Response {
+				if strings.Contains(string(request.Body), `"bad"`) {
+					return &Response{StatusCode: http.StatusBadRequest, Body: []byte(`{}`)}
+				}
+				return &Response{StatusCode: http.StatusOK, Body: []byte(`{}`)}
+			}
+			_, lease := f.claimBatch(t, chat("ok")+chat("bad"))
+			require.Error(t, f.exec.run(context.Background(), lease))
+			assert.Empty(t, f.listedResults(t), "no result file a client can list")
+			assert.Equal(t, tc.bytesLeft, f.storedBytes(t), tc.becauseMsg)
+			assert.Equal(t, StatusInProgress, f.job(t).Status)
+		})
+	}
+}
+
+// secondCommitFails makes the second result file of a run fail to commit.
+type secondCommitFails struct {
+	FileStore
+	writers atomic.Int32
+}
+
+type failingCommit struct{ FileWriter }
+
+func (w failingCommit) Commit() (int64, error) {
+	w.FileWriter.Abort()
+	return 0, errors.New("no space left on device")
+}
+
+func (v *secondCommitFails) NewWriter(ctx context.Context, tenant, id string) (FileWriter, error) {
+	writer, err := v.FileStore.NewWriter(ctx, tenant, id)
+	if err == nil && v.writers.Add(1) == 2 {
+		return failingCommit{writer}, nil
+	}
+	return writer, err
+}
+
+func TestAFailedCommitRemovesTheOtherResultFile(t *testing.T) {
+	f := newRunFixture(t)
+	f.exec.files = &secondCommitFails{FileStore: f.files}
+	f.model.answer = func(_ context.Context, request *Request) *Response {
+		if strings.Contains(string(request.Body), `"bad"`) {
+			return &Response{StatusCode: http.StatusBadRequest, Body: []byte(`{}`)}
+		}
+		return &Response{StatusCode: http.StatusOK, Body: []byte(`{}`)}
+	}
+	_, lease := f.claimBatch(t, chat("ok")+chat("bad"))
+	require.Error(t, f.exec.run(context.Background(), lease))
+	assert.Empty(t, f.listedResults(t))
+	assert.Equal(t, 1, f.storedBytes(t), "the output file already committed is removed too")
+}
+
+func TestRunAcceptsAByteOrderMarkBeforeAFirstLineAtTheLimit(t *testing.T) {
+	f := newRunFixture(t)
+	line := strings.TrimSuffix(chat("edge"), "\n")
+	f.exec.maxLine = int64(len(line))
+	_, lease := f.claimBatch(t, "\xEF\xBB\xBF"+line+"\n"+line+"\n")
+	require.NoError(t, f.exec.run(context.Background(), lease))
+	assert.Equal(t, int64(2), f.job(t).Completed, "the mark does not count toward the first line")
 }

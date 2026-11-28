@@ -131,3 +131,13 @@ func TestTheBatchAPIRefusesABatchLine(t *testing.T) {
 	}
 	assert.False(t, api.mini.Exists(api.store.queueKey()))
 }
+
+func TestDispatchOfAnAnswerCutOffByTheTimeoutIsAnError(t *testing.T) {
+	dispatcher := NewHandlerDispatcher(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-1","choi`)
+		<-r.Context().Done()
+	}))
+	dispatcher.lineTimeout = 20 * time.Millisecond
+	response := dispatcher.Dispatch(context.Background(), lineRequest())
+	assert.ErrorIs(t, response.Err, context.DeadlineExceeded, "a 200 that was written before the end is not an answer")
+}
